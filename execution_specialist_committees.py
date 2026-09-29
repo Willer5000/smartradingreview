@@ -99,8 +99,8 @@ def _activity_ratio_score(ratio: float) -> float:
 
 def build_execution_context(*, structure=None, volume=None, volatility=None,
                             market_hours=None, sentiment=None, macro_context=None,
-                            market_regime=None, symbol=None, timeframe=None,
-                            market_type=None) -> Dict[str, Any]:
+                            market_regime=None, market_maker_context=None,
+                            symbol=None, timeframe=None, market_type=None) -> Dict[str, Any]:
     """Observed execution context; calendar labels are tags, not fixed alpha.
 
     It deliberately uses only data already loaded in the current analysis.
@@ -110,6 +110,7 @@ def build_execution_context(*, structure=None, volume=None, volatility=None,
     structure, volume, volatility = _d(structure), _d(volume), _d(volatility)
     market_hours, sentiment = _d(market_hours), _d(sentiment)
     macro_context, market_regime = _d(macro_context), _d(market_regime)
+    market_maker_context = _d(market_maker_context)
     df = _d(structure.get("df"))
 
     highs, lows, vols = _seq(df, "high"), _seq(df, "low"), _seq(df, "volume")
@@ -165,6 +166,12 @@ def build_execution_context(*, structure=None, volume=None, volatility=None,
         "sentiment_value": round(sentiment_value, 2),
         "sentiment_bias": str(sentiment.get("sentiment_bias") or "neutral"),
         "market_regime": str(market_regime.get("regime") or market_regime.get("state") or "UNKNOWN"),
+        # 17.5.10: Black-Scholes/Greeks/GEX context is carried into the
+        # execution desk, but has zero production score authority until a
+        # point-in-time options replay validates it.  Workers can reason about
+        # gamma walls/delta-neutral levels without turning them into votes.
+        "market_maker_context": market_maker_context,
+        "market_maker_authority": str(market_maker_context.get("authority") or "UNAVAILABLE"),
     }
 
 
@@ -523,16 +530,13 @@ def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]],
 
 def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
                                   entry: float, stop_loss: float, atr: float) -> Dict[str, Any]:
-    """Hard semantic guard: a stop cannot sit inside a strong same-direction reaction zone.
+    """Reject only a *local, setup-relevant* reaction collision.
 
-    The rule is intentionally local-only and uses the same already-loaded structural
-    candidates as Entry.  It does not move the stop, invent a new ATR target or create
-    a trade.  It only identifies the contradiction "this is still a plausible reaction
-    zone for my thesis, therefore it is not yet a clean invalidation point".
-
-    A stop is considered clear when it is sufficiently beyond the reaction cluster on
-    the invalidation side.  The clearance radius scales with ATR and price so the rule
-    is not tied to one symbol or timeframe.
+    17.5.10 fixes the false-veto where any strong historical support/resistance
+    on the invalidation side could force the SL beyond a level dozens of ATR
+    away. A reaction level is relevant only when it belongs to the planned
+    invalidation corridor derived from Entry→SL risk geometry. This does not
+    widen/tighten SL, create direction or relax the strong-zone requirement.
     """
     direction = str(direction or "").lower()
     entry = _f(entry, 0.0)
@@ -545,12 +549,12 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
                 "source": "Entry", "distance_atr": 0.0}
 
     reaction_universe = _collect_entry_candidates(_execution_structure(_d(structure)), direction, entry)
+    risk_distance = abs(entry - stop_loss)
     best = None
     for lvl in reaction_universe:
         lp = _f(lvl.get("price"), 0.0)
         if lp <= 0:
             continue
-        # Only reaction anchors located on the actual invalidation side matter.
         if direction == "long" and lp >= entry:
             continue
         if direction == "short" and lp <= entry:
@@ -562,8 +566,18 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
         if not strong:
             continue
 
-        # A valid stop must be beyond, not on top of, the reaction cluster.
         clearance = max(atr * (0.12 + 0.02 * min(fams, 4)), abs(lp) * 0.0006)
+        stop_to_level = abs(stop_loss - lp)
+        entry_to_level = abs(entry - lp)
+
+        # Relevance comes from the setup's own planned risk corridor. A level
+        # far deeper than the current invalidation cannot veto this SL merely
+        # because it is on the same side of Entry.
+        local_stop_radius = max(risk_distance * 0.75, clearance * 2.0)
+        local_entry_depth = risk_distance + local_stop_radius
+        if stop_to_level > local_stop_radius or entry_to_level > local_entry_depth:
+            continue
+
         if direction == "long":
             inside = stop_loss >= (lp - clearance)
             signed_clearance = (lp - stop_loss) / max(atr, 1e-12)
@@ -573,7 +587,7 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
         if not inside:
             continue
 
-        distance_atr = abs(stop_loss - lp) / max(atr, 1e-12)
+        distance_atr = stop_to_level / max(atr, 1e-12)
         row = {
             "conflict": True,
             "reason": "SL_INSIDE_STRONG_REACTION_ZONE",
@@ -584,11 +598,12 @@ def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
             "distance_atr": round(distance_atr, 4),
             "required_clearance_atr": round(clearance / max(atr, 1e-12), 4),
             "signed_clearance_atr": round(signed_clearance, 4),
+            "setup_risk_distance_atr": round(risk_distance / max(atr, 1e-12), 4),
+            "local_relevance_radius_atr": round(local_stop_radius / max(atr, 1e-12), 4),
         }
         if best is None or row["distance_atr"] < best["distance_atr"]:
             best = row
     return best or {"conflict": False, "reason": "CLEAR_INVALIDATION"}
-
 
 def _strategy_family(setup_family: Any) -> str:
     text = str(setup_family or "").upper()

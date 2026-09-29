@@ -1,0 +1,54 @@
+PASS 01 - py_compile functional files
+PASS 02 - worker orchestration remains non-voting and now exposes MM math as a tool
+PASS 03 - MTF aliases intraday canonicalized
+PASS 04 - MTF daily/weekly labels preserved
+PASS 05 - MTF provider receives 4h while internal row remains 4H
+PASS 06 - x1-x3 and higher leverage preserve otherwise executable publication
+PASS 07 - leverage never raised to pass publication
+PASS 08 - legacy low-leverage-only rejection can be healed
+PASS 09 - Safety/TP/SL/RR rejection cannot be healed by leverage policy
+PASS 10 - distant 48 ATR structure no longer vetoes LONG/SHORT SL
+PASS 11 - near strong reaction still vetoes LONG/SHORT SL
+PASS 12 - SL guard only diagnoses and proposes no replacement stop
+PASS 13 - recovery geometry engine still present
+PASS 14 - Spot LONG maps to COMPRA_SPOT historical key
+PASS 15 - Futures selected family prior is neutral LIVE but visible SHADOW
+PASS 16 - Entry/TP historical boosts are shadow-only
+PASS 17 - selected historical priors cannot reorder LIVE Futures scanning
+PASS 18 - Multi 1h fair queue gives second high-quality candidate a turn
+PASS 19 - Multi remains sequential one-deep-analysis per scheduler tick
+PASS 20 - Multi resource cap defers rather than silently consuming candidate
+PASS 21 - Telegram transport failure remains FAILED_RETRYABLE
+PASS 22 - Telegram pending confirmation retries and reaches SENT
+PASS 23 - Telegram SENT outbox is deduplicated
+PASS 24 - stale Telegram event expires instead of backfilling
+PASS 25 - 17.5.10 does not ship futures_system threshold changes
+PASS 26 - no new daily signal quota introduced
+PASS 27 - worker evidence remains worker-product architecture
+PASS 28 - profitability qualifier recognizes frozen profitable 30m route
+PASS 29 - profitability qualifier rejects weak-volume incremental scope
+PASS 30 - qualified low-leverage signal is not blocked solely by leverage
+PASS 31 - profitability evidence is diagnostic and cannot re-veto an executable signal
+PASS 32 - Black-Scholes deltas have correct signs and gamma is positive
+PASS 33 - observed option chain produces finite gamma walls, 0DTE share and compact curves
+PASS 34 - GEX context cannot create direction or bypass Safety
+PASS 35 - no observed chain falls back to theoretical shadow only
+PASS 36 - Deribit summary parser extracts near-expiry OI/IV without ticker fanout
+PASS 37 - execution context carries market-maker math as worker tool
+PASS 38 - market-maker context has zero direct committee weight in 17.5.10
+PASS 39 - development cohort is positive after unresolved=-1R and modeled cost stress
+PASS 40 - chronological holdout is positive after same stress
+PASS 41 - combined stressed backtest is profitable
+PASS 42 - frontend adds conventional Black-Scholes/Gamma/Delta/0DTE indicator card
+PASS 43 - frontend indicator is display-only and hooks existing analysis payload
+PASS 44 - market_maker_frontend.js passes node syntax check
+PASS 45 - modified index.html parses as Jinja template
+PASS 46 - observed Deribit option chain is used only for directly matching BTC/ETH underlyings
+PASS 47 - altcoin does not receive false BTC strike/GEX projection
+PASS 48 - profitability backtest remains evidence, not a quantity/publication quota
+PASS 49 - leverage V6 baseline is frozen and expected to select technical maximum
+PASS 50 - IN-SAMPLE development is profitable under -1R unresolved + 0.118R cost stress
+PASS 51 - OUT-OF-SAMPLE chronological holdout is profitable under identical stress
+PASS 52 - backtest explicitly refuses a profitability guarantee and marks OOS as non-prospective
+PASS 53 - parameter-neighbourhood test is disclosed instead of hiding unstable neighbours
+QA_17_5_10_FINAL: 53/53 PASS

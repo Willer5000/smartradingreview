@@ -1,0 +1,25 @@
+{
+  "base_commit_17_5_9": "e8d5cd0c148cde9d8c9dfeed1ec2bdee3030148a",
+  "leverage_policy.py": {
+    "blob_sha": "9e85a7fc8628799e9590a8a1d0be990c8ef30486",
+    "expected_policy_version": "RC9_7_14_STANDARD_TECHNICAL_MAX_LEVERAGE_V6",
+    "selection_policy": "STANDARD_TECHNICAL_MAX_V6",
+    "modified_by_17_5_10": false
+  },
+  "futures_system.py": {
+    "blob_sha": "eb18b943778a09e5e598524431577ce7f9c236d3",
+    "modified_by_17_5_10": false
+  },
+  "static/script.js": {
+    "blob_sha": "01db6e24b7e03f9e8510ca8556f24ec12009d641",
+    "modified_by_17_5_10": false
+  },
+  "static/futures.js": {
+    "blob_sha": "ae81d884afa722ba339795aaaf092bea5561ef59",
+    "modified_by_17_5_10": false
+  },
+  "templates/index.html": {
+    "base_blob_sha": "dddf040fe35a31de6638a3aff7454cdac3b4845d",
+    "modified_by_17_5_10": true
+  }
+}

@@ -17644,6 +17644,44 @@ class TradingExpertSystem:
                         or 'UNSPECIFIED'
                     ).upper()
 
+                    # 17.5.10: market-maker mathematics is a tool for the
+                    # execution workers, not a vote.  With an observed option
+                    # chain it computes OI-weighted GEX/Delta-neutral context;
+                    # without one it provides a Black-Scholes theoretical
+                    # gamma shape in SHADOW only.  No score/gate is changed.
+                    try:
+                        from market_maker_math import build_market_maker_context as _build_mm_context
+                        _option_chain = (
+                            observations.get('option_chain')
+                            or (structure.get('option_chain') if isinstance(structure, dict) else None)
+                            or []
+                        )
+                        # If the analysis does not already carry a lawful chain,
+                        # crypto Futures may use a cached Deribit public summary.
+                        # This happens only after a directional execution candidate
+                        # exists, so bandwidth is bounded and failures are fail-open.
+                        if execution_market_type == 'futures' and not _option_chain:
+                            try:
+                                from options_market_context import get_crypto_option_chain
+                                _chain_snapshot = get_crypto_option_chain(symbol) or {}
+                                _option_chain = _chain_snapshot.get('rows') or []
+                            except Exception:
+                                _option_chain = []
+                        _mm_vol = 0.60
+                        try:
+                            _atr_pct = float((volatility or {}).get('atr_pct') or 0)
+                            if _atr_pct > 0:
+                                _mm_vol = max(0.15, min(1.80, (_atr_pct / 100.0) * (365.0 ** 0.5) * 2.0))
+                        except Exception:
+                            pass
+                        _market_maker_context = _build_mm_context(
+                            spot=float(current_price),
+                            option_chain=_option_chain if isinstance(_option_chain, (list, tuple)) else [],
+                            realized_or_implied_volatility=_mm_vol,
+                        ) or {}
+                    except Exception:
+                        _market_maker_context = {'authority': 'UNAVAILABLE_FAIL_OPEN', 'production_score_adjustment': 0.0}
+
                     execution_context = build_execution_context(
                         structure=structure,
                         volume=observed_volume,
@@ -17652,6 +17690,7 @@ class TradingExpertSystem:
                         sentiment=observed_sentiment,
                         macro_context=observed_macro,
                         market_regime=observed_regime,
+                        market_maker_context=_market_maker_context,
                         symbol=symbol,
                         timeframe=timeframe,
                         market_type=execution_market_type,
@@ -27404,6 +27443,22 @@ _OPERATIONAL_MTF_MINIMAL_CACHE = {}
 _OPERATIONAL_MTF_MINIMAL_LOCK = threading.Lock()
 _OPERATIONAL_MTF_MINIMAL_TTL = 300.0
 
+
+def _operational_mtf_provider_timeframe(target_tf):
+    """Normalize only the provider boundary; keep internal TF labels unchanged."""
+    raw = str(target_tf or '').strip()
+    aliases = {
+        '30M':'30m', '30MIN':'30m',
+        '1H':'1h', '60M':'1h',
+        '2H':'2h', '120M':'2h',
+        '4H':'4h', '240M':'4h',
+        '12H':'12h', '720M':'12h',
+        '1D':'1D', '1DAY':'1D', '1d':'1D',
+        '1W':'1W', '1WEEK':'1W', '1w':'1W',
+    }
+    return aliases.get(raw.upper(), raw)
+
+
 def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
     if analyzer is None:
         return None
@@ -27431,12 +27486,14 @@ def _get_operational_mtf_peer_minimal(analyzer, symbol, target_tf, system_type):
         if _derivative:
             if not callable(getattr(analyzer, '_prepare_closed_candle_analysis_data', None)):
                 return None
-            _ctx=analyzer._prepare_closed_candle_analysis_data(symbol,target_tf)
+            _provider_tf=_operational_mtf_provider_timeframe(target_tf)
+            _ctx=analyzer._prepare_closed_candle_analysis_data(symbol,_provider_tf)
             if not isinstance(_ctx,dict) or not _ctx.get('success'):
                 return None
             df=_ctx.get('closed_df')
         else:
-            df=analyzer.get_kucoin_data(symbol, target_tf)
+            _provider_tf=_operational_mtf_provider_timeframe(target_tf)
+            df=analyzer.get_kucoin_data(symbol, _provider_tf)
         if df is None or len(df)<80:
             return None
         if not _derivative:
@@ -34389,6 +34446,12 @@ _MULTI_DEEP_RETRY = {}
 _MULTI_CLOSE_REFRESHED = set()
 _MULTI_ROUTER_STATE_LOCK = threading.Lock()
 _MULTI_ROUTER_STATE = {'rows': [], 'next_scan_at': 0.0, 'last_scan_at': 0.0, 'interval_seconds': 900}
+# 17.5.10 — fair deep-analysis queue. Resource limits remain, but eligible
+# shortlisted cells are queued instead of being discarded by ranking order.
+_MULTI_PENDING_QUEUE = []
+_MULTI_PENDING_KEYS = set()
+_MULTI_PENDING_EXPIRED = 0
+_MULTI_PENDING_RESOURCE_DEFERRALS = 0
 
 def _get_multiasset_system():
     try:
@@ -34440,18 +34503,16 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
     }
 
 # ============================================================================
-# COMMIT 17.5.7 — BACKTEST-EVIDENCE PUBLICATION POLICY
+# COMMIT 17.5.10 — LEVERAGE / BACKTEST EVIDENCE GOVERNANCE
 # ============================================================================
-# Historical evidence (2026-08-21..2026-09-18) is NOT a version-matched replay
-# of 17.5.6.  It may therefore protect product/publication semantics, but it must
-# not silently retune Entry/SL/TP scores, Strategy Bank, Safety or leverage V6.
-#
-# One robust product-level finding is preserved here: low-leverage x1-x3
-# derivative signals were economically weak in the logged historical cohort and
-# the product objective explicitly rejects presenting x2/x3 as premium Futures.
-# The engine NEVER raises leverage to pass this gate.  Technical levels and the
-# leverage selected by V6 remain visible as ANALYSIS_ONLY.
-_BACKTEST_EVIDENCE_POLICY_VERSION = '17.5.7_BACKTEST_EVIDENCE_V1'
+# Historical signals available in Supabase end on 2026-09-18, before 17.5.9/
+# 17.5.10. They are useful for counterfactual diagnostics but are NOT a
+# version-matched replay.  Therefore leverage remains an output of V6/risk, not
+# an independent publication-quality threshold, and selected historical priors
+# are SHADOW-only until a prospective validation cohort exists.  Safety, TP/SL
+# quality, R/R, loss-at-SL and ATR-stress publication gates remain unchanged.
+_BACKTEST_EVIDENCE_POLICY_VERSION = '17.5.10_LEVERAGE_DIAGNOSTIC_V1'
+# Preferred-product reference only. It is NOT a publication minimum in 17.5.10.
 _DERIVATIVE_PREMIUM_MIN_LEVERAGE = 4
 
 
@@ -34492,16 +34553,12 @@ def _entry_evidence_class(levels):
 
 
 def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
-    """Evidence-informed, fail-safe publication layer for derivatives.
+    """17.5.10: leverage is a risk-engine output, never a standalone quality veto.
 
-    Scope is intentionally narrow:
-      * does not change direction, Entry, SL, TP, R/R, Safety or leverage;
-      * stamps a public-safe Entry evidence class for future cohort validation;
-      * keeps technically safe x1-x3 derivative setups as ANALYSIS_ONLY instead
-        of inflating leverage merely to make them look profitable/premium.
-
-    Spot is returned unchanged.  Multi-Asset receives the same derivative
-    leverage product-fit rule after its asset-specific strategy/macro hook.
+    The function name is kept for compatibility. It stamps diagnostics and also
+    heals a cached 17.5.7/17.5.9 result when LOW_LEVERAGE_PRODUCT_FIT was the
+    sole post-publication rejection. It never increases leverage or changes
+    Entry/SL/TP/Safety.
     """
     if not isinstance(result, dict):
         return result
@@ -34511,71 +34568,200 @@ def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
 
     out = dict(result)
     levels = dict(out.get('levels') or {})
-    decision = out.get('decision') or {}
-    action = str(
-        decision.get('action') if isinstance(decision, dict)
-        else decision
-    ).upper()
-
     levels['backtest_evidence_policy_version'] = _BACKTEST_EVIDENCE_POLICY_VERSION
     levels['entry_evidence_class'] = _entry_evidence_class(levels)
     levels['entry_evidence_probability_status'] = 'DIAGNOSTIC_NOT_CALIBRATED'
+    levels['derivative_preferred_leverage_reference'] = int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE)
+    # Compatibility fields remain public/diagnostic; neither is a veto.
     levels['derivative_premium_min_leverage'] = int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE)
 
     try:
         leverage = int(float(levels.get('leverage') or 0))
     except (TypeError, ValueError):
         leverage = 0
+    levels['leverage_in_preferred_product_band'] = bool(_derivative_premium_leverage_ok(leverage))
     levels['leverage_product_fit'] = bool(_derivative_premium_leverage_ok(leverage))
+    levels['leverage_validation_status'] = (
+        'PROSPECTIVE_VALIDATION_REQUIRED' if 0 < leverage < _DERIVATIVE_PREMIUM_MIN_LEVERAGE
+        else 'REFERENCE_BAND_OR_HIGHER'
+    )
+    levels['leverage_is_publication_gate'] = False
+    levels['low_leverage_product_fit_gate'] = False
 
-    publication = str(
-        levels.get('publication_status')
-        or out.get('publication_status')
-        or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
-    ).upper()
-
-    if (
-        action in ('LONG', 'SHORT')
-        and publication == 'EXECUTABLE_SIGNAL'
-        and leverage > 0
-        and not _derivative_premium_leverage_ok(leverage)
-    ):
-        reason = (
-            f'Apalancamiento técnico {leverage}x: válido como análisis, pero '
-            f'por debajo del perfil premium mínimo '
-            f'{_DERIVATIVE_PREMIUM_MIN_LEVERAGE}x. '
-            'No se aumenta el leverage ni se mueve Entry/SL/TP para aprobarlo.'
-        )
-        previous = str(levels.get('rejected_reason') or '').strip()
-        levels['rejected_reason'] = (previous + '; ' + reason).strip('; ') if previous else reason
-        levels['is_rejected'] = True
-        levels['is_executable'] = False
-        levels['publication_status'] = 'ANALYSIS_ONLY'
-        levels['low_leverage_product_fit_gate'] = True
-        out['is_executable'] = False
-        out['publication_status'] = 'ANALYSIS_ONLY'
-        out['publication_eligible'] = False
-        out['rejected_reason'] = levels['rejected_reason']
-
-        gate = dict(out.get('futures_publication_gate') or {})
-        reasons = list(gate.get('reasons') or [])
-        codes = list(gate.get('reason_codes') or [])
-        if reason not in reasons:
-            reasons.append(reason)
-        if 'LOW_LEVERAGE_PRODUCT_FIT' not in codes:
-            codes.append('LOW_LEVERAGE_PRODUCT_FIT')
-        gate.update({
-            'eligible': False,
-            'tier': 'ANALYSIS_ONLY',
-            'reasons': reasons,
-            'reason_codes': codes,
-            'backtest_evidence_policy_version': _BACKTEST_EVIDENCE_POLICY_VERSION,
-            'minimum_premium_leverage': int(_DERIVATIVE_PREMIUM_MIN_LEVERAGE),
-            'leverage_was_not_increased': True,
-        })
+    # Heal only the exact legacy gate that this compatibility layer itself used
+    # to add. A signal rejected by Safety/TP/SL/RR/etc. remains rejected.
+    gate = dict(out.get('futures_publication_gate') or {})
+    codes = [str(x) for x in list(gate.get('reason_codes') or [])]
+    legacy_only = bool(codes and set(codes) == {'LOW_LEVERAGE_PRODUCT_FIT'})
+    legacy_flag = bool(
+        gate.get('backtest_evidence_policy_version') == '17.5.7_BACKTEST_EVIDENCE_V1'
+        or levels.get('low_leverage_product_fit_gate')
+        or 'LOW_LEVERAGE_PRODUCT_FIT' in codes
+    )
+    publication = str(levels.get('publication_status') or out.get('publication_status') or '').upper()
+    if legacy_only and legacy_flag and publication == 'ANALYSIS_ONLY':
+        gate['eligible'] = True
+        gate['tier'] = 'PREMIUM'
+        gate['reason_codes'] = []
+        gate['reasons'] = []
+        gate['backtest_evidence_policy_version'] = _BACKTEST_EVIDENCE_POLICY_VERSION
+        gate['leverage_is_publication_gate'] = False
+        levels['is_rejected'] = False
+        levels['is_executable'] = True
+        levels['publication_status'] = 'EXECUTABLE_SIGNAL'
+        levels['legacy_low_leverage_gate_healed'] = True
+        levels.pop('rejected_reason', None)
+        out['is_executable'] = True
+        out['publication_status'] = 'EXECUTABLE_SIGNAL'
+        out['publication_eligible'] = True
+        out.pop('rejected_reason', None)
         out['futures_publication_gate'] = gate
-    else:
-        levels.setdefault('low_leverage_product_fit_gate', False)
+    elif gate:
+        gate['leverage_is_publication_gate'] = False
+        gate['backtest_evidence_policy_version'] = _BACKTEST_EVIDENCE_POLICY_VERSION
+        out['futures_publication_gate'] = gate
+
+    out['levels'] = levels
+    return out
+
+
+# ============================================================================
+# COMMIT 17.5.10 — PROFITABILITY QUALIFIER + MARKET-MAKER MATH CONTEXT
+# ============================================================================
+_PROFITABILITY_QUALIFIER_VERSION = '17.5.10_PROFITABILITY_QUALIFIED_V1'
+_MM_CONTEXT_VERSION = '17.5.10_MM_MATH_V1'
+
+
+def _estimate_mm_volatility(result):
+    """Conservative annualized-vol proxy for theoretical BS fallback only.
+
+    Observed option-chain IV takes precedence inside market_maker_math.  This
+    fallback never receives production authority; it merely gives the system a
+    mathematically coherent gamma-shape context when option OI/IV is absent.
+    """
+    try:
+        indicators = result.get('indicators') or result.get('indicators_snapshot') or {}
+        momentum = result.get('momentum') or {}
+        volatility = result.get('volatility') or {}
+        for key in ('annualized_volatility', 'realized_volatility', 'realized_vol'):
+            raw = volatility.get(key) if isinstance(volatility, dict) else None
+            if raw not in (None, ''):
+                v = float(raw)
+                return max(0.05, min(3.0, v / 100.0 if v > 3 else v))
+        atr_pct = float((indicators or {}).get('atr_pct') or (volatility or {}).get('atr_pct') or 0)
+        # ATR% is not an IV estimate.  Scale only for a SHADOW fallback and keep
+        # broad bounds so it cannot masquerade as an observed option surface.
+        if atr_pct > 0:
+            return max(0.15, min(1.80, (atr_pct / 100.0) * (365.0 ** 0.5) * 2.0))
+    except Exception:
+        pass
+    return 0.60
+
+
+def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
+    """Attach profitability evidence and Black-Scholes/GEX context.
+
+    Production rule for the FINAL 17.5.10:
+    - existing Safety/Publication remains authoritative;
+    - market-maker math cannot create direction or add score in this release;
+    - the profitability cohort is evidence/telemetry, NOT a new publication veto;
+    - scheduler/MTF/SL locality fixes restore intended coverage rather than create
+      a new strategy, therefore they must not be blocked merely because the exact
+      recovered path lacks a version-matched historical cohort.
+
+    This avoids two opposite errors at once: lowering Safety to fabricate signals,
+    and adding a new backtest gate that would make the repaired system timid again.
+    """
+    if not isinstance(result, dict):
+        return result
+    mk = str(market or '').strip().lower()
+    if mk not in ('futures', 'multiasset'):
+        return result
+    out = dict(result)
+    levels = dict(out.get('levels') or {})
+
+    # --- Market-maker / option math context (context-only in 17.5.10) ---
+    try:
+        from market_maker_math import build_market_maker_context
+        chain = (
+            out.get('option_chain')
+            or (out.get('context') or {}).get('option_chain')
+            or levels.get('option_chain')
+            or []
+        )
+        if mk == 'futures' and not chain:
+            try:
+                from options_market_context import get_crypto_option_chain
+                _chain_snapshot = get_crypto_option_chain(out.get('symbol')) or {}
+                chain = _chain_snapshot.get('rows') or []
+            except Exception:
+                chain = []
+        spot = float(out.get('live_price') or out.get('current_price') or levels.get('entry') or 0)
+        if spot > 0:
+            mm = build_market_maker_context(
+                spot=spot,
+                option_chain=chain if isinstance(chain, (list, tuple)) else [],
+                realized_or_implied_volatility=_estimate_mm_volatility(out),
+                as_of=(out.get('source_candle_close_timestamp') or out.get('source_candle_timestamp')),
+            ) or {}
+            levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
+            levels['market_maker_context'] = mm
+            levels['market_maker_gamma_regime'] = mm.get('gamma_regime')
+            levels['market_maker_zero_gamma_level'] = mm.get('zero_gamma_level')
+            levels['market_maker_delta_neutral_level'] = mm.get('delta_neutral_level')
+            levels['market_maker_call_wall'] = mm.get('call_wall')
+            levels['market_maker_put_wall'] = mm.get('put_wall')
+            levels['market_maker_0dte_gamma_share'] = mm.get('zero_dte_gamma_share')
+            levels['market_maker_context_authority'] = mm.get('authority')
+            levels['market_maker_observed_option_chain'] = bool(mm.get('observed_option_chain'))
+    except Exception as mm_error:
+        levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
+        levels['market_maker_context_authority'] = 'UNAVAILABLE_FAIL_OPEN'
+        levels['market_maker_context_error'] = type(mm_error).__name__
+
+    out['levels'] = levels
+
+    # --- Profitability evidence for diagnostics / ReviewTrader only ---
+    # This does NOT gate publication.  Backtest evidence is versioned and exposed
+    # so learning can compare LIVE vs SHADOW prospectively without creating a
+    # circular condition where only historically selected setups may be published.
+    try:
+        from profitability_qualification import qualify_result
+        qual = qualify_result(out, market=mk) or {}
+    except Exception as q_error:
+        qual = {
+            'version': _PROFITABILITY_QUALIFIER_VERSION,
+            'qualified': False,
+            'reason': type(q_error).__name__,
+            'authority': 'DIAGNOSTIC_ONLY_FAIL_OPEN',
+        }
+    levels = dict(out.get('levels') or {})
+    levels['profitability_qualification'] = qual
+    levels['profitability_qualification_version'] = qual.get('version') or _PROFITABILITY_QUALIFIER_VERSION
+    levels['profitability_qualified_30m_route'] = bool(qual.get('qualified'))
+    levels['profitability_qualification_is_publication_gate'] = False
+    levels['profitability_qualification_authority'] = 'DIAGNOSTIC_SHADOW_ONLY'
+
+    # Leverage quality separation: V6 already selects the highest leverage that
+    # survives its technical/security ceilings.  17.5.10 never raises leverage
+    # to make a signal publishable and never rejects a valid setup just for x1-x3.
+    try:
+        lev = int(float(levels.get('leverage') or 0))
+    except Exception:
+        lev = 0
+    risk_control = levels.get('risk_control') if isinstance(levels.get('risk_control'), dict) else {}
+    policy_version = str(risk_control.get('leverage_policy_version') or levels.get('leverage_policy_version') or '')
+    policy_mode = str(risk_control.get('leverage_policy_mode') or levels.get('leverage_policy_mode') or '')
+    levels['leverage_quality_independent'] = True
+    levels['leverage_never_forced_up_for_publication'] = True
+    levels['leverage_policy_expected_mode'] = 'STANDARD_TECHNICAL_MAX_V6'
+    levels['leverage_policy_observed_version'] = policy_version or None
+    levels['leverage_policy_observed_mode'] = policy_mode or None
+    if 0 < lev <= 3:
+        levels['low_leverage_interpretation'] = (
+            'Leverage bajo aceptable sólo cuando el motor V6 lo devuelve por sus '
+            'límites técnicos/seguridad; no se usa como objetivo ni como veto.'
+        )
 
     out['levels'] = levels
     return out
@@ -34584,16 +34770,15 @@ def _apply_17_5_7_backtest_evidence_policy(result, market='futures'):
 # ============================================================================
 # COMMIT 17.5.8 — PRELIMINARY FAMILY / ENTRY / SL / TP BACKTEST PRIOR
 # ============================================================================
-_BACKTEST_LEARNING_PRIOR_VERSION = '17.5.8_PRELIMINARY_BACKTEST_PRIOR_V1'
+_BACKTEST_LEARNING_PRIOR_VERSION = '17.5.10_BACKTEST_SHADOW_V1'
 
 
 def _apply_17_5_8_preliminary_learning_prior(result, market='futures'):
-    """Attach bounded historical priors without manufacturing a signal.
+    """Attach historical evidence as SHADOW diagnostics only.
 
-    The 17.5.7 publication policy is preserved first.  This layer then exposes
-    the family/Entry/SL/TP research evidence to ReviewTrader and the execution
-    committees.  It never changes direction, levels or leverage directly and it
-    cannot bypass MTF/Safety/publication.
+    The compatibility name is preserved.  17.5.10 exposes family/Entry/SL/TP
+    evidence to ReviewTrader/telemetry, while production adjustments are zero.
+    It never changes direction, levels, leverage or any Safety/publication gate.
     """
     out = _apply_17_5_7_backtest_evidence_policy(result, market)
     if not isinstance(out, dict):
@@ -34618,7 +34803,9 @@ def _apply_17_5_8_preliminary_learning_prior(result, market='futures'):
         levels['preliminary_backtest_prior'] = bundle
         family_prior = dict(bundle.get('family') or {})
         levels['preliminary_family_prior_available'] = bool(family_prior.get('available'))
-        levels['preliminary_family_prior_adjustment'] = float(family_prior.get('adjustment') or 0.0)
+        levels['preliminary_family_prior_adjustment'] = 0.0
+        levels['preliminary_family_prior_shadow_adjustment'] = float(family_prior.get('shadow_adjustment') or 0.0)
+        levels['preliminary_backtest_prior_authority'] = 'SHADOW_ONLY_UNTIL_INDEPENDENT_VALIDATION'
         levels['preliminary_backtest_probability_status'] = 'HISTORICAL_PRIOR_NOT_CALIBRATED_PROBABILITY'
         out['levels'] = levels
         out['preliminary_backtest_prior'] = bundle
@@ -34628,7 +34815,7 @@ def _apply_17_5_8_preliminary_learning_prior(result, market='futures'):
         # never hide a technically valid signal.
         out['backtest_learning_prior_version'] = _BACKTEST_LEARNING_PRIOR_VERSION
         out['preliminary_backtest_prior_error'] = type(prior_error).__name__
-    return out
+    return _apply_17_5_10_profitability_market_maker_context(out, market)
 
 
 def _multiasset_is_executable(result):
@@ -34868,8 +35055,68 @@ def _multiasset_scan(timeframe, *, force=False):
     return scan_opportunities(str(timeframe), force=bool(force)) or []
 
 
+def _multiasset_bucket(symbol, tf, now):
+    divisor = 1 if tf == '1h' else (4 if tf == '4h' else 24)
+    return f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // divisor}"
+
+
+def _multiasset_queue_ttl_seconds(tf):
+    # Mirrors the confirmation anti-backfill windows; no historical candidate is
+    # promoted after its opportunity window has gone stale.
+    return {'1h':45*60, '4h':2*60*60, '1D':6*60*60}.get(str(tf), 60*60)
+
+
+def _multiasset_enqueue_due(due, now):
+    now_ts = time.time()
+    with _MULTI_AUTO_LOCK:
+        for symbol, tf in due:
+            bucket = _multiasset_bucket(symbol, tf, now)
+            if bucket in _MULTI_AUTO_DONE or bucket in _MULTI_PENDING_KEYS:
+                continue
+            _MULTI_PENDING_QUEUE.append({
+                'bucket': bucket, 'symbol': symbol, 'timeframe': tf,
+                'enqueued_at': now_ts,
+                'expires_at': now_ts + _multiasset_queue_ttl_seconds(tf),
+            })
+            _MULTI_PENDING_KEYS.add(bucket)
+
+
+def _multiasset_prune_pending(now_ts=None):
+    global _MULTI_PENDING_EXPIRED
+    now_ts = float(now_ts or time.time())
+    with _MULTI_AUTO_LOCK:
+        kept = []
+        for item in _MULTI_PENDING_QUEUE:
+            bucket = str((item or {}).get('bucket') or '')
+            if bucket in _MULTI_AUTO_DONE:
+                _MULTI_PENDING_KEYS.discard(bucket)
+                continue
+            if now_ts > float((item or {}).get('expires_at') or 0.0):
+                _MULTI_PENDING_KEYS.discard(bucket)
+                _MULTI_PENDING_EXPIRED += 1
+                continue
+            kept.append(item)
+        _MULTI_PENDING_QUEUE[:] = kept
+
+
+def _multiasset_pop_completed_pending(bucket):
+    with _MULTI_AUTO_LOCK:
+        _MULTI_PENDING_KEYS.discard(str(bucket))
+        _MULTI_PENDING_QUEUE[:] = [x for x in _MULTI_PENDING_QUEUE if str((x or {}).get('bucket') or '') != str(bucket)]
+
+
+def _multiasset_queue_snapshot():
+    with _MULTI_AUTO_LOCK:
+        return {
+            'pending': len(_MULTI_PENDING_QUEUE),
+            'expired_before_analysis': int(_MULTI_PENDING_EXPIRED),
+            'resource_deferrals': int(_MULTI_PENDING_RESOURCE_DEFERRALS),
+        }
+
+
 def _multiasset_background_tick():
-    """17.5.1 close-aware Multi-Asset scheduler on the existing Futures loop.
+    global _MULTI_PENDING_RESOURCE_DEFERRALS
+    """17.5.10 fair close-aware Multi-Asset scheduler on the existing Futures loop.
 
     No new thread, LLM or scanner DB write. Trading thresholds are untouched.
     Each lane is shortlisted with its own CLOSED timeframe; transient failures
@@ -34918,35 +35165,47 @@ def _multiasset_background_tick():
 
         # 17.5.5: 1h is judged by its OWN closed 1h router, not by 4h.
         # The quality floor remains 82; this restores coverage without lowering
-        # the signal or deep-analysis gates. One fast candidate max per close.
+        # the signal or deep-analysis gates. All shortlisted candidates get a fair turn;
+        # the loop still executes only one deep analysis per scheduler tick.
         if plan['1h']['due']:
             force=not _multiasset_close_refresh_done(plan['1h']['key'])
             rows_1h=_multiasset_scan('1h',force=force)
             if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
             fast=[r for r in rows_1h if r.get('deep_candidate')
-                  and float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE][:1]
+                  and float(r.get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE]
             due[0:0]=[(r['symbol'],'1h') for r in fast]
 
         due=list(dict.fromkeys(due))
-        for symbol,tf in due:
-            with _MULTI_AUTO_LOCK:
-                if tf=='1D':
-                    if int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX:
-                        continue
-                else:
-                    if int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX:
-                        continue
-            bucket=f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // (1 if tf=='1h' else (4 if tf=='4h' else 24))}"
+        _multiasset_enqueue_due(due, now)
+        _multiasset_prune_pending(time.time())
+
+        # Fair FIFO: one deep cell per scheduler tick. Resource budgets defer a
+        # queued cell; they do not mark it analyzed or silently discard it.
+        with _MULTI_AUTO_LOCK:
+            pending = [dict(x) for x in _MULTI_PENDING_QUEUE]
+        for item in pending:
+            symbol = str(item.get('symbol') or '')
+            tf = str(item.get('timeframe') or '')
+            bucket = str(item.get('bucket') or '')
             with _MULTI_AUTO_LOCK:
                 if bucket in _MULTI_AUTO_DONE:
                     continue
+                if tf == '1D':
+                    resource_blocked = int(_MULTI_AUTO_DAILY.get('context_count') or 0) >= _MULTI_DAILY_CONTEXT_EXTRA_MAX
+                else:
+                    resource_blocked = int(_MULTI_AUTO_DAILY.get('count') or 0) >= MULTIASSET_AUTO_DEEP_DAILY_MAX
+                if resource_blocked:
+                    _MULTI_PENDING_RESOURCE_DEFERRALS += 1
+            if resource_blocked:
+                return
             if not _multiasset_retry_ready(bucket,now_mono):
                 continue
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
                 return
             if not result.get('success',False):
-                _multiasset_record_retry(bucket,result.get('error')); return
+                _multiasset_record_retry(bucket,result.get('error'))
+                return
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
                 if tf=='1D':
@@ -34957,9 +35216,11 @@ def _multiasset_background_tick():
                         _MULTI_AUTO_DAILY['fast_count']=int(_MULTI_AUTO_DAILY.get('fast_count') or 0)+1
                 if len(_MULTI_AUTO_DONE)>80:
                     for old in list(_MULTI_AUTO_DONE)[:30]: _MULTI_AUTO_DONE.discard(old)
+            _multiasset_pop_completed_pending(bucket)
             if _multiasset_is_executable(result):
+                # Delivery state is owned by the durable outbox; analysis may
+                # complete even when Telegram temporarily fails.
                 _multiasset_compact_telegram(result)
-            # One deep cell per 20s loop max: protects RAM/CPU and UI priority.
             return
     except Exception as exc:
         print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
@@ -35002,7 +35263,7 @@ def api_multiasset_opportunities():
             'success':True,'total':len(signals),'signals':signals,
             'count':len(signals),'opportunities':signals,'processing_selected':False,
             'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
-            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT},
+            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit':MULTIASSET_DEEP_LIMIT, **_multiasset_queue_snapshot()},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
@@ -38474,21 +38735,9 @@ def _next_futures_incremental_combo():
     if not combos:
         return None
 
-    # 17.5.8 — quality-first refresh ORDER, not a signal filter. Historically
-    # promising cells are evaluated earlier after startup/new candle while every
-    # eligible cell remains in the same round-robin. This improves latency to
-    # quality opportunities without increasing signal count or lowering gates.
-    try:
-        from preliminary_backtest_prior import futures_scan_priority
-        combos = sorted(
-            combos,
-            key=lambda item: (
-                -float(futures_scan_priority(item[0], item[1]) or 0.0),
-                str(item[1]), str(item[0]),
-            ),
-        )
-    except Exception:
-        pass
+    # 17.5.10 — selected historical priors are SHADOW-only until an
+    # independent forward/OOS cohort validates them. LIVE coverage keeps the
+    # natural governed-universe round-robin and is not reordered by old winners.
 
     # H.2: saltar combinaciones cuya última vela cerrada ya fue analizada.
     # No se reduce la cobertura: cada nueva vela vuelve a quedar elegible.
@@ -42302,6 +42551,187 @@ _CONFIRMED_SIGNAL_PROCESS_STARTED_AT = time.time()
 _confirmed_signal_alerts_sent = {}
 _confirmed_signal_alerts_lock = threading.Lock()
 
+# 17.5.10 — durable confirmed-signal delivery outbox. Analysis completion and
+# Telegram delivery are separate states; a temporary transport failure cannot
+# silently consume an otherwise authorized confirmation.
+_CONFIRMED_SIGNAL_OUTBOX_RETENTION = 2 * 24 * 3600
+_confirmed_signal_outbox = {}
+_confirmed_signal_outbox_lock = threading.Lock()
+
+
+def _compact_confirmed_outbox_signal(market, signal):
+    signal = signal or {}
+    levels = dict(signal.get('levels') or {})
+    decision = signal.get('decision') or {}
+    if not isinstance(decision, dict):
+        decision = {'action': decision or signal.get('action'), 'confidence': signal.get('confidence')}
+    compact_levels = {k: levels.get(k) for k in (
+        'entry','stop_loss','take_profit','leverage','publication_status','is_rejected',
+        'is_executable','risk_class','safety_band','valid_until','signal_id'
+    ) if levels.get(k) is not None}
+    return {
+        'symbol': signal.get('symbol'), 'timeframe': signal.get('timeframe'),
+        'decision': {'action': decision.get('action'), 'confidence': decision.get('confidence')},
+        'levels': compact_levels,
+        'publication_status': signal.get('publication_status'),
+        'publication_eligible': signal.get('publication_eligible'),
+        'is_executable': signal.get('is_executable'),
+        'signal_id': signal.get('signal_id') or signal.get('source_signal_id') or levels.get('signal_id'),
+        'source_signal_id': signal.get('source_signal_id'),
+        'source_candle_timestamp': signal.get('source_candle_timestamp'),
+        'source_candle_close_timestamp': signal.get('source_candle_close_timestamp'),
+        'candle_timestamp': signal.get('candle_timestamp'),
+        'previous_candle_timestamp': signal.get('previous_candle_timestamp'),
+        'valid_until': signal.get('valid_until') or levels.get('valid_until'),
+        'risk_class': signal.get('risk_class') or levels.get('risk_class') or levels.get('safety_band'),
+        'market': str(market or '').lower(),
+    }
+
+
+def _load_confirmed_signal_outbox_from_disk():
+    global _confirmed_signal_outbox
+    try:
+        from runtime_persistence import load_runtime_snapshot
+        stored = load_runtime_snapshot('telegram', 'confirmed_signal_outbox_v1', allow_expired=False)
+        data = ((stored or {}).get('payload') or {}).get('events') or {}
+        now = time.time(); restored = {}
+        for key, item in (data.items() if isinstance(data, dict) else []):
+            if not isinstance(item, dict):
+                continue
+            created = float(item.get('created_at') or now)
+            if now - created <= _CONFIRMED_SIGNAL_OUTBOX_RETENTION:
+                restored[str(key)] = dict(item)
+        with _confirmed_signal_outbox_lock:
+            _confirmed_signal_outbox = restored
+        if restored:
+            print(f"📨 CONFIRMED outbox restaurado: {len(restored)} evento(s).")
+    except Exception as exc:
+        print(f"⚠️ CONFIRMED outbox restore: {exc}")
+        with _confirmed_signal_outbox_lock:
+            _confirmed_signal_outbox = {}
+
+
+def _save_confirmed_signal_outbox_to_disk():
+    try:
+        from runtime_persistence import save_runtime_snapshot
+        with _confirmed_signal_outbox_lock:
+            snapshot = {k: dict(v) for k, v in _confirmed_signal_outbox.items()}
+        return save_runtime_snapshot(
+            'telegram', 'confirmed_signal_outbox_v1', {'events': snapshot},
+            ttl_seconds=_CONFIRMED_SIGNAL_OUTBOX_RETENTION + 3600,
+        )
+    except Exception as exc:
+        print(f"⚠️ CONFIRMED outbox persistencia: {exc}")
+        return False
+
+
+def _confirmed_outbox_enqueue(market, signal, key):
+    now = time.time()
+    compact = _compact_confirmed_outbox_signal(market, signal)
+    with _confirmed_signal_outbox_lock:
+        prior = dict(_confirmed_signal_outbox.get(key) or {})
+        if str(prior.get('state') or '').upper() == 'SENT':
+            return prior
+        item = {
+            'key': key, 'market': str(market or '').lower(), 'signal': compact,
+            'state': str(prior.get('state') or 'PENDING').upper(),
+            'attempts': int(prior.get('attempts') or 0),
+            'created_at': float(prior.get('created_at') or now),
+            'updated_at': now,
+            'next_retry_at': float(prior.get('next_retry_at') or 0.0),
+            'last_error': prior.get('last_error'),
+        }
+        _confirmed_signal_outbox[key] = item
+        if len(_confirmed_signal_outbox) > 300:
+            ordered = sorted(_confirmed_signal_outbox.items(), key=lambda kv: float((kv[1] or {}).get('updated_at') or 0.0), reverse=True)
+            _confirmed_signal_outbox.clear(); _confirmed_signal_outbox.update(dict(ordered[:300]))
+    _save_confirmed_signal_outbox_to_disk()
+    return item
+
+
+def _attempt_confirmed_outbox_event(key):
+    now = time.time()
+    with _confirmed_signal_outbox_lock:
+        item = dict(_confirmed_signal_outbox.get(key) or {})
+    if not item:
+        return False
+    if str(item.get('state') or '').upper() == 'SENT':
+        return True
+    if now < float(item.get('next_retry_at') or 0.0):
+        return False
+    market = str(item.get('market') or '').lower()
+    signal = dict(item.get('signal') or {})
+    timeframe = str(signal.get('timeframe') or '')
+    event_key = str(item.get('key') or key)
+
+    with _confirmed_signal_alerts_lock:
+        if event_key in _confirmed_signal_alerts_sent:
+            with _confirmed_signal_outbox_lock:
+                if event_key in _confirmed_signal_outbox:
+                    _confirmed_signal_outbox[event_key]['state'] = 'SENT'
+                    _confirmed_signal_outbox[event_key]['updated_at'] = now
+            _save_confirmed_signal_outbox_to_disk()
+            return True
+
+    # Revalidate technical publication and freshness before each retry.
+    levels = signal.get('levels') or {}; decision = signal.get('decision') or {}
+    action = str(decision.get('action') or '').upper()
+    confidence = float(decision.get('confidence') or 0)
+    publication = str(levels.get('publication_status') or signal.get('publication_status') or '').upper()
+    valid = bool(
+        action in (('LONG','SHORT') if market in ('futures','multiasset') else ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'))
+        and confidence >= 60
+        and (market not in ('futures','multiasset') or publication == 'EXECUTABLE_SIGNAL')
+        and _confirmed_signal_preferences_allow(market, timeframe)
+        and _confirmed_signal_recent_enough(signal, timeframe)
+    )
+    if not valid:
+        with _confirmed_signal_outbox_lock:
+            if event_key in _confirmed_signal_outbox:
+                _confirmed_signal_outbox[event_key].update(state='EXPIRED_OR_SUPERSEDED', updated_at=now)
+        _save_confirmed_signal_outbox_to_disk()
+        return False
+
+    message = _build_confirmed_signal_telegram_message(market, signal)
+    try:
+        sent = bool(expert_system.send_telegram_alert(message, None, category='CONFIRMED_SIGNAL'))
+    except Exception as exc:
+        sent = False; send_error = str(exc)[:180]
+    else:
+        send_error = None if sent else 'TRANSPORT_RETURNED_FALSE'
+
+    if sent:
+        with _confirmed_signal_alerts_lock:
+            _confirmed_signal_alerts_sent[event_key] = now
+        _save_confirmed_signal_alerts_to_disk()
+        with _confirmed_signal_outbox_lock:
+            if event_key in _confirmed_signal_outbox:
+                _confirmed_signal_outbox[event_key].update(state='SENT', updated_at=now, last_error=None)
+        _save_confirmed_signal_outbox_to_disk()
+        return True
+
+    with _confirmed_signal_outbox_lock:
+        row = _confirmed_signal_outbox.get(event_key)
+        if row is not None:
+            attempts = int(row.get('attempts') or 0) + 1
+            row.update(
+                state='FAILED_RETRYABLE', attempts=attempts, updated_at=now,
+                next_retry_at=now + min(300, 20 * (2 ** min(attempts - 1, 4))),
+                last_error=send_error or 'UNKNOWN_TRANSPORT_FAILURE',
+            )
+    _save_confirmed_signal_outbox_to_disk()
+    return False
+
+
+def _retry_confirmed_signal_outbox(limit=3):
+    now = time.time(); keys = []
+    with _confirmed_signal_outbox_lock:
+        for key, item in _confirmed_signal_outbox.items():
+            if str((item or {}).get('state') or '').upper() in ('PENDING','FAILED_RETRYABLE') and now >= float((item or {}).get('next_retry_at') or 0.0):
+                keys.append((float((item or {}).get('created_at') or now), key))
+    for _, key in sorted(keys)[:max(1, int(limit or 3))]:
+        _attempt_confirmed_outbox_event(key)
+
 
 def _load_confirmed_signal_alerts_from_disk():
     """Restaura dedup durable de alertas CONFIRMADAS desde Supabase."""
@@ -42601,7 +43031,7 @@ def _confirmed_signal_preferences_allow(market, timeframe):
 
 
 def _send_confirmed_signal_telegram(market, signal):
-    """Envía una confirmación oficial; nunca una hipótesis intrabar/manual."""
+    """Queue + attempt an official confirmation; retries are durable."""
     signal = signal or {}
     market = str(market or '').strip().lower()
     if market in ('futures', 'multiasset'):
@@ -42610,70 +43040,35 @@ def _send_confirmed_signal_telegram(market, signal):
     timeframe = str(signal.get('timeframe') or '')
     decision = signal.get('decision') or {}
     levels = signal.get('levels') or {}
-
     if isinstance(decision, dict):
         action = str(decision.get('action') or '').upper()
         confidence = float(decision.get('confidence') or 0)
     else:
         action = str(decision or signal.get('action') or '').upper()
         confidence = float(signal.get('confidence') or 0)
-
     if not symbol or not timeframe:
         return False
     if market in ('futures', 'multiasset'):
         if action not in ('LONG', 'SHORT'):
             return False
-        publication_status = str(
-            levels.get('publication_status')
-            or signal.get('publication_status')
-            or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')
-        )
+        publication_status = str(levels.get('publication_status') or signal.get('publication_status') or ('ANALYSIS_ONLY' if levels.get('is_rejected') else 'EXECUTABLE_SIGNAL'))
         if publication_status != 'EXECUTABLE_SIGNAL':
             return False
-    else:
-        if action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
-            return False
-
-    if confidence < 60:
-        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: confianza {confidence:.1f}% < 60")
+    elif action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
         return False
-    if not _confirmed_signal_preferences_allow(market, timeframe):
-        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: bloqueada por permisos/preferencias Telegram")
+    if confidence < 60 or not _confirmed_signal_preferences_allow(market, timeframe) or not _confirmed_signal_recent_enough(signal, timeframe):
         return False
-    if not _confirmed_signal_recent_enough(signal, timeframe):
-        print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: cierre fuera de ventana anti-backfill")
-        return False
-
     key = _confirmed_signal_event_key(market, signal)
     with _confirmed_signal_alerts_lock:
         if key in _confirmed_signal_alerts_sent:
-            print(f"🔕 CONFIRMADA {market.upper()} {symbol} {timeframe}: ya informada ({key})")
             return False
-
-    message = _build_confirmed_signal_telegram_message(market, signal)
-    sent = expert_system.send_telegram_alert(
-        message,
-        None,
-        category='CONFIRMED_SIGNAL',
-    )
-    if not sent:
-        return False
-
-    now = time.time()
-    with _confirmed_signal_alerts_lock:
-        _confirmed_signal_alerts_sent[key] = now
-        if len(_confirmed_signal_alerts_sent) > 1200:
-            cutoff = now - _CONFIRMED_SIGNAL_ALERT_RETENTION
-            for old_key, old_ts in list(_confirmed_signal_alerts_sent.items()):
-                if float(old_ts or 0) < cutoff:
-                    _confirmed_signal_alerts_sent.pop(old_key, None)
-
-    _save_confirmed_signal_alerts_to_disk()
-    print(
-        f"✅📱 CONFIRMADA {market.upper()}: "
-        f"{action} {symbol} {timeframe}"
-    )
-    return True
+    _confirmed_outbox_enqueue(market, signal, key)
+    sent = _attempt_confirmed_outbox_event(key)
+    if sent:
+        print(f"✅📱 CONFIRMADA {market.upper()}: {action} {symbol} {timeframe}")
+    else:
+        print(f"📨 CONFIRMADA pendiente/reintento {market.upper()}: {action} {symbol} {timeframe}")
+    return bool(sent)
 
 
 # Deduplicación ENTRY — HOTFIX 14.6
@@ -50437,6 +50832,7 @@ def _restore_runtime_snapshots_after_bind():
         ('futures-cache', _load_futures_cache_from_disk),
         ('telegram-entry-dedup', _load_entry_alerts_from_disk),
         ('telegram-confirmed-dedup', _load_confirmed_signal_alerts_from_disk),
+        ('telegram-confirmed-outbox', _load_confirmed_signal_outbox_from_disk),
         ('telegram-guardian-dedup', _load_guardian_telegram_events),
     )
 
@@ -50902,6 +51298,8 @@ def futures_standard_alert_loop():
     time.sleep(120)
     while True:
         try:
+            # 17.5.10: delivery retry is independent from analysis completion.
+            _retry_confirmed_signal_outbox(limit=3)
             # Commit 12: piggyback Multi-Activo on this existing daemon. No
             # additional worker/thread is created; scanner is TTL-cached.
             _multiasset_background_tick()

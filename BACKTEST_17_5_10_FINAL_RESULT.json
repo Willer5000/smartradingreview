@@ -1,0 +1,136 @@
+{
+  "IN_SAMPLE_DEVELOPMENT": {
+    "n": 11,
+    "tp": 5,
+    "sl": 1,
+    "expired_after_entry": 4,
+    "other_unresolved": 1,
+    "net_stress_r": 1.702,
+    "expectancy_stress_r": 0.1547,
+    "profit_factor_stress": 1.254,
+    "max_drawdown_r": 2.236,
+    "conservative_tp_rate_pct": 45.45
+  },
+  "OUT_OF_SAMPLE_CHRONOLOGICAL_HOLDOUT": {
+    "n": 4,
+    "tp": 3,
+    "sl": 0,
+    "expired_after_entry": 1,
+    "other_unresolved": 0,
+    "net_stress_r": 3.928,
+    "expectancy_stress_r": 0.982,
+    "profit_factor_stress": 4.513,
+    "max_drawdown_r": 1.118,
+    "conservative_tp_rate_pct": 75.0
+  },
+  "COMBINED": {
+    "n": 15,
+    "tp": 8,
+    "sl": 1,
+    "expired_after_entry": 5,
+    "other_unresolved": 1,
+    "net_stress_r": 5.63,
+    "expectancy_stress_r": 0.3753,
+    "profit_factor_stress": 1.719,
+    "max_drawdown_r": 2.236,
+    "conservative_tp_rate_pct": 53.33
+  },
+  "DAILY_FOLDS": {
+    "2026-09-10": {
+      "n": 6,
+      "tp": 3,
+      "sl": 0,
+      "expired_after_entry": 3,
+      "other_unresolved": 0,
+      "net_stress_r": 1.692,
+      "expectancy_stress_r": 0.282,
+      "profit_factor_stress": 1.504,
+      "max_drawdown_r": 1.118,
+      "conservative_tp_rate_pct": 50.0
+    },
+    "2026-09-11": {
+      "n": 4,
+      "tp": 2,
+      "sl": 0,
+      "expired_after_entry": 1,
+      "other_unresolved": 1,
+      "net_stress_r": 1.128,
+      "expectancy_stress_r": 0.282,
+      "profit_factor_stress": 1.504,
+      "max_drawdown_r": 1.118,
+      "conservative_tp_rate_pct": 50.0
+    },
+    "2026-09-13": {
+      "n": 1,
+      "tp": 0,
+      "sl": 1,
+      "expired_after_entry": 0,
+      "other_unresolved": 0,
+      "net_stress_r": -1.118,
+      "expectancy_stress_r": -1.118,
+      "profit_factor_stress": 0.0,
+      "max_drawdown_r": 1.118,
+      "conservative_tp_rate_pct": 0.0
+    },
+    "2026-09-14": {
+      "n": 3,
+      "tp": 2,
+      "sl": 0,
+      "expired_after_entry": 1,
+      "other_unresolved": 0,
+      "net_stress_r": 2.246,
+      "expectancy_stress_r": 0.7487,
+      "profit_factor_stress": 3.009,
+      "max_drawdown_r": 1.118,
+      "conservative_tp_rate_pct": 66.67
+    },
+    "2026-09-15": {
+      "n": 1,
+      "tp": 1,
+      "sl": 0,
+      "expired_after_entry": 0,
+      "other_unresolved": 0,
+      "net_stress_r": 1.682,
+      "expectancy_stress_r": 1.682,
+      "profit_factor_stress": null,
+      "max_drawdown_r": 0.0,
+      "conservative_tp_rate_pct": 100.0
+    }
+  },
+  "BOOTSTRAP_COMBINED": {
+    "iterations": 100000,
+    "seed": 17510,
+    "probability_mean_gt_zero": 0.9026,
+    "ci95_mean_r": [
+      -0.3713,
+      1.122
+    ],
+    "interpretation": "CI95_INCLUDES_ZERO_SMALL_SAMPLE"
+  },
+  "method": {
+    "route": "LIQUIDITY_SWEEP_MSS_POI",
+    "timeframe": "30m",
+    "market": "FUTURES",
+    "trend_aligned": true,
+    "adx_min": 20,
+    "volume_ratio_min": 1.2,
+    "rsi_long_max": 80,
+    "rsi_short_min": 20,
+    "unresolved_treatment": "-1R",
+    "cost_stress_r_per_entry": 0.118,
+    "development_period": "2026-09-10..2026-09-13",
+    "holdout_period": "2026-09-14..2026-09-16",
+    "oos_type": "CHRONOLOGICAL_HOLDOUT_NOT_PROSPECTIVE_LIVE",
+    "limitations": [
+      "small N",
+      "historical challenger cohort predates 17.5.10",
+      "not a full version-matched replay"
+    ]
+  },
+  "release_acceptance": {
+    "in_sample_profitable": true,
+    "oos_profitable": true,
+    "backtest_acceptance_pass": true,
+    "profitability_guarantee": false
+  }
+}

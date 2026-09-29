@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping
 
-VERSION = "COMMIT17_5_9_WORKER_ORCHESTRATION_V1"
+VERSION = "COMMIT17_5_10_WORKER_ORCHESTRATION_MM_V1"
 
 DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 
@@ -71,7 +71,7 @@ WORKER_ROLES: Dict[str, Dict[str, str]] = {
     },
     "El Liquidador": {
         "desk": "EXECUTION", "family": "LEVERAGED_LIQUIDITY",
-        "task": "interpretar liquidez apalancada, clusters y riesgo squeeze/cascade",
+        "task": "interpretar liquidez apalancada, clusters, riesgo squeeze/cascade y contexto Black-Scholes/Greeks/GEX cuando exista cadena de opciones",
         "deliverable": "leveraged_liquidity_context",
     },
     "Trader de Revisión": {
@@ -241,6 +241,8 @@ def build_worker_desk_snapshot(
             "worker_direction_flip_allowed": False,
             "counter_evidence_is_input_not_authority": True,
             "safety_remains_final_gate": True,
+            "market_maker_math_is_tool_not_vote": True,
+            "options_gex_cannot_create_direction": True,
         },
     }
 

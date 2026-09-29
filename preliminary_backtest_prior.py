@@ -1,21 +1,24 @@
-"""Commit 17.5.8 — bounded preliminary backtest priors.
+"""Commit 17.5.10 — historical backtest evidence in SHADOW.
 
-This module contains *diagnostic / ranking priors* derived from historical
-Research OOS and execution-forensics cohorts available on 2026-09-28.
+This module preserves the historical Research OOS and execution-forensics
+cohorts available on 2026-09-28, but 17.5.10 removes their production ranking
+authority until an independent, point-in-time validation cohort exists.
 
 Important:
 - It never creates LONG/SHORT direction.
 - It never bypasses Safety, MTF, publication or execution guards.
 - It never changes leverage directly.
-- Family evidence is cell-specific (market × symbol × timeframe × action).
-- Entry/SL/TP evidence is deliberately bounded because the cohorts are not a
-  version-matched replay of 17.5.8 and some component studies are diagnostic.
+- Family evidence remains cell-specific (market × symbol × timeframe × action).
+- Production score/adjustment is neutral: historical evidence is SHADOW only.
+- Entry/SL/TP historical evidence is diagnostic because the cohorts are not a
+  version-matched replay of 17.5.10. Current technical guards remain separate.
 """
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple
 
-VERSION = "COMMIT17_5_8_PRELIMINARY_BACKTEST_PRIOR_V1"
+VERSION = "COMMIT17_5_10_BACKTEST_SHADOW_V1"
+PRODUCTION_AUTHORITY = "SHADOW_ONLY_UNTIL_INDEPENDENT_VALIDATION"
 EVIDENCE_ASOF = "2026-09-28"
 
 
@@ -130,70 +133,87 @@ TP_SWEEP_EVIDENCE = {
 
 
 def family_cell_prior(*, market: Any, symbol: Any, timeframe: Any, action: Any, family: Any) -> Dict[str, Any]:
-    key = (_norm_market(market), str(symbol or "").strip().upper(), _norm_tf(timeframe), _norm_action(action), _norm_family(family))
+    market_n = _norm_market(market)
+    action_n = _norm_action(action)
+    # 17.5.10 fixes the Spot contract even while evidence remains shadow-only.
+    if market_n == "SPOT":
+        if action_n == "LONG":
+            action_n = "COMPRA_SPOT"
+        elif action_n == "SHORT":
+            action_n = "VENTA_SPOT"
+    key = (market_n, str(symbol or "").strip().upper(), _norm_tf(timeframe), action_n, _norm_family(family))
     row = FAMILY_CELL_EVIDENCE.get(key)
     if not row:
-        return {"available": False, "score": 50.0, "adjustment": 0.0, "authority": "DIAGNOSTIC_ONLY", "key": "|".join(key)}
+        return {
+            "available": False, "score": 50.0, "adjustment": 0.0,
+            "shadow_score": 50.0, "shadow_adjustment": 0.0,
+            "authority": PRODUCTION_AUTHORITY, "key": "|".join(key),
+        }
     n = float(row["n"])
     exp_r = float(row["exp_r"])
     pf = float(row["pf"])
-    # Bounded boost: sample size matters, but old OOS can never dominate live
-    # structure/MTF/execution evidence. Max +4.0 points to the strategy lens.
     evidence = min(1.0, max(0.0, (n - 8.0) / 24.0) * 0.35 + min(exp_r, 0.80) / 0.80 * 0.40 + min(max(pf - 1.0, 0.0), 2.5) / 2.5 * 0.25)
-    adjustment = round(min(4.0, 0.75 + 3.25 * evidence), 3)
+    shadow_adjustment = round(min(4.0, 0.75 + 3.25 * evidence), 3)
     return {
         "available": True,
-        "score": round(50.0 + adjustment * 5.0, 2),
-        "adjustment": adjustment,
-        "authority": "BOUNDED_SOFT_PRIOR",
+        # LIVE stays neutral. The old bounded value remains visible for shadow comparison.
+        "score": 50.0,
+        "adjustment": 0.0,
+        "shadow_score": round(50.0 + shadow_adjustment * 5.0, 2),
+        "shadow_adjustment": shadow_adjustment,
+        "authority": PRODUCTION_AUTHORITY,
         "key": "|".join(key),
         **row,
     }
 
-
-def entry_component_prior(*, timeframe: Any, candidate_family: Any, smc_events: int = 0) -> Dict[str, Any]:
+def entry_component_prior(*, timeframe: Any, candidate_family: Any, smc_events: int = 0, market: Any = None, symbol: Any = None, regime: Any = None) -> Dict[str, Any]:
     tf = _norm_tf(timeframe)
     ev = ENTRY_ROUTE_EVIDENCE.get(tf)
     fam = _norm_family(candidate_family).lower()
     route_like = fam in {"smc_poi", "liquidity", "swing", "structure", "fib", "recent_reaction", "volatility_reaction"}
-    if not ev or not route_like or int(smc_events or 0) <= 0:
-        return {"available": bool(ev), "score": 50.0, "adjustment": 0.0, "authority": "DIAGNOSTIC_ONLY", "timeframe": tf}
-    # 30m evidence is strong, 2h moderate, 1h weak-positive. Keep the ranking
-    # effect small to avoid replay-fitting old versions.
-    if float(ev["exp_r"]) >= 0.75 and float(ev["pf"]) >= 2.0:
-        adj = 4.0
-    elif float(ev["exp_r"]) >= 0.20 and float(ev["pf"]) >= 1.40:
-        adj = 2.5
-    elif float(ev["exp_r"]) > 0 and float(ev["pf"]) > 1.0:
-        adj = 1.0
-    else:
-        adj = 0.0
-    return {"available": True, "score": round(50.0 + adj * 5.0, 2), "adjustment": adj, "authority": "BOUNDED_SOFT_PRIOR", "timeframe": tf, **ev}
-
+    shadow_adj = 0.0
+    if ev and route_like and int(smc_events or 0) > 0:
+        if float(ev["exp_r"]) >= 0.75 and float(ev["pf"]) >= 2.0:
+            shadow_adj = 4.0
+        elif float(ev["exp_r"]) >= 0.20 and float(ev["pf"]) >= 1.40:
+            shadow_adj = 2.5
+        elif float(ev["exp_r"]) > 0 and float(ev["pf"]) > 1.0:
+            shadow_adj = 1.0
+    return {
+        "available": bool(ev), "score": 50.0, "adjustment": 0.0,
+        "shadow_score": round(50.0 + shadow_adj * 5.0, 2),
+        "shadow_adjustment": shadow_adj,
+        "authority": PRODUCTION_AUTHORITY, "timeframe": tf,
+        "market": _norm_market(market) if market is not None else None,
+        "symbol": str(symbol or "").upper() or None,
+        **(ev or {}),
+    }
 
 def sl_component_prior(*, timeframe: Any, reaction_conflict: bool = False) -> Dict[str, Any]:
     tf = _norm_tf(timeframe)
     ev = SL_FORENSIC_EVIDENCE.get(tf)
-    if reaction_conflict:
-        return {"available": bool(ev), "score": 0.0, "adjustment": -100.0, "authority": "SEMANTIC_HARD_GUARD", "timeframe": tf, **(ev or {})}
-    # Historical evidence does not justify globally widening or tightening SL.
-    # Keep neutral; the structural invalidation/noise/reaction model remains authoritative.
-    return {"available": bool(ev), "score": 50.0, "adjustment": 0.0, "authority": "DIAGNOSTIC_NO_GLOBAL_SL_SHIFT", "timeframe": tf, **(ev or {})}
-
+    # Historical SL evidence is neutral in LIVE. The actual reaction-conflict
+    # hard guard is computed from current structure in execution_specialist_committees.py.
+    return {
+        "available": bool(ev), "score": 50.0, "adjustment": 0.0,
+        "shadow_score": 50.0, "shadow_adjustment": 0.0,
+        "shadow_reaction_conflict": bool(reaction_conflict),
+        "authority": PRODUCTION_AUTHORITY, "timeframe": tf,
+        **(ev or {}),
+    }
 
 def tp_component_prior(*, timeframe: Any, candidate_rr: float = 0.0) -> Dict[str, Any]:
     tf = _norm_tf(timeframe)
     ev = TP_SWEEP_EVIDENCE.get(tf)
-    if not ev:
-        return {"available": False, "score": 50.0, "adjustment": 0.0, "authority": "DIAGNOSTIC_ONLY", "timeframe": tf}
-    # Only 30m showed positive expectancy in the planned/full target cohort;
-    # target compression did not rescue 1h/2h/4h. Therefore we avoid systematic
-    # TP shortening. A small positive prior is allowed for technically normal RR
-    # at 30m; all other TFs remain neutral.
     rr = float(candidate_rr or 0.0)
-    adj = 1.5 if tf == "30M" and 1.8 <= rr <= 3.5 and float(ev["exp_r"]) > 0 else 0.0
-    return {"available": True, "score": round(50.0 + adj * 5.0, 2), "adjustment": adj, "authority": "BOUNDED_SOFT_PRIOR" if adj else "DIAGNOSTIC_NO_TP_COMPRESSION", "timeframe": tf, **ev}
-
+    shadow_adj = 1.5 if ev and tf == "30M" and 1.8 <= rr <= 3.5 and float(ev["exp_r"]) > 0 else 0.0
+    return {
+        "available": bool(ev), "score": 50.0, "adjustment": 0.0,
+        "shadow_score": round(50.0 + shadow_adj * 5.0, 2),
+        "shadow_adjustment": shadow_adj,
+        "authority": PRODUCTION_AUTHORITY, "timeframe": tf,
+        **(ev or {}),
+    }
 
 def get_preliminary_learning_bundle(*, market: Any = "", symbol: Any = "", timeframe: Any = "", action: Any = "", family: Any = "") -> Dict[str, Any]:
     return {
@@ -209,8 +229,11 @@ def get_preliminary_learning_bundle(*, market: Any = "", symbol: Any = "", timef
             "can_bypass_safety": False,
             "can_bypass_publication": False,
             "can_raise_leverage": False,
-            "family_prior_max_adjustment": 4.0,
-            "entry_prior_max_adjustment": 4.0,
+            "family_prior_max_adjustment": 0.0,
+            "entry_prior_max_adjustment": 0.0,
+            "production_authority": PRODUCTION_AUTHORITY,
+            "shadow_family_max_adjustment": 4.0,
+            "shadow_entry_max_adjustment": 4.0,
             "sl_global_shift_authorized": False,
             "tp_global_compression_authorized": False,
         },
@@ -218,7 +241,12 @@ def get_preliminary_learning_bundle(*, market: Any = "", symbol: Any = "", timef
 
 
 def futures_scan_priority(symbol: Any, timeframe: Any) -> float:
-    """Priority only for refresh order; never a signal score or veto."""
+    """17.5.10: historical selected priors do not reorder LIVE scan coverage."""
+    return 0.0
+
+
+def shadow_futures_scan_priority(symbol: Any, timeframe: Any) -> float:
+    """Diagnostic-only copy of the old research-priority score."""
     sym = str(symbol or "").strip().upper()
     tf = _norm_tf(timeframe)
     best = 0.0

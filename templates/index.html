@@ -1283,6 +1283,51 @@
                         </div>
                     </div>
 
+                {% if is_futures and not is_multiasset|default(false) %}
+                <!-- COMMIT 17.5.10 FINAL — BLACK-SCHOLES / GAMMA / 0DTE / DELTA -->
+                <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="market-maker-options">
+                    <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
+                        <div>
+                            <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Opciones · Gamma / Delta / 0DTE</h5>
+                            <small class="text-muted">Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.</small>
+                        </div>
+                        <span id="mm-option-source" class="badge bg-secondary">Esperando datos</span>
+                    </div>
+                    <div class="card-body indicator-content">
+                        <div id="mm-options-chart" style="height: 390px;"></div>
+                        <div class="row g-2 mt-2 text-center">
+                            <div class="col-lg-3 col-6">
+                                <small class="text-muted d-block">Régimen Gamma</small>
+                                <strong id="mm-gamma-regime">--</strong>
+                            </div>
+                            <div class="col-lg-3 col-6">
+                                <small class="text-muted d-block">Gamma ≤24h</small>
+                                <strong id="mm-zero-dte-share">--</strong>
+                            </div>
+                            <div class="col-lg-3 col-6">
+                                <small class="text-muted d-block">Nivel Zero-Gamma</small>
+                                <strong id="mm-zero-gamma">--</strong>
+                            </div>
+                            <div class="col-lg-3 col-6">
+                                <small class="text-muted d-block">Delta-Neutral aprox.</small>
+                                <strong id="mm-delta-neutral">--</strong>
+                            </div>
+                        </div>
+                        <div class="row g-2 mt-2 text-center">
+                            <div class="col-md-4 col-12"><small class="text-muted d-block">Call Wall</small><strong id="mm-call-wall">--</strong></div>
+                            <div class="col-md-4 col-12"><small class="text-muted d-block">Gamma Wall</small><strong id="mm-gamma-wall">--</strong></div>
+                            <div class="col-md-4 col-12"><small class="text-muted d-block">Put Wall</small><strong id="mm-put-wall">--</strong></div>
+                        </div>
+                        <div class="mt-3 p-2 rounded border border-info border-opacity-25">
+                            <small class="text-muted">
+                                <strong>Lectura:</strong> <span id="mm-option-note">Este indicador es contexto de opciones; no genera LONG/SHORT por sí solo.</span>
+                            </small>
+                            <div><small id="mm-option-authority" class="text-muted">La dirección real del inventario de market makers no es observable directamente desde Open Interest.</small></div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+
                 {% if is_futures %}
                 <!-- COMMIT 15B — ORDER BOOK / ORDER FLOW MICROSTRUCTURE -->
                 <div class="card bg-dark border-primary mb-4 indicator-card" data-indicator="order-flow">
@@ -2622,6 +2667,9 @@
 
     <script
         src="{{ url_for('static', filename='futures.js') }}?v=20260924-COMMIT12-1-QA"
+    ></script>
+    <script
+        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20260929-COMMIT17-5-10-FINAL"
     ></script>
 
     {% endif %}
