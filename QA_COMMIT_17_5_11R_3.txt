@@ -1,0 +1,51 @@
+COMMIT 17.5.11R.3 — QA FINAL
+Fecha: 30/09/2026
+Base: repositorio completo R.2 + overlay R.3
+
+SINTAXIS
+PASS — py_compile:
+- app.py
+- operational_intelligence.py
+- contingency_strategy_engine.py
+- validated_strategy_routes_175111r1.py
+- execution_specialist_committees.py
+- strategy_quality_extension_175105.py
+- market_maker_math.py
+- options_market_context.py
+PASS — node --check:
+- static/futures.js
+- static/script.js
+- static/market_maker_frontend.js
+
+SUITES
+PASS — Geometry/Runtime: 19/19
+PASS — Multi Scheduler: 8/8
+PASS — Structure regression: 23/23
+PASS — Frontend: 11/11
+PASS — Validated routes R.1: 18/18
+PASS — R.2 regression contracts: 11/11
+PASS — R.3 contracts: 17/17
+
+TOTAL FUNCIONAL PRINCIPAL: 107/107 PASS
+
+R.3 CONTRACTS VERIFICADOS
+1. LONG gobernado recibe Entry/SL/TP coherente aun sin POI usable.
+2. LONG fallback nunca se autopromueve a Premium.
+3. SHORT gobernado recibe Entry/SL/TP coherente aun sin POI usable.
+4. SHORT fallback nunca se autopromueve a Premium.
+5. Precisión de símbolos de bajo precio usa metadatos reales (ej. SEI 5 decimales).
+6. Geometría manual de vela cerrada sigue guardable aunque Safety Premium sea bajo.
+7. Diagnóstico del cierre ACTUAL conserva manual_save_allowed.
+8. No existe el gate silencioso `and previous` que obligaba a esperar otra vela.
+9. Sentimiento Multi parcial está etiquetado MULTI_TECHNICAL_PROXY.
+10. Snapshot Multi parcial incluye estructura y liquidaciones.
+11. Frontend muestra Sentimiento técnico, no falso Fear & Greed.
+12. D/G/T incluye fallback local Black-Scholes.
+13. Fallo API/provider intenta fallback teórico, no borra el panel.
+14. Hook de análisis agenda refresh en vez de sobrescribir el gráfico con unavailable.
+15. Panel diagnóstico comunica Entry/SL/TP manual para cada tesis.
+16. Guardar seguimiento / bajo mi riesgo / en operación permanecen disponibles.
+17. Cache-bust R.3 obliga al navegador a cargar scripts nuevos.
+
+LIMITACIÓN DE QA
+El contenedor no tiene Flask instalado; no se levantó servidor Gunicorn real. El deploy de Render es la prueba final de infraestructura/red/navegador.

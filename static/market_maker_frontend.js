@@ -9,8 +9,8 @@
  */
 (function () {
     'use strict';
-    if (window.__MM_OPTIONS_FRONTEND_17511__) return;
-    window.__MM_OPTIONS_FRONTEND_17511__ = true;
+    if (window.__MM_OPTIONS_FRONTEND_175113__) return;
+    window.__MM_OPTIONS_FRONTEND_175113__ = true;
 
     const $ = id => document.getElementById(id);
     const finite = v => {
@@ -77,6 +77,92 @@
         const t = finite(row.theta_per_day);
         if (d === null && g === null && t === null) return '--';
         return `Δ ${d === null ? '--' : d.toFixed(3)} · Γ ${g === null ? '--' : g.toExponential(2)} · Θ ${t === null ? '--' : t.toFixed(3)}`;
+    }
+
+    function normalPdf(x) {
+        return Math.exp(-0.5 * x * x) / Math.sqrt(2 * Math.PI);
+    }
+
+    function erfApprox(x) {
+        const sign = x < 0 ? -1 : 1;
+        const a = Math.abs(x);
+        const t = 1 / (1 + 0.3275911 * a);
+        const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-a * a);
+        return sign * y;
+    }
+
+    function normalCdf(x) {
+        return 0.5 * (1 + erfApprox(x / Math.sqrt(2)));
+    }
+
+    function localSpot() {
+        const candidates = [
+            window.currentAnalysis?.current_price,
+            window.currentAnalysis?.live_price,
+            window.currentAnalysis?.analysis_price,
+            window.currentAnalysis?.levels?.entry,
+        ];
+        for (const raw of candidates) {
+            const n = finite(raw);
+            if (n !== null && n > 0) return n;
+        }
+        return null;
+    }
+
+    function buildLocalTheoreticalContext(spot) {
+        const s = finite(spot);
+        if (s === null || s <= 0) return null;
+        const volRaw = finite(window.currentAnalysis?.volatility?.annualized_volatility)
+            ?? finite(window.currentAnalysis?.volatility?.realized_volatility)
+            ?? 0.60;
+        const vol = Math.max(0.08, Math.min(2.5, volRaw > 3 ? volRaw / 100 : volRaw));
+        const tYears = 7 / 365;
+        const sqrtT = Math.sqrt(tYears);
+        const strike = s;
+        const gex = [], delta = [], theta = [];
+        let atmCall = null, atmPut = null;
+        for (let i = 0; i < 41; i += 1) {
+            const px = s * (0.80 + i * 0.01);
+            const d1 = (Math.log(px / strike) + 0.5 * vol * vol * tYears) / (vol * sqrtT);
+            const d2 = d1 - vol * sqrtT;
+            const gamma = normalPdf(d1) / (px * vol * sqrtT);
+            const callDelta = normalCdf(d1);
+            const putDelta = callDelta - 1;
+            const commonTheta = -(px * normalPdf(d1) * vol) / (2 * sqrtT) / 365;
+            const callTheta = commonTheta;
+            const putTheta = commonTheta;
+            gex.push([px, (gamma + gamma) * px * px * 0.01]);
+            delta.push([px, callDelta + putDelta]);
+            theta.push([px, callTheta + putTheta]);
+            if (i === 20) {
+                atmCall = {delta: callDelta, gamma, theta_per_day: callTheta};
+                atmPut = {delta: putDelta, gamma, theta_per_day: putTheta};
+            }
+        }
+        return {
+            available: true,
+            authority: 'SHADOW_THEORETICAL_UI_LOCAL',
+            observed_option_chain: false,
+            confidence: 'THEORETICAL',
+            contracts_used: 0,
+            spot: s,
+            gamma_regime: 'THEORETICAL_SHAPE',
+            zero_dte_gamma_share: 0,
+            zero_gamma_level: null,
+            delta_neutral_level: null,
+            gamma_wall: null,
+            call_wall: null,
+            put_wall: null,
+            heuristic_signed_delta_dollars: null,
+            heuristic_signed_gamma_exposure: null,
+            aggregate_vega_per_iv_point: null,
+            aggregate_theta_per_day: null,
+            representative_atm_greeks: {call: atmCall, put: atmPut},
+            gex_curve: gex,
+            delta_curve: delta,
+            theta_curve: theta,
+            local_ui_fallback: true,
+        };
     }
 
     function styleHeader(observed) {
@@ -163,9 +249,12 @@
         const chart = $('mm-options-chart');
         if (!chart) return;
 
-        const mm = mmFrom(data);
+        let mm = mmFrom(data);
         if (!mm || mm.available === false) {
-            unavailable(mm?.reason);
+            mm = buildLocalTheoreticalContext(localSpot());
+        }
+        if (!mm || mm.available === false) {
+            unavailable(mm?.reason || mmFrom(data)?.reason);
             return;
         }
 
@@ -193,7 +282,9 @@
             'mm-option-note',
             observed
                 ? `Cadena pública observada · ${Number(mm.contracts_used || 0)} contratos usados · vencimiento más cercano ${finite(mm.nearest_expiry_hours)?.toFixed(1) ?? '--'} h.`
-                : 'Superficie Black-Scholes teórica: muestra sensibilidades, no inventario real de dealers.'
+                : (mm.local_ui_fallback
+                    ? 'Superficie Black-Scholes teórica local: se dibuja con el precio visible cuando la cadena/API no está disponible. No representa inventario real de dealers.'
+                    : 'Superficie Black-Scholes teórica: muestra sensibilidades, no inventario real de dealers.')
         );
         text(
             'mm-option-authority',
@@ -358,7 +449,7 @@
                 bordercolor: '#3a424a',
                 font: { color: '#f2f5f7' }
             },
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-17511`
+            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175113`
         };
 
         window.Plotly.react(
@@ -400,11 +491,12 @@
             });
             const payload = await resp.json();
             if (seq !== requestSeq) return;
-            if (payload?.success) render(payload);
-            else unavailable(payload?.error);
+            // Even if the provider/API context fails, render() can build the
+            // local Black-Scholes surface from the already visible spot price.
+            render(payload || {});
         } catch (err) {
             if (seq === requestSeq) {
-                unavailable('Contexto de opciones temporalmente no disponible.');
+                render({ reason: 'Contexto de opciones temporalmente no disponible.' });
             }
         }
     }
@@ -416,16 +508,20 @@
 
     function installAnalysisHook() {
         if (
-            window.__MM_OPTIONS_UPDATE_HOOKED_17511__
+            window.__MM_OPTIONS_UPDATE_HOOKED_175113__
             || typeof window.updateAllCharts !== 'function'
         ) return;
         const original = window.updateAllCharts;
         window.updateAllCharts = function (data) {
             const out = original.apply(this, arguments);
-            try { render(data); } catch (_) {}
+            try {
+                const embedded = mmFrom(data);
+                if (embedded && embedded.available !== false) render(data);
+                else schedule(80);
+            } catch (_) { schedule(80); }
             return out;
         };
-        window.__MM_OPTIONS_UPDATE_HOOKED_17511__ = true;
+        window.__MM_OPTIONS_UPDATE_HOOKED_175113__ = true;
     }
 
     function init() {

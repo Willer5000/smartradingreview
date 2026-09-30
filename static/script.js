@@ -8469,6 +8469,7 @@ window.renderIndicatorChart = function(indicatorId, data) {
 };
 
 window.updateAllCharts = function(data) {
+    if (data && typeof data === 'object') window.currentAnalysis = data;
     if (!data || !data.df) {
         console.warn('No hay datos para actualizar gráficos');
         return;
@@ -11023,6 +11024,14 @@ window.updateFearGreedChart = function(data) {
     }
     
     const sentiment = data.sentiment;
+    const isMultiTechnicalProxy = String(sentiment.source || '').toUpperCase() === 'MULTI_TECHNICAL_PROXY';
+    const sentimentCard = document.querySelector('[data-indicator="fear-greed"]');
+    if (sentimentCard && isMultiTechnicalProxy) {
+        const title = sentimentCard.querySelector('.card-header h5');
+        const subtitle = sentimentCard.querySelector('.card-header small.text-muted');
+        if (title) title.innerHTML = '<i class="fas fa-gauge-high me-2"></i>Sentimiento técnico';
+        if (subtitle) subtitle.textContent = 'Proxy local de precio/momentum para Multi-Activo; no es el Fear & Greed cripto.';
+    }
     const currentValue = sentiment.current_value || 50;
     const classification = sentiment.classification || 'Neutral';
     const trend7d = sentiment.trend_7d_pct || 0;
@@ -11035,7 +11044,11 @@ window.updateFearGreedChart = function(data) {
     
     const fngClassification = document.getElementById('fng-classification');
     fngClassification.textContent = classification;
-    if (classification.includes('Extreme Fear')) {
+    if (isMultiTechnicalProxy) {
+        fngClassification.className = classification.toLowerCase().includes('alcista')
+            ? 'badge bg-success'
+            : (classification.toLowerCase().includes('bajista') ? 'badge bg-danger' : 'badge bg-secondary');
+    } else if (classification.includes('Extreme Fear')) {
         fngClassification.className = 'badge bg-danger';
     } else if (classification.includes('Fear')) {
         fngClassification.className = 'badge bg-warning';
@@ -11068,7 +11081,9 @@ window.updateFearGreedChart = function(data) {
     // Interpretación
     const interpretationEl = document.getElementById('fng-interpretation');
     let interpretation = '';
-    if (currentValue < 20 && trend7d > 0) {
+    if (isMultiTechnicalProxy) {
+        interpretation = sentiment.note || (currentValue >= 60 ? 'Sesgo técnico alcista' : (currentValue <= 40 ? 'Sesgo técnico bajista' : 'Sesgo técnico neutral'));
+    } else if (currentValue < 20 && trend7d > 0) {
         interpretation = '💡 Miedo extremo pero remontando - oportunidad de acumulación';
     } else if (currentValue < 20) {
         interpretation = '⚠️ Miedo extremo persistente - esperar confirmación';
@@ -11142,7 +11157,7 @@ window.updateFearGreedChart = function(data) {
         y: values,
         type: 'scatter',
         mode: 'lines+markers',
-        name: 'Fear & Greed Index',
+        name: isMultiTechnicalProxy ? 'Sentimiento técnico' : 'Fear & Greed Index',
         line: { 
             color: 'rgba(255, 255, 255, 0.7)',  // BLANCO semi-transparente
             width: 1.5,

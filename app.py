@@ -18472,16 +18472,376 @@ class TradingExpertSystem:
             'XRP-USDT': 4,
         }
 
-        decimals = decimals_by_symbol.get(
-            symbol,
-            2
-        )
+        decimals = decimals_by_symbol.get(symbol)
+        if decimals is None:
+            try:
+                from futures_universe import SYMBOL_META as _FUTURES_SYMBOL_META
+                _meta = (_FUTURES_SYMBOL_META or {}).get(str(symbol)) or {}
+                decimals = int(_meta.get('decimals')) if _meta.get('decimals') is not None else None
+            except Exception:
+                decimals = None
+        if decimals is None:
+            try:
+                from multiasset_system import MULTIASSET_SYMBOLS
+                _meta = (MULTIASSET_SYMBOLS or {}).get(str(symbol)) or {}
+                decimals = int(_meta.get('decimals')) if _meta.get('decimals') is not None else None
+            except Exception:
+                decimals = None
+        if decimals is None:
+            decimals = 2
 
         return round(
             price,
             decimals
         )
     
+    def _guaranteed_manual_geometry_175113(
+        self,
+        action,
+        trend,
+        momentum,
+        volatility,
+        structure,
+        symbol,
+        timeframe,
+        liquidation=None,
+        existing_levels=None,
+    ):
+        """Commit 17.5.11R.3 — complete geometry for every governed thesis.
+
+        Contract:
+        - NEVER creates LONG/SHORT direction; ``action`` must already be governed.
+        - First keeps an already coherent committee geometry.
+        - Then asks the structural recovery committee to search observed POI/liquidity.
+        - Only when observed structure cannot form a complete package, creates a
+          clearly-labelled ATR/invalidation fallback for MANUAL/ANALYSIS_ONLY use.
+        - The fallback can be saved and protected by Guardian, but it can never
+          promote itself to Premium, bypass Safety, or send official Telegram.
+
+        The last-resort branch exists because the user explicitly requires every
+        directional hypothesis to expose Entry/SL/TP.  Its low authority is made
+        explicit in the returned metadata instead of pretending the levels are a
+        validated alpha source.
+        """
+        base = dict(existing_levels or {})
+        raw_action = str(action or '').upper()
+        if raw_action in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
+            raw_action = 'LONG'
+        elif raw_action in ('BEARISH', 'SELL', 'VENTA_SPOT'):
+            raw_action = 'SHORT'
+        if raw_action not in ('LONG', 'SHORT'):
+            return base
+
+        def _num(value, default=0.0):
+            try:
+                value = float(value)
+                return value if math.isfinite(value) else float(default)
+            except (TypeError, ValueError):
+                return float(default)
+
+        def _valid(levels):
+            if not isinstance(levels, dict):
+                return False
+            e = _num(levels.get('entry'))
+            sl = _num(levels.get('stop_loss'))
+            tp = _num(levels.get('take_profit'))
+            if min(e, sl, tp) <= 0:
+                return False
+            return bool(
+                (raw_action == 'LONG' and sl < e < tp)
+                or (raw_action == 'SHORT' and tp < e < sl)
+            )
+
+        _rejection_text = str(base.get('rejected_reason') or '').upper()
+        _existing_reaction_conflict = bool(base.get('sl_reaction_conflict')) or any(
+            token in _rejection_text for token in (
+                'SL_REACTION_CONFLICT', 'SL_INSIDE_STRONG_REACTION_ZONE',
+                'SL NO DEFENDIBLE', 'SL_NO_DEFENDIBLE'
+            )
+        )
+        if _valid(base) and not _existing_reaction_conflict:
+            e = _num(base.get('entry'))
+            sl = _num(base.get('stop_loss'))
+            tp = _num(base.get('take_profit'))
+            risk = abs(e - sl)
+            if risk > 0:
+                base['risk_reward'] = round(abs(tp - e) / risk, 4)
+            base.update({
+                'manual_observation_geometry': True,
+                'manual_observation_action': raw_action,
+                'manual_geometry_source': str(base.get('manual_geometry_source') or 'PRIMARY_EXECUTION_COMMITTEE'),
+                'manual_geometry_fallback': bool(base.get('manual_geometry_fallback', False)),
+            })
+            return base
+
+        structure = dict(structure or {})
+        volatility = dict(volatility or {})
+        trend = dict(trend or {})
+        momentum = dict(momentum or {})
+        current_price = _num(
+            structure.get('current_price')
+            or structure.get('previous_close')
+            or base.get('entry')
+        )
+        if current_price <= 0:
+            return base
+
+        atr = _num(volatility.get('atr'))
+        if atr <= 0:
+            atr_pct = _num(volatility.get('atr_pct'))
+            if atr_pct > 0:
+                atr = current_price * (atr_pct / 100.0)
+        if atr <= 0:
+            # Final volatility normalizer only; not an Entry source.
+            atr = current_price * {
+                '30m': 0.006, '1h': 0.008, '2h': 0.010,
+                '4h': 0.013, '12h': 0.018, '1D': 0.025,
+            }.get(str(timeframe), 0.012)
+        atr = max(atr, current_price * 1e-5)
+
+        # Phase A: observed structure/liquidity recovery using the real committees.
+        try:
+            from execution_specialist_committees import (
+                build_execution_context,
+                recover_execution_geometry_from_structure,
+            )
+            ctx = build_execution_context(
+                market_type='futures', symbol=symbol, timeframe=timeframe,
+                structure=structure, trend=trend, momentum=momentum,
+                volatility=volatility, execution_observations={},
+            )
+            recovery = recover_execution_geometry_from_structure(
+                direction=raw_action.lower(),
+                current_price=current_price,
+                atr=atr,
+                structure=structure,
+                trend=trend,
+                momentum=momentum,
+                volatility=volatility,
+                setup_family=str(
+                    ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                    or ((structure.get('_adaptive_strategy_lab') or {}).get('setup_family'))
+                    or ''
+                ),
+                liquidation=liquidation if isinstance(liquidation, dict) else {},
+                market_type='futures',
+                symbol=symbol,
+                timeframe=timeframe,
+                execution_context=ctx,
+                entry_hint=_num(base.get('entry')),
+                rr_floor=1.35,
+                rr_ceiling=4.5,
+                preferred_rr_min=1.8,
+                preferred_rr_max=3.2,
+                leverage_hint=max(1.0, _num(base.get('leverage'), 1.0)),
+            )
+            if isinstance(recovery, dict) and recovery.get('success'):
+                e = _num(recovery.get('entry'))
+                sl = _num(recovery.get('stop_loss'))
+                tp = _num(recovery.get('take_profit'))
+                candidate = dict(base)
+                candidate.update({
+                    'entry': self._round_price(e, symbol),
+                    'stop_loss': self._round_price(sl, symbol),
+                    'take_profit': self._round_price(tp, symbol),
+                    'risk_reward': round(_num(recovery.get('risk_reward')), 4),
+                    'entry_source': 'Comité estructural · POI/liquidez',
+                    'sl_source': 'Invalidación estructural detrás de zona de reacción',
+                    'tp_source': 'Pool/estructura técnica opuesta',
+                    'manual_observation_geometry': True,
+                    'manual_observation_action': raw_action,
+                    'manual_geometry_source': 'STRUCTURAL_SPECIALIST_RECOVERY',
+                    'manual_geometry_fallback': False,
+                    'manual_geometry_quality': recovery.get('geometry_quality'),
+                    'manual_geometry_recovery_version': recovery.get('version'),
+                    'is_rejected': True,
+                    'is_executable': False,
+                    'publication_status': 'ANALYSIS_ONLY',
+                    'rejected_reason': str(base.get('rejected_reason') or 'TESIS_DIRECCIONAL_NO_PUBLICADA'),
+                    'suggested_size': 0,
+                })
+                if _valid(candidate):
+                    return candidate
+        except Exception as exc:
+            base['manual_structural_recovery_error'] = type(exc).__name__
+
+        # Phase B: deterministic final candidate. Use observed structural anchors
+        # when available; ATR only supplies clearance/normalization.
+        direction = raw_action.lower()
+        def _append(values, value):
+            v = _num(value)
+            if v > 0 and math.isfinite(v):
+                values.append(v)
+
+        below, above = [], []
+        for key in ('supports', 'pivot_lows'):
+            for raw in (structure.get(key) or []):
+                _append(below, raw.get('price') if isinstance(raw, dict) else raw)
+        for key in ('resistances', 'pivot_highs'):
+            for raw in (structure.get(key) or []):
+                _append(above, raw.get('price') if isinstance(raw, dict) else raw)
+        _append(below, structure.get('nearest_support'))
+        _append(above, structure.get('nearest_resistance'))
+
+        for ob in (structure.get('order_blocks') or []):
+            if not isinstance(ob, dict):
+                continue
+            pr = ob.get('price_range') or []
+            if isinstance(pr, (list, tuple)) and len(pr) >= 2:
+                lo, hi = _num(pr[0]), _num(pr[1])
+                if lo > 0 and hi > 0:
+                    if str(ob.get('type') or '').lower() == 'bullish':
+                        below.extend([lo, hi])
+                    elif str(ob.get('type') or '').lower() == 'bearish':
+                        above.extend([lo, hi])
+        for fvg in (structure.get('fair_value_gaps') or structure.get('fvg') or []):
+            if not isinstance(fvg, dict) or fvg.get('filled') is True:
+                continue
+            lo = _num(fvg.get('gap_bottom') or fvg.get('bottom'))
+            hi = _num(fvg.get('gap_top') or fvg.get('top'))
+            if str(fvg.get('type') or '').lower().startswith('bull'):
+                if lo > 0: below.append(lo)
+                if hi > 0: below.append(hi)
+            elif str(fvg.get('type') or '').lower().startswith('bear'):
+                if lo > 0: above.append(lo)
+                if hi > 0: above.append(hi)
+
+        vp = structure.get('volume_profile') or {}
+        if isinstance(vp, dict):
+            for k in ('val', 'poc'):
+                v = _num(vp.get(k))
+                if 0 < v < current_price: below.append(v)
+            for k in ('vah', 'poc'):
+                v = _num(vp.get(k))
+                if v > current_price: above.append(v)
+            for row in (vp.get('hvn_nodes') or []) + (vp.get('lvn_nodes') or []):
+                v = _num(row.get('price') if isinstance(row, dict) else row)
+                if 0 < v < current_price: below.append(v)
+                elif v > current_price: above.append(v)
+
+        # Liquidation pools are valid Entry/TP context but not invalidation by themselves.
+        for row in ((liquidation or {}).get('active_bins') or []) if isinstance(liquidation, dict) else []:
+            if not isinstance(row, dict):
+                continue
+            lo = _num(row.get('price_bottom'))
+            hi = _num(row.get('price_top'))
+            center = (lo + hi) / 2.0 if lo > 0 and hi > 0 else 0.0
+            if 0 < center < current_price: below.append(center)
+            elif center > current_price: above.append(center)
+
+        # Keep only nearby, causally usable anchors.
+        below = sorted({v for v in below if 0 < v < current_price and (current_price - v) <= 3.2 * atr}, reverse=True)
+        above = sorted({v for v in above if v > current_price and (v - current_price) <= 3.2 * atr})
+
+        tf = str(timeframe)
+        pullback_atr = {
+            '30m': 0.12, '1h': 0.16, '2h': 0.20,
+            '4h': 0.24, '12h': 0.30, '1D': 0.35,
+        }.get(tf, 0.20)
+        stop_atr = {
+            '30m': 1.00, '1h': 1.10, '2h': 1.20,
+            '4h': 1.35, '12h': 1.50, '1D': 1.70,
+        }.get(tf, 1.20)
+        rr_target = {
+            '30m': 2.20, '1h': 2.20, '2h': 2.30,
+            '4h': 2.20, '12h': 2.00, '1D': 1.90,
+        }.get(tf, 2.10)
+
+        if direction == 'long':
+            # Prefer the closest valid reaction zone below market.
+            entry = below[0] if below else current_price - pullback_atr * atr
+            invalidation_anchors = [v for v in below if v < entry]
+            if invalidation_anchors:
+                sl = invalidation_anchors[0] - 0.22 * atr
+            else:
+                sl = entry - stop_atr * atr
+            try:
+                from execution_specialist_committees import evaluate_sl_reaction_conflict
+                _guard = evaluate_sl_reaction_conflict(
+                    structure=structure, direction='long', entry=entry,
+                    stop_loss=sl, atr=atr,
+                )
+                if _guard.get('conflict'):
+                    _level = _num(_guard.get('level'))
+                    _clear = max(0.22, _num(_guard.get('required_clearance_atr'), 0.22))
+                    if _level > 0:
+                        sl = min(sl, _level - _clear * atr)
+            except Exception:
+                pass
+            risk = max(entry - sl, 0.35 * atr)
+            targets = [v for v in above if v > entry]
+            viable = [(abs((v - entry) / risk - rr_target), v) for v in targets if (v - entry) / risk >= 1.35]
+            tp = min(viable)[1] if viable else entry + rr_target * risk
+        else:
+            entry = above[0] if above else current_price + pullback_atr * atr
+            invalidation_anchors = [v for v in above if v > entry]
+            if invalidation_anchors:
+                sl = invalidation_anchors[0] + 0.22 * atr
+            else:
+                sl = entry + stop_atr * atr
+            try:
+                from execution_specialist_committees import evaluate_sl_reaction_conflict
+                _guard = evaluate_sl_reaction_conflict(
+                    structure=structure, direction='short', entry=entry,
+                    stop_loss=sl, atr=atr,
+                )
+                if _guard.get('conflict'):
+                    _level = _num(_guard.get('level'))
+                    _clear = max(0.22, _num(_guard.get('required_clearance_atr'), 0.22))
+                    if _level > 0:
+                        sl = max(sl, _level + _clear * atr)
+            except Exception:
+                pass
+            risk = max(sl - entry, 0.35 * atr)
+            targets = [v for v in below if v < entry]
+            viable = [(abs((entry - v) / risk - rr_target), v) for v in targets if (entry - v) / risk >= 1.35]
+            tp = min(viable)[1] if viable else entry - rr_target * risk
+
+        # Ensure rounding cannot invert geometry on low-priced symbols.
+        entry = self._round_price(entry, symbol)
+        sl = self._round_price(sl, symbol)
+        tp = self._round_price(tp, symbol)
+        if raw_action == 'LONG' and not (sl < entry < tp):
+            entry = self._round_price(current_price - pullback_atr * atr, symbol)
+            sl = self._round_price(entry - stop_atr * atr, symbol)
+            tp = self._round_price(entry + rr_target * max(entry - sl, 0.35 * atr), symbol)
+        elif raw_action == 'SHORT' and not (tp < entry < sl):
+            entry = self._round_price(current_price + pullback_atr * atr, symbol)
+            sl = self._round_price(entry + stop_atr * atr, symbol)
+            tp = self._round_price(entry - rr_target * max(sl - entry, 0.35 * atr), symbol)
+
+        risk = abs(entry - sl)
+        rr = abs(tp - entry) / risk if risk > 0 else 0.0
+        leverage = int(max(1, round(_num(base.get('leverage') or volatility.get('suggested_leverage'), 1.0))))
+        result = dict(base)
+        result.update({
+            'entry': entry,
+            'stop_loss': sl,
+            'take_profit': tp,
+            'leverage': leverage,
+            'risk_reward': round(rr, 4),
+            'entry_source': 'Zona de reacción más cercana / retroceso ATR si no existe POI suficiente',
+            'sl_source': 'Invalidación detrás de estructura; fallback ATR sólo si falta ancla',
+            'tp_source': 'Estructura/liquidez opuesta; fallback R múltiple sólo si falta objetivo',
+            'manual_observation_geometry': True,
+            'manual_observation_action': raw_action,
+            'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
+            'manual_geometry_source': 'GUARANTEED_TECHNICAL_FALLBACK',
+            'manual_geometry_fallback': True,
+            'manual_geometry_authority': 'USER_MANUAL_ANALYSIS_ONLY',
+            'manual_geometry_atr': round(float(atr), 10),
+            'manual_geometry_rr_target': rr_target,
+            'entry_quality_score': min(_num(base.get('entry_quality_score'), 45.0), 55.0),
+            'sl_reliability': min(_num(base.get('sl_reliability'), 0.45), 0.55),
+            'tp_probability': min(_num(base.get('tp_probability'), 0.45), 0.55),
+            'is_rejected': True,
+            'is_executable': False,
+            'publication_status': 'ANALYSIS_ONLY',
+            'suggested_size': 0,
+            'rejected_reason': str(base.get('rejected_reason') or 'TESIS_DIRECCIONAL_NO_PUBLICADA'),
+        })
+        return result
+
     def _get_default_levels(
         self,
         current_price,
@@ -21203,9 +21563,9 @@ class TradingExpertSystem:
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
                 levels = dict(levels or {})
-                levels['pipeline_generation'] = '17.5.11R.2'
+                levels['pipeline_generation'] = '17.5.11R.3'
 
-                # 17.5.11R.2 — RESTORE THE OLD MANUAL FOLLOW-UP CONTRACT.
+                # 17.5.11R.3 — RESTORE + COMPLETE THE MANUAL FOLLOW-UP CONTRACT.
                 # A governed LONG/SHORT thesis that did not become an official
                 # signal still deserves the SAME Entry/SL/TP desk used by a
                 # Premium signal.  The resulting geometry remains ANALYSIS_ONLY:
@@ -21232,42 +21592,30 @@ class TradingExpertSystem:
                                 break
 
                         if _manual_action:
-                            _manual_levels = self.calculate_entry_levels(
-                                _manual_action,
-                                trend,
-                                momentum,
-                                volatility,
-                                structure,
-                                symbol,
-                                timeframe,
-                                liquidation=liquidation_data,
-                                execution_observations=capas,
-                            )
-                            _manual_levels = dict(_manual_levels or {})
-                            _me = float(_manual_levels.get('entry') or 0)
-                            _ms = float(_manual_levels.get('stop_loss') or 0)
-                            _mt = float(_manual_levels.get('take_profit') or 0)
-                            _geometry_ok = bool(
-                                _me > 0 and _ms > 0 and _mt > 0 and (
-                                    (_manual_action == 'LONG' and _ms < _me < _mt)
-                                    or (_manual_action == 'SHORT' and _mt < _me < _ms)
+                            try:
+                                _manual_levels = self.calculate_entry_levels(
+                                    _manual_action, trend, momentum, volatility,
+                                    structure, symbol, timeframe,
+                                    liquidation=liquidation_data,
+                                    execution_observations=capas,
                                 )
+                            except Exception:
+                                _manual_levels = levels
+                            levels = self._guaranteed_manual_geometry_175113(
+                                _manual_action, trend, momentum, volatility,
+                                structure, symbol, timeframe,
+                                liquidation=liquidation_data,
+                                existing_levels=_manual_levels,
                             )
-                            if _geometry_ok:
-                                levels = _manual_levels
-                                levels.update({
-                                    'pipeline_generation': '17.5.11R.2',
-                                    'is_rejected': True,
-                                    'is_executable': False,
-                                    'publication_status': 'ANALYSIS_ONLY',
-                                    'manual_observation_geometry': True,
-                                    'manual_observation_action': _manual_action,
-                                    'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
-                                    'rejected_reason': str(
-                                        _manual_levels.get('rejected_reason')
-                                        or 'TESIS_DIRECCIONAL_NO_PUBLICADA'
-                                    ),
-                                })
+                            levels.update({
+                                'pipeline_generation': '17.5.11R.3',
+                                'is_rejected': True,
+                                'is_executable': False,
+                                'publication_status': 'ANALYSIS_ONLY',
+                                'manual_observation_geometry': True,
+                                'manual_observation_action': _manual_action,
+                                'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
+                            })
                     except Exception as _manual_geometry_error:
                         levels['manual_observation_geometry'] = False
                         levels['manual_observation_error'] = type(_manual_geometry_error).__name__
@@ -21474,6 +21822,50 @@ class TradingExpertSystem:
                         print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
                 except Exception as _execution_guard_error:
                     operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
+
+            # ==========================================================
+            # COMMIT 17.5.11R.3 — GUARANTEED GEOMETRY FOR DIAGNOSTIC THESIS
+            # ==========================================================
+            # Some setups start directional but are downgraded to ESPERAR by a
+            # later execution/publication guard.  R.2 only built manual levels
+            # when the action was already non-directional at the first level
+            # calculation.  Complete the geometry here as a final invariant:
+            # every governed Futures/Multi LONG/SHORT thesis exposed in
+            # "Por qué no aparecen otras señales" carries Entry/SL/TP.
+            if analysis_system_type == 'futures':
+                try:
+                    _manual_action_r3 = ''
+                    _op_r3 = operational_intelligence if isinstance(operational_intelligence, dict) else {}
+                    _thesis_r3 = _op_r3.get('thesis') or {}
+                    for _raw_r3 in (
+                        accion_consenso,
+                        _op_r3.get('candidate_action'),
+                        _thesis_r3.get('direction'),
+                        (decision_audit or {}).get('original_action') if isinstance(decision_audit, dict) else None,
+                    ):
+                        _candidate_r3 = str(_raw_r3 or '').upper()
+                        if _candidate_r3 in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
+                            _candidate_r3 = 'LONG'
+                        elif _candidate_r3 in ('BEARISH', 'SELL', 'VENTA_SPOT'):
+                            _candidate_r3 = 'SHORT'
+                        if _candidate_r3 in ('LONG', 'SHORT'):
+                            _manual_action_r3 = _candidate_r3
+                            break
+                    if _manual_action_r3:
+                        levels = self._guaranteed_manual_geometry_175113(
+                            _manual_action_r3, trend, momentum, volatility,
+                            structure, symbol, timeframe,
+                            liquidation=liquidation_data,
+                            existing_levels=levels,
+                        )
+                        # This metadata only opens the user's manual follow-up
+                        # lane. Official execution/publication remains unchanged.
+                        if str(accion_consenso or '').upper() not in ('LONG', 'SHORT') or levels.get('is_executable') is False:
+                            levels['manual_observation_geometry'] = True
+                            levels['manual_observation_action'] = _manual_action_r3
+                            levels['publication_status'] = str(levels.get('publication_status') or 'ANALYSIS_ONLY')
+                except Exception as _r3_geometry_error:
+                    print(f"⚠️ [17.5.11R.3] geometría manual: {_r3_geometry_error}")
 
             # ============ CALCULAR CONVICCIÓN ============
             print(f"📈 Calculando convicción...")
@@ -33179,10 +33571,20 @@ def api_saved_signals_create():
                     if not isinstance(raw_result, dict):
                         continue
                     _same_id = str(raw_result.get('signal_id') or '') == source_signal_id
+                    _raw_symbol = str(raw_result.get('symbol') or (raw_key[0] if isinstance(raw_key,tuple) else '')).upper().replace('/','-')
+                    _raw_tf = str(raw_result.get('timeframe') or (raw_key[1] if isinstance(raw_key,tuple) and len(raw_key)>1 else ''))
+                    _requested_action = str(data.get('action') or '').upper()
+                    _raw_decision = raw_result.get('decision') or {}
+                    _raw_levels = raw_result.get('levels') or {}
+                    _raw_op = raw_result.get('operational_intelligence') or {}
+                    _raw_thesis = _raw_op.get('thesis') or {}
+                    _raw_action = str(_raw_levels.get('manual_observation_action') or _raw_decision.get('action') or _raw_op.get('candidate_action') or _raw_thesis.get('direction') or '').upper()
+                    if _raw_action in ('BULLISH','BUY','COMPRA_SPOT'): _raw_action='LONG'
+                    elif _raw_action in ('BEARISH','SELL','VENTA_SPOT'): _raw_action='SHORT'
                     _same_cell = bool(
-                        is_multiasset_save
-                        and str(raw_result.get('symbol') or (raw_key[0] if isinstance(raw_key,tuple) else '')).upper().replace('/','-') == str(data.get('symbol') or '').upper().replace('/','-')
-                        and str(raw_result.get('timeframe') or (raw_key[1] if isinstance(raw_key,tuple) and len(raw_key)>1 else '')) == str(data.get('timeframe') or '')
+                        _raw_symbol == str(data.get('symbol') or '').upper().replace('/','-')
+                        and _raw_tf == str(data.get('timeframe') or '')
+                        and (not _requested_action or _raw_action == _requested_action)
                     )
                     if _same_id or _same_cell:
                         source_result = raw_result
@@ -35788,7 +36190,48 @@ def _get_review_trader():
         return None
 
 
-# 17.5.11R.2 — selected Multi chart fallback.
+# 17.5.11R.3 — zero-network technical sentiment for the selected Multi cell.
+def _multi_technical_sentiment_175113(df, timeframe):
+    try:
+        close = [float(x) for x in df['close'].tolist()]
+        times = list(df['time'])
+        if len(close) < 8:
+            return {'available':False,'source':'MULTI_TECHNICAL_PROXY','historical':[]}
+        vals=[]
+        start=max(0,len(close)-30)
+        for i in range(start,len(close)):
+            lo=max(0,i-19); win=close[lo:i+1]
+            mn=min(win); mx=max(win); span=max(mx-mn,abs(close[i])*1e-9)
+            pos=(close[i]-mn)/span
+            mom=(close[i]/close[max(0,i-6)]-1.0) if i>0 else 0.0
+            value=max(0.0,min(100.0,50.0 + (pos-0.5)*55.0 + max(-0.18,min(0.18,mom))*110.0))
+            t=times[i]
+            try: date=pd.Timestamp(t).strftime('%Y-%m-%d %H:%M')
+            except Exception: date=str(t)
+            vals.append({'date':date,'value':round(value,2)})
+        current=float(vals[-1]['value'])
+        old7=float(vals[-min(7,len(vals))]['value'])
+        old30=float(vals[0]['value'])
+        t7=current-old7; t30=current-old30
+        if current>=65: cls='Sesgo técnico alcista'
+        elif current<=35: cls='Sesgo técnico bajista'
+        else: cls='Técnico neutral'
+        return {
+            'available':True,'source':'MULTI_TECHNICAL_PROXY',
+            'current_value':round(current,2),'classification':cls,
+            'trend_7d':round(t7,2),'trend_7d_pct':round(t7,2),
+            'trend_30d':round(t30,2),'trend_30d_pct':round(t30,2),
+            'volatility':0.0,'sentiment_score':round(current-50.0,2),
+            'sentiment_bias':'bullish_moderate' if current>=60 else ('bearish_moderate' if current<=40 else 'neutral'),
+            # Existing renderer reverses the provider history, so return newest first.
+            'historical':list(reversed(vals)),
+            'note':'Proxy técnico precio/posición/momentum. No es Fear & Greed cripto ni encuesta de inversores.',
+            'timeframe':str(timeframe),
+        }
+    except Exception:
+        return {'available':False,'source':'MULTI_TECHNICAL_PROXY','historical':[]}
+
+# 17.5.11R.3 — selected Multi progressive chart/layer fallback.
 # This is UI-only and on-demand: one selected symbol/TF, short TTL, no LLM, no
 # DB write, no universe scan.  It prevents a busy shared engine from leaving
 # the center chart blank or showing stale BTC identity.
@@ -35820,7 +36263,37 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
                 'volume':[float(x) for x in df['volume'].tolist()],
             },
             'ui_partial_chart_only':True,
+            'ui_partial_layers':'PRICE_STRUCTURE_LIQUIDITY_SENTIMENT',
         }
+        # Selected-cell CPU-only layers. They reuse the SAME candles already
+        # downloaded for the light chart: no extra network, DB or LLM call.
+        try: data['trend']=engine.analyze_trend_layer(df)
+        except Exception: pass
+        try: data['momentum']=engine.analyze_momentum_layer(df)
+        except Exception: pass
+        try: data['volatility']=engine.analyze_volatility_layer(df,symbol=symbol,timeframe=timeframe)
+        except Exception: pass
+        try: data['volume']=engine.analyze_volume_layer(df,timeframe)
+        except Exception: pass
+        try:
+            _st=engine.analyze_price_structure_layer(df,timeframe,symbol) or {}
+            if isinstance(_st,dict):
+                _st=dict(_st); _st.pop('df',None)
+                data['structure']=_st
+        except Exception: pass
+        try:
+            _hm=LiquidationHeatmap(timeframe=timeframe,symbol=symbol)
+            _hm.load_price_history(df)
+            _i=len(df)-1
+            _hm.update_heatmap(df,_i,float(df['high'].iloc[_i]),float(df['low'].iloc[_i]),float(df['close'].iloc[_i]),float(df['volume'].iloc[_i]))
+            data['liquidation']=_hm.get_heatmap_data(_i,float(df['close'].iloc[_i]))
+            if isinstance(data.get('liquidation'),dict):
+                data['liquidation']['ui_source']='SELECTED_CELL_LOCAL_MODEL'
+        except Exception: pass
+        try:
+            data['sentiment']=_multi_technical_sentiment_175113(df,timeframe)
+        except Exception:
+            pass
         try:
             from multiasset_system import MULTIASSET_SYMBOLS
             meta=(MULTIASSET_SYMBOLS or {}).get(str(symbol)) or {}
@@ -35911,7 +36384,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11R.2'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11R.3'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Schedule the governed heavy job first.  The lightweight selected-cell
@@ -35924,10 +36397,14 @@ def api_multiasset_analyze():
         partial={}
         if compact: partial.update(compact)
         if light:
-            partial.update({k:v for k,v in light.items() if k in ('success','symbol','timeframe','market','is_multiasset','current_price','live_price','df','display_name','asset_class','ui_partial_chart_only')})
+            partial.update({k:v for k,v in light.items() if k in (
+                'success','symbol','timeframe','market','is_multiasset','current_price','live_price',
+                'df','display_name','asset_class','ui_partial_chart_only','ui_partial_layers',
+                'trend','momentum','volatility','volume','structure','liquidation','sentiment'
+            )})
             # Never permit stale cached identity to override the selector.
             partial['symbol']=symbol; partial['timeframe']=timeframe; partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11R.2'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11R.3'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -36012,6 +36489,13 @@ def api_futures_market_maker_context():
         result=dict(_analyses.get((symbol,timeframe)) or {})
     except Exception:
         result={}
+    # Rich UI cache is often newer than the compact 30-cell runtime snapshot.
+    if not result:
+        try:
+            _ui_mm = _get_futures_ui_cached(symbol,timeframe)
+            if isinstance(_ui_mm,dict): result=dict(_ui_mm)
+        except Exception:
+            pass
     levels=dict(result.get('levels') or {}) if isinstance(result,dict) else {}
     mm=dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result,dict) else {}
 
@@ -40078,322 +40562,102 @@ def _futures_decision_audit_for_api(result):
     return audit
 
 def _futures_manual_risk_profile(result):
+    """17.5.11R.3 — manual follow-up is a USER lane, not Premium authority.
+
+    Every real closed-candle directional ANALYSIS_ONLY result with coherent
+    Entry/SL/TP can be saved. Safety/AI/Research/publication reasons remain
+    visible and determine the risk label, but they no longer delete the user's
+    ability to follow the hypothesis under their own risk.  Official signals,
+    Telegram and system performance statistics remain governed separately.
     """
-    Commit 36M — clasificación MANUAL de un ANALYSIS_ONLY.
-
-    IMPORTANTE:
-    - NO cambia publication_status.
-    - NO convierte el setup en EXECUTABLE_SIGNAL.
-    - Sólo decide si puede ofrecerse al usuario como guardado manual.
-    - Falla cerrado si falta trazabilidad 36E.
-
-    Clases:
-      MEDIUM:
-        llegó al Publication Gate y sólo falló SAFETY/TP_QUALITY,
-        con Safety >= mínimo duro.
-
-      HIGH:
-        fue rechazado únicamente por HARD_SAFETY,
-        pero está en banda BAJA (55 <= Safety < mínimo duro).
-
-      BLOCKED:
-        cualquier otro caso.
-    """
-
     blocked = {
         'allowed': False,
         'risk_class': 'BLOCKED',
-        'reason': (
-            'No cumple las condiciones mínimas para guardado manual.'
-        ),
+        'reason': 'Todavía no existe una geometría Entry/SL/TP válida.',
         'requires_ack': False,
-        'system_executable': False
+        'system_executable': False,
     }
-
-    if not isinstance(result, dict) or not result.get('success'):
+    if not isinstance(result, dict) or result.get('success') is False:
         return dict(blocked)
-
     decision = result.get('decision') or {}
     levels = result.get('levels') or {}
-
+    op = result.get('operational_intelligence') or {}
+    thesis = op.get('thesis') or {}
     action = str(
         levels.get('manual_observation_action')
         or decision.get('action')
-        or ((result.get('operational_intelligence') or {}).get('candidate_action'))
+        or op.get('candidate_action')
+        or decision.get('original_action')
+        or thesis.get('direction')
         or ''
     ).upper()
-    if action in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
-        action = 'LONG'
-    elif action in ('BEARISH', 'SELL', 'VENTA_SPOT'):
-        action = 'SHORT'
-
-    if action not in ('LONG', 'SHORT'):
+    if action in ('BULLISH','BUY','COMPRA_SPOT'): action='LONG'
+    elif action in ('BEARISH','SELL','VENTA_SPOT'): action='SHORT'
+    if action not in ('LONG','SHORT'):
         return dict(blocked)
 
-    # Sólo perpetuo real y vela cerrada.
-    if str(
-        result.get('analysis_mode') or ''
-    ).upper() != 'CLOSED_CANDLE':
-        return dict(blocked)
+    # Explicitly unsafe provenance still fails closed. Missing legacy flags do
+    # not: old Multi snapshots may not carry every field even though the candle
+    # is a normal completed provider observation.
+    mode = str(result.get('analysis_mode') or '').upper()
+    if mode and mode not in ('CLOSED_CANDLE','CLOSED','FINAL'):
+        out=dict(blocked); out['reason']='La hipótesis proviene de una vela todavía abierta.'; return out
+    if result.get('source_candle_closed') is False:
+        out=dict(blocked); out['reason']='La hipótesis todavía no pertenece a un cierre confirmado.'; return out
+    if result.get('market_data_is_synthetic') is True:
+        out=dict(blocked); out['reason']='Los datos de mercado son sintéticos; no se habilita Guardian.'; return out
 
-    if result.get('source_candle_closed') is not True:
-        return dict(blocked)
-
-    if result.get('market_data_is_synthetic') is not False:
-        return dict(blocked)
-
-    engine_status = str(
-        levels.get('publication_status')
-        or result.get('publication_status')
-        or (
-            'ANALYSIS_ONLY'
-            if levels.get('is_rejected')
-            else 'EXECUTABLE_SIGNAL'
-        )
-    ).upper()
-
-
-    # ================================================================
-    # COMMIT 36S.1
-    # ================================================================
-    #
-    # Si el AI Control bloqueó una Premium,
-    # NO puede reingresar por el guardado manual.
-    # ================================================================
-
-    # HOTFIX H.1 — LINK/BNB pueden verse en frontend, pero siguen siendo
-    # Research/Shadow. La visibilidad no debe convertirse accidentalmente en
-    # una vía de guardado manual ni en autoridad productiva.
-    if engine_status == 'RESEARCH_ONLY_SHADOW':
-        research_blocked = dict(blocked)
-        research_blocked['reason'] = (
-            'Activo visible en Research/Shadow. Todavía no tiene autoridad '
-            'productiva ni guardado manual.'
-        )
-        return research_blocked
-
-
-    if (
-        engine_status
-        == 'AI_BLOCKED'
-    ):
-
-        ai_blocked = dict(
-            blocked
-        )
-
-        ai_blocked[
-            'reason'
-        ] = (
-            'La señal superó el motor técnico, '
-            'pero fue bloqueada por la segunda '
-            'puerta de calidad IA 36S.'
-        )
-
-        return ai_blocked
-
-
-    # Una señal Premium/ejecutable
-    # no necesita override manual.
-
-    if (
-        engine_status
-        == 'EXECUTABLE_SIGNAL'
-    ):
-
-        return dict(
-            blocked
-        )
-
-    def _num(value, default=None):
+    def _num(v, default=None):
         try:
-            number = float(value)
-            if not math.isfinite(number):
-                return default
-            return number
-        except (TypeError, ValueError):
+            n=float(v)
+            return n if math.isfinite(n) else default
+        except (TypeError,ValueError):
             return default
-
-    entry = _num(levels.get('entry'))
-    stop_loss = _num(levels.get('stop_loss'))
-    take_profit = _num(levels.get('take_profit'))
-    safety = _num(levels.get('execution_safety'))
-    minimum = _num(
-        levels.get('execution_safety_operational_min'),
-        65.0
-    )
-    rr = _num(levels.get('risk_reward'))
-
-    if not all(
-        value is not None and value > 0
-        for value in (entry, stop_loss, take_profit)
-    ):
+    e=_num(levels.get('entry')); sl=_num(levels.get('stop_loss')); tp=_num(levels.get('take_profit'))
+    if not all(v is not None and v>0 for v in (e,sl,tp)):
         return dict(blocked)
-
-    geometry_ok = (
-        (
-            action == 'LONG'
-            and stop_loss < entry < take_profit
-        )
-        or
-        (
-            action == 'SHORT'
-            and take_profit < entry < stop_loss
-        )
-    )
-
+    geometry_ok=(action=='LONG' and sl<e<tp) or (action=='SHORT' and tp<e<sl)
     if not geometry_ok:
+        out=dict(blocked); out['reason']='Entry/SL/TP existen pero su orden geométrico es inválido.'; return out
+    risk=abs(e-sl)
+    rr=_num(levels.get('risk_reward'))
+    if rr is None and risk>0: rr=abs(tp-e)/risk
+    if rr is None or rr<=0:
+        out=dict(blocked); out['reason']='No se pudo reconstruir un R/R coherente.'; return out
+
+    engine_status=str(levels.get('publication_status') or result.get('publication_status') or 'ANALYSIS_ONLY').upper()
+    if engine_status=='EXECUTABLE_SIGNAL' and levels.get('is_executable') is not False:
+        # Official signals use the normal save path, not the manual override.
         return dict(blocked)
 
-    # Si RR no vino persistido, reconstruirlo sólo para validación.
-    if rr is None:
-        risk_distance = abs(entry - stop_loss)
-        reward_distance = abs(take_profit - entry)
-        if risk_distance <= 0:
-            return dict(blocked)
-        rr = reward_distance / risk_distance
+    safety=_num(levels.get('execution_safety'))
+    minimum=_num(levels.get('execution_safety_operational_min'),65.0)
+    stage=str(((levels.get('futures_filter_trace') or {}).get('stage') or levels.get('futures_filter_stage') or '')).upper()
+    source=str(levels.get('manual_geometry_source') or ('PRIMARY_EXECUTION_COMMITTEE' if not levels.get('manual_geometry_fallback') else 'GUARANTEED_TECHNICAL_FALLBACK'))
 
-    # Mantener la banda económica/estructural Premium para el override.
-    # El usuario puede asumir más incertidumbre de Safety/TP Quality,
-    # pero no una geometría de RR incoherente.
-    if not (1.8 <= rr <= 3.5):
-        result_blocked = dict(blocked)
-        result_blocked['reason'] = (
-            f'R/R {rr:.2f} fuera de 1.8–3.5; '
-            'no se habilita guardado manual.'
-        )
-        return result_blocked
-
-    if safety is None or minimum is None:
-        return dict(blocked)
-
-    # 17.5.11R.2 — a complete geometry built from a governed thesis may be
-    # followed manually even when the final publication decision was ESPERAR /
-    # PRECAUCION.  It is intentionally classified HIGH and never becomes an
-    # official signal.  This restores the pre-17.5.11 user workflow while
-    # keeping Entry/SL/TP geometry validation mandatory.
-    if levels.get('manual_observation_geometry') is True:
-        return {
-            'allowed': True,
-            'risk_class': 'HIGH',
-            'reason': (
-                'Hipótesis direccional con Entry/SL/TP técnico completo, pero '
-                'sin autoridad de publicación. Guardado manual bajo riesgo del usuario.'
-            ),
-            'requires_ack': True,
-            'system_executable': False,
-            'execution_safety': round(float(safety), 2),
-            'execution_safety_minimum': round(float(minimum), 2),
-            'risk_reward': round(float(rr), 4),
-            'rejection_stage': 'MANUAL_ANALYSIS_GEOMETRY',
-            'rejection_codes': ['NOT_OFFICIAL_SIGNAL'],
-        }
-
-    trace = (
-        levels.get('futures_filter_trace')
-        or {}
-    )
-
-    stage = str(
-        trace.get('stage')
-        or levels.get('futures_filter_stage')
-        or ''
-    ).upper()
-
-    raw_codes = (
-        trace.get('reason_codes')
-        or levels.get('futures_filter_reason_codes')
-        or []
-    )
-
-    if not isinstance(raw_codes, (list, tuple, set)):
-        raw_codes = [raw_codes]
-
-    codes = {
-        str(code or '').strip().upper()
-        for code in raw_codes
-        if str(code or '').strip()
-    }
-
-    # Fallar cerrado sin trazabilidad exacta.
-    if not stage or not codes:
-        result_blocked = dict(blocked)
-        result_blocked['reason'] = (
-            'Falta trazabilidad exacta 36E; '
-            'no se permite convertir el diagnóstico en seguimiento manual.'
-        )
-        return result_blocked
-
-    # ---------------------------------------------------------------
-    # RIESGO MEDIO
-    # ---------------------------------------------------------------
-    # Llegó realmente al Publication Gate y sólo falló criterios
-    # "near-Premium" que ya utiliza el experimento Cautious.
-    if (
-        stage == 'PUBLICATION_GATE'
-        and codes.issubset({'SAFETY', 'TP_QUALITY'})
-        and safety >= minimum
-    ):
-        return {
-            'allowed': True,
-            'risk_class': 'MEDIUM',
-            'reason': (
-                'Superó el Safety mínimo duro, pero no alcanzó '
-                'la publicación Premium. Guardado manual opcional.'
-            ),
-            'requires_ack': True,
-            'system_executable': False,
-            'execution_safety': round(safety, 2),
-            'execution_safety_minimum': round(minimum, 2),
-            'risk_reward': round(rr, 4),
-            'rejection_stage': stage,
-            'rejection_codes': sorted(codes)
-        }
-
-    # ---------------------------------------------------------------
-    # RIESGO ALTO
-    # ---------------------------------------------------------------
-    # Sólo HARD_SAFETY, nunca fallos económicos/leverage/ATR/etc.
-    # Safety <55 permanece RECHAZAR y no es guardable como operación.
-    if (
-        stage == 'PRE_GATE'
-        and codes == {'HARD_SAFETY'}
-        and 55.0 <= safety < minimum
-    ):
-        return {
-            'allowed': True,
-            'risk_class': 'HIGH',
-            'reason': (
-                'Safety en banda BAJA (55–64.9). '
-                'No es señal oficial; sólo seguimiento manual experimental.'
-            ),
-            'requires_ack': True,
-            'system_executable': False,
-            'execution_safety': round(safety, 2),
-            'execution_safety_minimum': round(minimum, 2),
-            'risk_reward': round(rr, 4),
-            'rejection_stage': stage,
-            'rejection_codes': sorted(codes)
-        }
-
-    result_blocked = dict(blocked)
-
-    if safety < 55:
-        result_blocked['reason'] = (
-            f'Safety {safety:.1f} está en RECHAZAR (<55). '
-            'No se permite guardado manual como operación.'
-        )
-    elif stage == 'PRE_GATE':
-        result_blocked['reason'] = (
-            'El rechazo ocurrió antes del gate por una causa distinta '
-            'de HARD_SAFETY; no se permite override manual.'
-        )
+    medium=bool(safety is not None and minimum is not None and safety>=minimum and stage=='PUBLICATION_GATE')
+    risk_class='MEDIUM' if medium else 'HIGH'
+    if source=='GUARANTEED_TECHNICAL_FALLBACK':
+        reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.'
+    elif medium:
+        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.'
+    elif safety is not None:
+        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.'
     else:
-        result_blocked['reason'] = (
-            'El rechazo incluye guardrails que no deben ignorarse manualmente.'
-        )
-
-    return result_blocked
+        reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.'
+    return {
+        'allowed': True,
+        'risk_class': risk_class,
+        'reason': reason,
+        'requires_ack': True,
+        'system_executable': False,
+        'execution_safety': round(safety,2) if safety is not None else None,
+        'execution_safety_minimum': round(minimum,2) if minimum is not None else None,
+        'risk_reward': round(float(rr),4),
+        'rejection_stage': stage or 'ANALYSIS_ONLY',
+        'rejection_codes': [engine_status] if engine_status else ['ANALYSIS_ONLY'],
+        'manual_geometry_source': source,
+    }
 
 
 def _classify_futures_analysis_result(
@@ -40763,20 +41027,21 @@ def _build_futures_analysis_visibility(cache, min_confidence):
 
 
 def _futures_directional_hidden_candidates(visibility, source_context, representative_ids=None):
-    """17.5.11 truthful read-only diagnostics for every governed LONG/SHORT thesis.
+    """17.5.11R.3 — visible + manually saveable governed LONG/SHORT theses.
 
-    Diagnostic visibility is not manual-save authority and never promotes a
-    row to executable. Previous-cycle manual save remains server-policy gated.
+    Manual save is intentionally independent from Premium publication.  A row
+    from the current closed-candle snapshot may be saved immediately when the
+    server profile confirms real data + coherent Entry/SL/TP.  Saving never
+    promotes it to EXECUTABLE_SIGNAL or official Telegram.
     """
     candidates=(visibility or {}).get('candidates') or []
-    previous=str(source_context).upper()=='PREVIOUS_ANALYSIS_ONLY'
     selected={}
     for raw in candidates:
         if not isinstance(raw,dict): continue
         action=str(raw.get('diagnostic_action') or raw.get('action') or '').upper()
         if action not in ('LONG','SHORT') or str(raw.get('classification') or '').upper()!='ANALYSIS_ONLY': continue
         item=dict(raw); item['action']=action; item['source_context']=str(source_context).upper(); item['diagnostic_only']=True
-        allowed=bool(raw.get('manual_save_allowed')) and previous
+        allowed=bool(raw.get('manual_save_allowed'))
         if representative_ids is not None and str(raw.get('signal_id') or '') not in representative_ids: allowed=False
         item['manual_save_allowed']=allowed
         key=(str(item.get('symbol') or ''),str(item.get('timeframe') or ''))
@@ -41176,8 +41441,9 @@ def api_futures_signals_active():
                 _public_pipeline_health_175103(cache.get('analysis') or {}),
             'analysis_candidates':
                 visibility['candidates'],
-            # Hipótesis MEDIUM/HIGH del análisis ACTUAL: sólo navegación
-            # y diagnóstico; no guardables hasta que exista cierre confirmado.
+            # Hipótesis del último cierre ACTUAL: siguen siendo ANALYSIS_ONLY,
+            # pero pueden guardarse inmediatamente si el servidor confirma
+            # datos reales + geometría Entry/SL/TP coherente.
             'other_directional_signals':
                 _futures_directional_hidden_candidates(
                     visibility,
