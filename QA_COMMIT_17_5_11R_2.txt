@@ -1,0 +1,45 @@
+COMMIT 17.5.11R.2 — QA FINAL
+Base overlaid for QA: full 17.5.10.9 repository snapshot
+Date: 2026-09-30
+
+SYNTAX
+PASS Python py_compile:
+- app.py
+- operational_intelligence.py
+- contingency_strategy_engine.py
+- execution_specialist_committees.py
+- strategy_quality_extension_175105.py
+- market_maker_math.py
+- options_market_context.py
+- validated_strategy_routes_175111r1.py
+
+PASS Node --check:
+- static/futures.js
+- static/script.js
+- static/market_maker_frontend.js
+
+FUNCTIONAL SUITES
+- Geometry + Runtime: 19/19 PASS
+- Multi Scheduler: 8/8 PASS
+- Structure regression: 23/23 PASS
+- Frontend: 11/11 PASS
+- R.1 exact validated routes: 18/18 PASS
+- R.2 manual save + Multi chart + D/G/T: 11/11 PASS
+
+TOTAL FUNCTIONAL: 90/90 PASS
+
+R.2-specific checks:
+1. ANALYSIS_ONLY with valid committee Entry/SL/TP can be saved manual HIGH while system_executable remains false.
+2. Invalid manual geometry remains blocked.
+3. Frontend restores Guardar seguimiento / Guardar bajo mi riesgo / Guardar en operación.
+4. Frontend requires server manual_save_allowed=true.
+5. Same Entry/SL/TP desk serves non-published governed thesis without promoting it.
+6. Multi lightweight busy snapshot returns exact selected symbol/TF and candles.
+7. Multi frontend draws partial chart while heavy engine remains busy.
+8. Black-Scholes Delta/Gamma/Theta theoretical curves are available with valid spot even without public option chain.
+9. Market-maker endpoint can recover selected spot if rich Futures cache is empty.
+10. Manual Multi save validates against Multi cache.
+11. Multi rows keep market=multiasset for saved/Guardian lifecycle.
+
+IMPORTANT QA LIMITATION
+Flask is not installed in the offline container, so a live Flask/Gunicorn server was not booted. QA used AST/unit execution, repository-complete regression suites, and Python/JavaScript syntax checks. Render deployment remains the final infrastructure integration test.

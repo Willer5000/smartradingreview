@@ -2977,12 +2977,23 @@ window.runCompleteAnalysis = function() {
                 const maxBusyMs = isMulti ? 65000 : 90000;
                 const maxBusyRetries = isMulti ? 10 : 8;
 
-                if (data.partial && data.data?.decision) {
+                if (data.partial && data.data) {
                     window.currentAnalysis = data.data;
-                    try {
-                        updateInstantRecommendation(data.data);
-                    } catch (partialErr) {
-                        console.debug(`${isMulti ? 'Multi-Activo' : 'Futures'} parcial: recomendación compacta no renderizada`, partialErr);
+                    if (data.data?.decision) {
+                        try {
+                            updateInstantRecommendation(data.data);
+                        } catch (partialErr) {
+                            console.debug(`${isMulti ? 'Multi-Activo' : 'Futures'} parcial: recomendación compacta no renderizada`, partialErr);
+                        }
+                    }
+                    // 17.5.11R.2 — Multi can draw the selected market candles
+                    // even while the shared heavy engine is finishing another
+                    // task. This UI-only chart snapshot never creates a signal.
+                    if (isMulti && data.data?.df) {
+                        try { window.updateAllCharts?.(data.data); } catch (_) {}
+                        try { window.updateCandleChart?.(data.data); } catch (_) {}
+                        try { window.updatePattern4Chart?.(data.data); } catch (_) {}
+                        try { window.updateFormation40Chart?.(data.data); } catch (_) {}
                     }
                 }
 
@@ -3018,7 +3029,7 @@ window.runCompleteAnalysis = function() {
                                 <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
-                                        ? 'No se seguirá haciendo polling. La página, el Router y el precio continúan disponibles; reintenta cuando quieras.'
+                                        ? 'No se seguirá haciendo polling. El gráfico ligero, el Router, el precio y el último análisis válido continúan disponibles; reintenta cuando quieras.'
                                         : 'La página sigue disponible. Puedes reintentar sin recargarla.'}
                                 </div>
                                 <button type="button" class="btn btn-sm btn-outline-warning mt-2"

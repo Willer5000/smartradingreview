@@ -21203,7 +21203,74 @@ class TradingExpertSystem:
             else:
                 levels = self._get_default_levels(structure.get('current_price', 0), symbol)
                 levels = dict(levels or {})
-                levels['pipeline_generation'] = '17.5.10.4'
+                levels['pipeline_generation'] = '17.5.11R.2'
+
+                # 17.5.11R.2 — RESTORE THE OLD MANUAL FOLLOW-UP CONTRACT.
+                # A governed LONG/SHORT thesis that did not become an official
+                # signal still deserves the SAME Entry/SL/TP desk used by a
+                # Premium signal.  The resulting geometry remains ANALYSIS_ONLY:
+                # it cannot publish, alert Telegram as official, or alter Safety.
+                # It only lets the user save the hypothesis under their own risk
+                # so Saved/Guardian can protect it afterwards.
+                if analysis_system_type == 'futures':
+                    try:
+                        _manual_action = ''
+                        _op = operational_intelligence if isinstance(operational_intelligence, dict) else {}
+                        _thesis = _op.get('thesis') or {}
+                        for _raw in (
+                            _op.get('candidate_action'),
+                            _thesis.get('direction'),
+                            (decision_audit or {}).get('original_action') if isinstance(decision_audit, dict) else None,
+                        ):
+                            _candidate = str(_raw or '').upper()
+                            if _candidate in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
+                                _candidate = 'LONG'
+                            elif _candidate in ('BEARISH', 'SELL', 'VENTA_SPOT'):
+                                _candidate = 'SHORT'
+                            if _candidate in ('LONG', 'SHORT'):
+                                _manual_action = _candidate
+                                break
+
+                        if _manual_action:
+                            _manual_levels = self.calculate_entry_levels(
+                                _manual_action,
+                                trend,
+                                momentum,
+                                volatility,
+                                structure,
+                                symbol,
+                                timeframe,
+                                liquidation=liquidation_data,
+                                execution_observations=capas,
+                            )
+                            _manual_levels = dict(_manual_levels or {})
+                            _me = float(_manual_levels.get('entry') or 0)
+                            _ms = float(_manual_levels.get('stop_loss') or 0)
+                            _mt = float(_manual_levels.get('take_profit') or 0)
+                            _geometry_ok = bool(
+                                _me > 0 and _ms > 0 and _mt > 0 and (
+                                    (_manual_action == 'LONG' and _ms < _me < _mt)
+                                    or (_manual_action == 'SHORT' and _mt < _me < _ms)
+                                )
+                            )
+                            if _geometry_ok:
+                                levels = _manual_levels
+                                levels.update({
+                                    'pipeline_generation': '17.5.11R.2',
+                                    'is_rejected': True,
+                                    'is_executable': False,
+                                    'publication_status': 'ANALYSIS_ONLY',
+                                    'manual_observation_geometry': True,
+                                    'manual_observation_action': _manual_action,
+                                    'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
+                                    'rejected_reason': str(
+                                        _manual_levels.get('rejected_reason')
+                                        or 'TESIS_DIRECCIONAL_NO_PUBLICADA'
+                                    ),
+                                })
+                    except Exception as _manual_geometry_error:
+                        levels['manual_observation_geometry'] = False
+                        levels['manual_observation_error'] = type(_manual_geometry_error).__name__
 
             # ==========================================================
             # COMMIT 17.5.10.2 — EXECUTION COMPLETENESS CONTRACT
@@ -32872,6 +32939,8 @@ def api_saved_signals_create():
         
         # Agregar usuario a los datos
         data['user_name'] = user
+        request_market = str(data.get('market') or '').strip().lower()
+        is_multiasset_save = request_market == 'multiasset'
         # ==============================================================
         # COMMIT 36M — VALIDAR OVERRIDE MANUAL EN EL SERVIDOR
         # ==============================================================
@@ -32938,17 +33007,26 @@ def api_saved_signals_create():
             # justificar el override. La fuente debe existir en el snapshot
             # canónico del servidor: último cierre (PREVIOUS) o lifecycle
             # persistente (ACTIVE).
-            current_cache = _get_futures_analysis_snapshot_read_only()
+            if is_multiasset_save:
+                with _MULTI_ASSET_CACHE['lock']:
+                    _multi_analysis = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+                current_cache = {
+                    'snapshot_available': bool(_multi_analysis),
+                    'analysis': _multi_analysis,
+                    'lifecycle': {},
+                }
+            else:
+                current_cache = _get_futures_analysis_snapshot_read_only()
             if current_cache.get('snapshot_available') is not True:
                 return jsonify({
                     'success': False,
                     'error': (
-                        'El snapshot de Futuros todavía no está disponible. '
-                        'Actualiza Futuros y vuelve a intentarlo.'
+                        'El snapshot del mercado todavía no está disponible. '
+                        'Actualiza la vista y vuelve a intentarlo.'
                     )
                 }), 409
 
-            if source_context == 'ACTIVE_ANALYSIS_ONLY':
+            if source_context == 'ACTIVE_ANALYSIS_ONLY' and not is_multiasset_save:
                 lifecycle_record = (
                     current_cache.get('lifecycle')
                     or {}
@@ -33097,12 +33175,16 @@ def api_saved_signals_create():
                 raw_analysis = current_cache.get('analysis') or {}
                 source_result = None
 
-                for raw_result in raw_analysis.values():
-                    if (
-                        isinstance(raw_result, dict)
-                        and str(raw_result.get('signal_id') or '')
-                            == source_signal_id
-                    ):
+                for raw_key, raw_result in raw_analysis.items():
+                    if not isinstance(raw_result, dict):
+                        continue
+                    _same_id = str(raw_result.get('signal_id') or '') == source_signal_id
+                    _same_cell = bool(
+                        is_multiasset_save
+                        and str(raw_result.get('symbol') or (raw_key[0] if isinstance(raw_key,tuple) else '')).upper().replace('/','-') == str(data.get('symbol') or '').upper().replace('/','-')
+                        and str(raw_result.get('timeframe') or (raw_key[1] if isinstance(raw_key,tuple) and len(raw_key)>1 else '')) == str(data.get('timeframe') or '')
+                    )
+                    if _same_id or _same_cell:
                         source_result = raw_result
                         break
 
@@ -34766,6 +34848,7 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
         'signal_id': str(result.get('signal_id') or ''),
         'symbol': result.get('symbol'), 'timeframe': result.get('timeframe'),
         'display_name': result.get('display_name'), 'asset_class': result.get('asset_class'),
+        'market': 'multiasset',
         'action': action, 'confidence': float(decision.get('confidence') or 0),
         'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'),
         'take_profit': levels.get('take_profit'), 'leverage': levels.get('leverage'),
@@ -35705,6 +35788,54 @@ def _get_review_trader():
         return None
 
 
+# 17.5.11R.2 — selected Multi chart fallback.
+# This is UI-only and on-demand: one selected symbol/TF, short TTL, no LLM, no
+# DB write, no universe scan.  It prevents a busy shared engine from leaving
+# the center chart blank or showing stale BTC identity.
+_MULTI_UI_LIGHT_CACHE = {'lock': threading.RLock(), 'items': {}}
+
+def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
+    key=(str(symbol),str(timeframe)); now=time.time(); ttl=60.0
+    with _MULTI_UI_LIGHT_CACHE['lock']:
+        item=(_MULTI_UI_LIGHT_CACHE.get('items') or {}).get(key)
+        if isinstance(item,dict) and now-float(item.get('ts') or 0) <= ttl:
+            return dict(item.get('data') or {})
+    engine=_get_multiasset_system()
+    if engine is None: return {}
+    try:
+        df=engine.get_kucoin_data(symbol,timeframe)
+        if df is None or getattr(df,'empty',True): return {}
+        if len(df)>180: df=df.tail(180)
+        data={
+            'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
+            'market':'multiasset','is_multiasset':True,
+            'current_price':float(df['close'].iloc[-1]),
+            'live_price':float(df['close'].iloc[-1]),
+            'df':{
+                'time':[str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
+                'open':[float(x) for x in df['open'].tolist()],
+                'high':[float(x) for x in df['high'].tolist()],
+                'low':[float(x) for x in df['low'].tolist()],
+                'close':[float(x) for x in df['close'].tolist()],
+                'volume':[float(x) for x in df['volume'].tolist()],
+            },
+            'ui_partial_chart_only':True,
+        }
+        try:
+            from multiasset_system import MULTIASSET_SYMBOLS
+            meta=(MULTIASSET_SYMBOLS or {}).get(str(symbol)) or {}
+            data['display_name']=meta.get('name') or str(symbol)
+            data['asset_class']=meta.get('asset_class')
+        except Exception: pass
+        with _MULTI_UI_LIGHT_CACHE['lock']:
+            _MULTI_UI_LIGHT_CACHE['items'][key]={'ts':now,'data':data}
+            if len(_MULTI_UI_LIGHT_CACHE['items'])>4:
+                oldest=sorted(_MULTI_UI_LIGHT_CACHE['items'].items(),key=lambda kv:float((kv[1] or {}).get('ts') or 0))
+                for old_key,_ in oldest[:-4]: _MULTI_UI_LIGHT_CACHE['items'].pop(old_key,None)
+        return data
+    except Exception:
+        return {}
+
 # 17.5.11 — cache-only Multi-Asset diagnostic lane. No market/DB/LLM call.
 def _multiasset_directional_diagnostics_17511(analyses):
     rows=[]
@@ -35730,7 +35861,8 @@ def _multiasset_directional_diagnostics_17511(analyses):
         levels=result.get('levels') or {}; funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
         reason=str(levels.get('rejected_reason') or result.get('rejected_reason') or decision.get('reason') or (decision.get('razones') or [''])[0] or 'La tesis no superó la ejecución/publicación técnica.')[:520]
         state=_multiasset_signal_temporal_state(result)
-        rows.append({'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':False,'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
+        manual_profile = _futures_manual_risk_profile(result)
+        rows.append({'signal_id':str(result.get('signal_id') or ''),'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':bool(manual_profile.get('allowed')),'manual_risk_class':manual_profile.get('risk_class'),'manual_risk_reason':manual_profile.get('reason'),'manual_requires_ack':bool(manual_profile.get('requires_ack')),'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'leverage':levels.get('leverage'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'execution_safety_minimum':manual_profile.get('execution_safety_minimum'),'source_candle_timestamp':result.get('source_candle_timestamp'),'source_candle_close_timestamp':result.get('source_candle_close_timestamp'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
     rows.sort(key=lambda r:(-float(r.get('diagnostic_quality') or r.get('confidence') or 0),r['symbol'],r['timeframe']))
     return rows[:24]
 
@@ -35779,14 +35911,25 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11R.2'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
+        # Schedule the governed heavy job first.  The lightweight selected-cell
+        # chart below is UI-only and must never become a prerequisite for the
+        # real analysis job.  This ordering also fails open if a provider cannot
+        # serve the light snapshot: Multi still remains queued instead of stuck.
         recent_error=_get_futures_ui_recent_error(symbol,timeframe)
         state=_start_futures_ui_analysis_async(symbol,timeframe,'multiasset')
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11'}
-        if compact:
-            body.update({'partial':True,'data':compact})
+        light=_multiasset_light_chart_snapshot_175112(symbol,timeframe)
+        partial={}
+        if compact: partial.update(compact)
+        if light:
+            partial.update({k:v for k,v in light.items() if k in ('success','symbol','timeframe','market','is_multiasset','current_price','live_price','df','display_name','asset_class','ui_partial_chart_only')})
+            # Never permit stale cached identity to override the selector.
+            partial['symbol']=symbol; partial['timeframe']=timeframe; partial['market']='multiasset'; partial['is_multiasset']=True
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11R.2'}
+        if partial:
+            body.update({'partial':True,'data':partial})
         if recent_error:
             body['recent_error']=recent_error
         return jsonify(body),202
@@ -35883,6 +36026,11 @@ def api_futures_market_maker_context():
             spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
             if spot <= 0 and rows:
                 spot=float((rows[0] or {}).get('underlying_price') or 0)
+            if spot <= 0:
+                try:
+                    market=_get_futures_system(); df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
+                    if df is not None and not getattr(df,'empty',True): spot=float(df['close'].iloc[-1])
+                except Exception: spot=0.0
             if spot > 0:
                 from market_maker_math import build_market_maker_context
                 mm=build_market_maker_context(
@@ -35893,12 +36041,23 @@ def api_futures_market_maker_context():
                 ) or {}
         elif not mm:
             spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+            if spot <= 0:
+                # UI-only lightweight fallback: the chart must not disappear
+                # just because the rich Futures analysis cache was evicted.
+                try:
+                    market=_get_futures_system()
+                    df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
+                    if df is not None and not getattr(df,'empty',True):
+                        spot=float(df['close'].iloc[-1])
+                except Exception:
+                    spot=0.0
             if spot > 0:
                 from market_maker_math import build_market_maker_context
+                _mm_seed = result if result else {'current_price':spot,'levels':{'entry':spot}}
                 mm=build_market_maker_context(
                     spot=spot, option_chain=[],
-                    realized_or_implied_volatility=_estimate_mm_volatility(result),
-                    as_of=result.get('source_candle_close_timestamp'),
+                    realized_or_implied_volatility=_estimate_mm_volatility(_mm_seed),
+                    as_of=(result.get('source_candle_close_timestamp') if result else None),
                 ) or {}
     except Exception as exc:
         if not mm:
@@ -38000,7 +38159,11 @@ def _refresh_futures_signal_lifecycle(
 
         decision = result.get('decision', {}) or {}
         levels = result.get('levels', {}) or {}
-        action = str(decision.get('action') or '').upper()
+        action = str(
+            levels.get('manual_observation_action')
+            or decision.get('action')
+            or ''
+        ).upper()
         signal_id = str(result.get('signal_id') or '')
         source_ts = result.get('source_candle_timestamp')
         source_close_ts = result.get('source_candle_close_timestamp')
@@ -39954,8 +40117,15 @@ def _futures_manual_risk_profile(result):
     levels = result.get('levels') or {}
 
     action = str(
-        decision.get('action') or ''
+        levels.get('manual_observation_action')
+        or decision.get('action')
+        or ((result.get('operational_intelligence') or {}).get('candidate_action'))
+        or ''
     ).upper()
+    if action in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
+        action = 'LONG'
+    elif action in ('BEARISH', 'SELL', 'VENTA_SPOT'):
+        action = 'SHORT'
 
     if action not in ('LONG', 'SHORT'):
         return dict(blocked)
@@ -40096,6 +40266,28 @@ def _futures_manual_risk_profile(result):
 
     if safety is None or minimum is None:
         return dict(blocked)
+
+    # 17.5.11R.2 — a complete geometry built from a governed thesis may be
+    # followed manually even when the final publication decision was ESPERAR /
+    # PRECAUCION.  It is intentionally classified HIGH and never becomes an
+    # official signal.  This restores the pre-17.5.11 user workflow while
+    # keeping Entry/SL/TP geometry validation mandatory.
+    if levels.get('manual_observation_geometry') is True:
+        return {
+            'allowed': True,
+            'risk_class': 'HIGH',
+            'reason': (
+                'Hipótesis direccional con Entry/SL/TP técnico completo, pero '
+                'sin autoridad de publicación. Guardado manual bajo riesgo del usuario.'
+            ),
+            'requires_ack': True,
+            'system_executable': False,
+            'execution_safety': round(float(safety), 2),
+            'execution_safety_minimum': round(float(minimum), 2),
+            'risk_reward': round(float(rr), 4),
+            'rejection_stage': 'MANUAL_ANALYSIS_GEOMETRY',
+            'rejection_codes': ['NOT_OFFICIAL_SIGNAL'],
+        }
 
     trace = (
         levels.get('futures_filter_trace')
@@ -40766,7 +40958,11 @@ def api_futures_signals_active():
                 continue
             _decision = _latest.get('decision') or {}
             _levels = _latest.get('levels') or {}
-            _action = str(_decision.get('action') or '').upper()
+            _action = str(
+                _levels.get('manual_observation_action')
+                or _decision.get('action')
+                or ''
+            ).upper()
             _publication = str(
                 _levels.get('publication_status')
                 or ('ANALYSIS_ONLY' if _levels.get('is_rejected') else 'EXECUTABLE_SIGNAL')

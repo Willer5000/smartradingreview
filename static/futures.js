@@ -491,16 +491,16 @@ window.openManualAnalysisSave = function(
     const confirmationText = (
         riskClass === 'MEDIUM'
             ? (
-                'RIESGO MEDIO: esta hipótesis superó el Safety mínimo, '
+                'RIESGO MEDIO: esta hipótesis tiene geometría Entry/SL/TP válida, '
                 + 'pero NO superó la publicación Premium.\n\n'
                 + 'Guardarla no significa que el sistema la recomiende. '
                 + '¿Deseas seguirla manualmente?'
             )
             : (
-                'RIESGO ALTO: esta hipótesis NO supera el Safety mínimo '
-                + 'operativo; sólo está en la banda BAJA 55–64.9.\n\n'
-                + 'No es una señal oficial. ¿Deseas guardarla como '
-                + 'seguimiento manual experimental?'
+                'RIESGO ALTO: esta hipótesis NO es una señal oficial. '
+                + 'El sistema conserva Entry/SL/TP técnicos para seguimiento manual.\n\n'
+                + 'Si la guardas, Guardian podrá protegerla como operación personal '
+                + 'cuando Entry sea alcanzado. ¿Deseas continuar bajo tu riesgo?'
             )
     );
 
@@ -563,6 +563,10 @@ window.openManualAnalysisSave = function(
             candidate.source_context
             || 'CURRENT_ANALYSIS_ONLY',
 
+        market:
+            candidate.market
+            || (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures'),
+
         manual_risk_class:
             riskClass,
 
@@ -617,34 +621,75 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
-    // 17.5.11 — diagnostics show every governed LONG/SHORT thesis that did
-    // not become executable. Visibility is not authorization to save/trade.
-    const candidateKey = context === 'vigent' ? 'vigent_other_directional_signals' : 'other_directional_signals';
+    // 17.5.11R.2 — restore the user's previous workflow: every governed
+    // LONG/SHORT diagnostic remains visible; when the server says its original
+    // Entry/SL/TP geometry is valid, Previous/Vigent rows can be saved manually.
+    // Saving never promotes ANALYSIS_ONLY to an official signal.
+    const candidateKey = context === 'vigent'
+        ? 'vigent_other_directional_signals'
+        : 'other_directional_signals';
     const hasDedicated = Array.isArray(json?.[candidateKey]);
-    let candidates = hasDedicated ? json[candidateKey] : (Array.isArray(json?.analysis_candidates) ? json.analysis_candidates : []);
+    let candidates = hasDedicated
+        ? json[candidateKey]
+        : (Array.isArray(json?.analysis_candidates) ? json.analysis_candidates : []);
+
     const byCell = new Map();
     for (const raw of candidates) {
         if (!raw || typeof raw !== 'object' || _isSignalSavedByCurrentUser(raw)) continue;
-        const action=String(raw.diagnostic_action||raw.action||'').toUpperCase();
-        if (!['LONG','SHORT'].includes(action) || raw.is_executable===true || String(raw.classification||'ANALYSIS_ONLY').toUpperCase()==='EXECUTABLE_SIGNAL') continue;
-        const key=`${raw.symbol||''}|${raw.timeframe||''}`;
-        const score=Number(raw.diagnostic_quality??raw.thesis_quality??raw.confidence??0);
-        const prev=byCell.get(key); const prevScore=Number(prev?.diagnostic_quality??prev?.thesis_quality??prev?.confidence??-1);
-        if (!prev || score>prevScore) byCell.set(key,{...raw,action});
+        const action = String(raw.diagnostic_action || raw.action || '').toUpperCase();
+        if (!['LONG','SHORT'].includes(action) || raw.is_executable === true || String(raw.classification || 'ANALYSIS_ONLY').toUpperCase() === 'EXECUTABLE_SIGNAL') continue;
+        const key = `${raw.symbol || ''}|${raw.timeframe || ''}`;
+        const score = Number(raw.diagnostic_quality ?? raw.thesis_quality ?? raw.confidence ?? 0);
+        const prev = byCell.get(key);
+        const prevScore = Number(prev?.diagnostic_quality ?? prev?.thesis_quality ?? prev?.confidence ?? -1);
+        if (!prev || score > prevScore) byCell.set(key, {...raw, action});
     }
-    candidates=[...byCell.values()].sort((a,b)=>Number(b.diagnostic_quality??b.confidence??0)-Number(a.diagnostic_quality??a.confidence??0));
-    const title='Por qué no aparecen otras señales';
-    if (!candidates.length) return `<details class="mt-2 px-2 pb-2"><summary class="text-secondary" style="cursor:pointer;">${title} (0)</summary><div class="small text-muted mt-2">No hay otra tesis LONG/SHORT no ejecutable en el snapshot analizado. Un cero no se interpreta como prueba de que el mercado carece de oportunidades.</div></details>`;
-    const rows=candidates.map(c=>{
-        const action=String(c.action||'').toUpperCase(), cls=action==='LONG'?'success':'danger';
-        const symbol=futEscapeHtml(String(c.display_name||c.symbol||'').replace('-','/')), tf=futEscapeHtml(c.timeframe||'--');
-        const reason=futEscapeHtml(c.reason||c.manual_risk_reason||'No superó una condición técnica de ejecución/publicación.');
-        const q=Number(c.diagnostic_quality??c.thesis_quality); const conf=Number(c.confidence);
-        const metric=Number.isFinite(q)?`Calidad ${q.toFixed(0)}/100`:(Number.isFinite(conf)&&conf>0?`Confianza ${conf.toFixed(0)}%`:'');
-        const stage=c.diagnostic_stage?` · ${futEscapeHtml(String(c.diagnostic_stage).replaceAll('_',' '))}`:'';
-        return `<div class="border-top border-secondary py-2"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric?`<span class="badge bg-secondary">${metric}</span>`:''}</div><div class="small text-light mt-1">${reason}</div><div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div></div>`;
+    candidates = [...byCell.values()].sort((a,b) => Number(b.diagnostic_quality ?? b.confidence ?? 0) - Number(a.diagnostic_quality ?? a.confidence ?? 0));
+
+    const title = 'Por qué no aparecen otras señales';
+    if (!candidates.length) {
+        return `<details class="mt-2 px-2 pb-2"><summary class="text-secondary" style="cursor:pointer;">${title} (0)</summary><div class="small text-muted mt-2">No hay otra tesis LONG/SHORT no ejecutable en el snapshot analizado. Un cero no se interpreta como prueba de que el mercado carece de oportunidades.</div></details>`;
+    }
+
+    const rows = candidates.map(c => {
+        const action = String(c.action || '').toUpperCase();
+        const cls = action === 'LONG' ? 'success' : 'danger';
+        const symbol = futEscapeHtml(String(c.display_name || c.symbol || '').replace('-','/'));
+        const tf = futEscapeHtml(c.timeframe || '--');
+        const reason = futEscapeHtml(c.manual_risk_reason || c.reason || 'No superó una condición técnica de ejecución/publicación.');
+        const q = Number(c.diagnostic_quality ?? c.thesis_quality);
+        const conf = Number(c.confidence);
+        const metric = Number.isFinite(q) ? `Calidad ${q.toFixed(0)}/100` : (Number.isFinite(conf) && conf > 0 ? `Confianza ${conf.toFixed(0)}%` : '');
+        const stage = c.diagnostic_stage ? ` · ${futEscapeHtml(String(c.diagnostic_stage).replaceAll('_',' '))}` : '';
+        const riskClass = String(c.manual_risk_class || '').toUpperCase();
+        const canSave = (context === 'previous' || context === 'vigent')
+            && c.manual_save_allowed === true
+            && Number(c.entry) > 0 && Number(c.stop_loss) > 0 && Number(c.take_profit) > 0;
+
+        let saveHtml = '';
+        if (canSave) {
+            const manualKey = String(c.signal_id || `${c.market || 'deriv'}|${c.symbol}|${c.timeframe}|${action}`);
+            const sourceContext = context === 'vigent' ? 'ACTIVE_ANALYSIS_ONLY' : 'PREVIOUS_ANALYSIS_ONLY';
+            window._manualAnalysisCandidates[manualKey] = {
+                ...c,
+                signal_id: c.signal_id || manualKey,
+                source_context: sourceContext,
+                market: c.market || (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures'),
+            };
+            const touched = c.entry_touched === true || c.lifecycle_status === 'entry_touched';
+            saveHtml = touched
+                ? `<div class="mt-2"><button type="button" class="btn btn-sm btn-success" onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey.replace(/'/g,"\\'")}', true);">✅ Guardar en operación</button><div class="small text-muted mt-1">Entry ya alcanzado: Guardian puede comenzar el seguimiento personal.</div></div>`
+                : `<div class="d-flex flex-wrap gap-2 mt-2"><button type="button" class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}" onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey.replace(/'/g,"\\'")}', false);">${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar bajo mi riesgo'}</button><button type="button" class="btn btn-sm btn-success" onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey.replace(/'/g,"\\'")}', true);">✅ Guardar en operación</button></div><div class="small text-muted mt-1">No se vuelve señal oficial; conserva la vigencia y Guardian protege sólo tu operación guardada.</div>`;
+        }
+
+        const levelsHtml = (Number(c.entry) > 0 && Number(c.stop_loss) > 0 && Number(c.take_profit) > 0)
+            ? `<div class="small mt-1"><span class="text-info">Entry ${Number(c.entry).toPrecision(7)}</span> · <span class="text-danger">SL ${Number(c.stop_loss).toPrecision(7)}</span> · <span class="text-success">TP ${Number(c.take_profit).toPrecision(7)}</span>${Number(c.risk_reward) > 0 ? ` · R/R 1:${Number(c.risk_reward).toFixed(2)}` : ''}</div>`
+            : `<div class="small text-warning mt-1">Sin geometría Entry/SL/TP defendible todavía; no se puede activar Guardian hasta que exista.</div>`;
+
+        return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}</div>${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
     }).join('');
-    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis detectadas que no superaron la ejecución/publicación. No se convierten en operación por mostrarse aquí.</div><div style="max-height:420px;overflow:auto;">${rows}</div></details>`;
+
+    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis detectadas que no superaron la ejecución/publicación oficial. Las que conservan Entry/SL/TP válidos pueden guardarse manualmente bajo tu riesgo sin convertirse en señales Premium.</div><div style="max-height:460px;overflow:auto;">${rows}</div></details>`;
 }
 
 function insertReviewTraderPanel() {
@@ -3497,6 +3542,10 @@ window.confirmSaveSignal = async function() {
             sig.source_signal_id
             || sig.signal_id
             || null,
+
+        market:
+            sig.market
+            || (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures'),
 
         source_valid_until:
             sig.valid_until
