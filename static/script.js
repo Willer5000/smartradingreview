@@ -2859,7 +2859,7 @@ window.runCompleteAnalysis = function() {
     // aun así la conexión queda bloqueada, abortamos y entramos al polling
     // acotado. Spot conserva un margen mayor.
     const analysisAbortController = new AbortController();
-    const analysisHttpTimeoutMs = window.IS_FUTURES_PAGE ? 25000 : 60000;
+    const analysisHttpTimeoutMs = window.IS_MULTI_ASSET_PAGE ? 12000 : (window.IS_FUTURES_PAGE ? 25000 : 60000);
     const analysisHttpTimeoutId = window.setTimeout(
         () => analysisAbortController.abort(),
         analysisHttpTimeoutMs
@@ -2974,8 +2974,8 @@ window.runCompleteAnalysis = function() {
                 const retryAfterMs = isMulti
                     ? Math.min(10000, Math.max(6000, Number(data.retry_after_ms || 7000)))
                     : Math.min(12000, Math.max(4000, Number(data.retry_after_ms || 6000)));
-                const maxBusyMs = isMulti ? 30000 : 90000;
-                const maxBusyRetries = isMulti ? 3 : 8;
+                const maxBusyMs = isMulti ? 65000 : 90000;
+                const maxBusyRetries = isMulti ? 10 : 8;
 
                 if (data.partial && data.data?.decision) {
                     window.currentAnalysis = data.data;
@@ -3279,7 +3279,7 @@ window.runCompleteAnalysis = function() {
                     if (typeof window.updateCorrelationInfo === 'function') {
                         window.updateCorrelationInfo({});
                     }
-                    window.showToast('✅ Análisis Futures completado', 'success');
+                    window.showToast(window.IS_MULTI_ASSET_PAGE ? '✅ Análisis Multi-Activo completado' : '✅ Análisis Futures completado', 'success');
                     return;
                 }
 
@@ -3613,8 +3613,8 @@ window.runCompleteAnalysis = function() {
                 const retryAfterMs = isMulti
                     ? Math.min(10000, Math.max(6000, serverRetry || 7000))
                     : Math.min(12000, Math.max(4000, serverRetry));
-                const maxBusyMs = isMulti ? 30000 : 90000;
-                const maxBusyRetries = isMulti ? 3 : 8;
+                const maxBusyMs = isMulti ? 65000 : 90000;
+                const maxBusyRetries = isMulti ? 10 : 8;
 
                 // RC8: backoff amplio ante 520/522; evitar tormenta de polls. If the backend cannot
                 // prepare the rich chart payload in that window, surface a

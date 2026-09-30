@@ -17560,6 +17560,28 @@ class TradingExpertSystem:
                 minimum_viable_rr, maximum_technical_rr = 1.8, 4.5
                 preferred_rr_min, preferred_rr_max = 2.0, 3.2
 
+            # 17.5.11R.1 — exact Research specialists that were profitable in
+            # train/IS + selection + final OOS may softly align the *preferred*
+            # R/R window used by joint geometry ranking.  This does NOT change
+            # the technical floor/ceiling, does not fabricate a TP from R/R and
+            # does not copy the Research fixed-ATR SL.  Structural levels and
+            # SL_REACTION_CONFLICT remain authoritative.
+            try:
+                _validated_route_rr = (
+                    (((execution_observations or {}).get('operational_intelligence') or {}).get('validated_strategy_route') or {})
+                    if isinstance(execution_observations, dict) else {}
+                )
+                if _validated_route_rr.get('eligible_for_execution_routing'):
+                    _hist_geom = dict(_validated_route_rr.get('historical_geometry') or {})
+                    _target_rr = float(_hist_geom.get('rr') or 0.0)
+                    if minimum_viable_rr <= _target_rr <= maximum_technical_rr:
+                        _route_rr_min = max(minimum_viable_rr, _target_rr - 0.35)
+                        _route_rr_max = min(maximum_technical_rr, _target_rr + 0.35)
+                        if _route_rr_max >= _route_rr_min:
+                            preferred_rr_min, preferred_rr_max = _route_rr_min, _route_rr_max
+            except Exception:
+                pass
+
             baseline_entry = float(entry)
             baseline_sl = float(sl_price)
             baseline_tp = float(tp_price)
@@ -17983,6 +18005,46 @@ class TradingExpertSystem:
                     f"   ⚠️ ANALYSIS_ONLY: "
                     f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
                 )
+
+            # 17.5.11R: a detected reaction collision can be reconstructed ONLY
+            # through an execution route that has positive chronological IS+OOS
+            # evidence. The 30m LIQUIDITY_SWEEP_MSS_POI challenger is the only
+            # current route meeting both expectancy and TP-vs-SL efficiency.
+            # A successful generic
+            # committee recovery at 2h/4h/Multi remains diagnostic and cannot
+            # silently replace a bad SL with an unvalidated live geometry.
+            if is_futures and sl_reaction_guard.get('conflict'):
+                _reaction_recovery = _attempt_structural_recovery_17_5_9('SL_REACTION_CONFLICT', entry)
+                _validated_recovery = False
+                if isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
+                    _entry_committee_17511r = _reaction_recovery.get('entry_committee') or {}
+                    _entry_scores_17511r = _entry_committee_17511r.get('scores') or {}
+                    try:
+                        _validated_recovery = float(_entry_scores_17511r.get('validated_liquidity_route') or 0.0) >= 60.0
+                    except Exception:
+                        _validated_recovery = False
+
+                if _validated_recovery:
+                    entry=float(_reaction_recovery['entry']); sl_price=float(_reaction_recovery['stop_loss']); tp_price=float(_reaction_recovery['take_profit'])
+                    entry_quality.update(_refined_entry_metadata(entry))
+                    entry_source='Zona técnica recuperada · '+str((_reaction_recovery.get('entry_committee') or {}).get('source') or entry_source)
+                    sl_source='Invalidación recuperada · '+str((_reaction_recovery.get('sl_committee') or {}).get('source') or sl_source)
+                    tp_source='Objetivo recuperado · '+str((_reaction_recovery.get('tp_committee') or {}).get('source') or tp_source)
+                    try:
+                        sl_reaction_guard=evaluate_sl_reaction_conflict(structure=structure,direction=direction,entry=entry,stop_loss=sl_price,atr=atr)
+                    except Exception:
+                        sl_reaction_guard={'conflict':True,'reason':'SL_REACTION_GUARD_ERROR'}
+                    reward=abs(tp_price-entry); risk=abs(entry-sl_price); rr=reward/risk if risk>0 else 0
+                elif isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
+                    execution_refinement['reaction_recovery_shadow'] = {
+                        'status': 'BACKTEST_AUTHORITY_MISSING',
+                        'timeframe': str(timeframe),
+                        'market_type': str(execution_market_type),
+                        'geometry_quality': _reaction_recovery.get('geometry_quality'),
+                        'entry_quality': _reaction_recovery.get('entry_quality'),
+                        'sl_quality': _reaction_recovery.get('sl_quality'),
+                        'tp_quality': _reaction_recovery.get('tp_quality'),
+                    }
 
             if is_futures and sl_reaction_guard.get('conflict'):
                 conflict_source = str(sl_reaction_guard.get('source') or 'zona de reacción')
@@ -34679,11 +34741,19 @@ def _multiasset_cache_result(symbol, timeframe, result):
     if not isinstance(result, dict) or result.get('success') is False:
         return False
     with _MULTI_ASSET_CACHE['lock']:
-        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = dict(result)
+        # 17.5.11 keeps the complete 7×3 universe observable without keeping
+        # 21 chart DataFrames in RAM. Rich chart payloads live only in the
+        # existing two-item UI cache; the market cache stores a compact copy.
+        compact_fn = globals().get('_compact_futures_runtime_result')
+        compact = compact_fn(result) if callable(compact_fn) else dict(result)
+        for key in ('display_name','asset_class','multiasset_macro','multiasset_specialist','multiasset_strategy_bank'):
+            if key in result:
+                compact[key] = result.get(key)
+        _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = compact
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
-        if len(_MULTI_ASSET_CACHE['analysis']) > 8:
+        if len(_MULTI_ASSET_CACHE['analysis']) > 24:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
-            for old in keys[:-8]:
+            for old in keys[:-24]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
     return True
 
@@ -34870,19 +34940,115 @@ def _estimate_mm_volatility(result):
     return 0.60
 
 
+def _attach_mm_ui_context(result, market='futures'):
+    """Build Greeks/GEX curves only for an explicit UI request.
+
+    17.5.11 resource contract: runtime/cache readers never fetch an option chain
+    and never build 41-point curves.  This helper returns a copy, is context
+    only, and cannot mutate direction, Entry/SL/TP, leverage or publication.
+    """
+    if not isinstance(result, dict):
+        return result
+    out = dict(result)
+    levels = dict(out.get('levels') or {})
+    try:
+        spot = float(out.get('live_price') or out.get('current_price') or levels.get('entry') or 0)
+    except Exception:
+        spot = 0.0
+    if spot <= 0:
+        levels['market_maker_context'] = {
+            'available': False, 'authority': 'UI_CONTEXT_ONLY',
+            'reason': 'NO_VALID_SPOT', 'production_score_adjustment': 0.0,
+            'can_create_direction': False, 'can_bypass_safety': False,
+        }
+        out['levels'] = levels
+        return out
+
+    chain = out.get('option_chain') or (out.get('context') or {}).get('option_chain') or levels.get('option_chain') or []
+    if not isinstance(chain, (list, tuple)):
+        chain = []
+    symbol = str(out.get('symbol') or '').upper().replace('/', '-')
+    if not chain and str(market or '').lower() == 'futures' and symbol.startswith(('BTC-', 'ETH-')):
+        try:
+            from options_market_context import get_crypto_option_chain
+            snap = get_crypto_option_chain(symbol) or {}
+            chain = snap.get('rows') or []
+        except Exception:
+            chain = []
+
+    # Inline volatility estimate keeps this function AST-testable and prevents
+    # runtime cache paths from depending on the chart-math helper.
+    vol = 0.60
+    try:
+        volatility = out.get('volatility') or {}
+        indicators = out.get('indicators') or out.get('indicators_snapshot') or {}
+        for key in ('annualized_volatility', 'realized_volatility', 'realized_vol'):
+            raw = volatility.get(key) if isinstance(volatility, dict) else None
+            if raw not in (None, ''):
+                v = float(raw)
+                vol = max(0.05, min(3.0, v / 100.0 if v > 3 else v))
+                break
+        else:
+            atr_pct = float((indicators or {}).get('atr_pct') or (volatility or {}).get('atr_pct') or 0)
+            if atr_pct > 0:
+                vol = max(0.15, min(1.80, (atr_pct / 100.0) * (365.0 ** 0.5) * 2.0))
+    except Exception:
+        vol = 0.60
+
+    try:
+        from market_maker_math import build_market_maker_context, black_scholes_greeks
+        mm = build_market_maker_context(
+            spot=spot,
+            option_chain=list(chain),
+            realized_or_implied_volatility=vol,
+            as_of=(out.get('source_candle_close_timestamp') or out.get('source_candle_timestamp')),
+        ) or {}
+        mm = dict(mm)
+        mm['underlying_math_authority'] = mm.get('authority')
+        mm['authority'] = 'UI_CONTEXT_ONLY'
+        mm['production_score_adjustment'] = 0.0
+        mm['can_create_direction'] = False
+        mm['can_bypass_safety'] = False
+        mm['can_move_levels_without_execution_validation'] = False
+
+        # Compact theoretical theta shape for the visible panel only. It is not
+        # retained in the runtime cache and has no trading authority.
+        theta_curve = []
+        t_years = 7.0 / 365.0
+        for i in range(41):
+            px = spot * (0.80 + 0.01 * i)
+            call = black_scholes_greeks(
+                spot=px, strike=spot, t_years=t_years, volatility=vol,
+                option_type='CALL', rate=0.0,
+            )
+            put = black_scholes_greeks(
+                spot=px, strike=spot, t_years=t_years, volatility=vol,
+                option_type='PUT', rate=0.0,
+            )
+            theta_curve.append([round(px, 8), round(float(call.get('theta_per_day', 0)) + float(put.get('theta_per_day', 0)), 8)])
+        mm['theta_curve'] = theta_curve
+        levels['market_maker_math_version'] = '17.5.11_MM_UI_ON_DEMAND_V1'
+        levels['market_maker_context'] = mm
+        levels['market_maker_context_authority'] = 'UI_CONTEXT_ONLY'
+    except Exception as exc:
+        levels['market_maker_math_version'] = '17.5.11_MM_UI_ON_DEMAND_V1'
+        levels['market_maker_context'] = {
+            'available': False, 'authority': 'UI_CONTEXT_ONLY',
+            'reason': type(exc).__name__, 'theta_curve': [],
+            'production_score_adjustment': 0.0, 'can_create_direction': False,
+            'can_bypass_safety': False,
+        }
+        levels['market_maker_context_authority'] = 'UI_CONTEXT_ONLY'
+    out['levels'] = levels
+    return out
+
+
 def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
-    """Attach profitability evidence and Black-Scholes/GEX context.
+    """Attach profitability evidence without hidden market/network work.
 
-    Production rule for the FINAL 17.5.10:
-    - existing Safety/Publication remains authoritative;
-    - market-maker math cannot create direction or add score in this release;
-    - the profitability cohort is evidence/telemetry, NOT a new publication veto;
-    - scheduler/MTF/SL locality fixes restore intended coverage rather than create
-      a new strategy, therefore they must not be blocked merely because the exact
-      recovered path lacks a version-matched historical cohort.
-
-    This avoids two opposite errors at once: lowering Safety to fabricate signals,
-    and adding a new backtest gate that would make the repaired system timid again.
+    17.5.11 keeps the compatibility name but moves all Greeks/GEX curve building
+    to ``_attach_mm_ui_context``.  Scheduler/cache analysis therefore performs
+    no option-chain request and no chart math merely to classify a signal.
     """
     if not isinstance(result, dict):
         return result
@@ -34892,78 +35058,39 @@ def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
     out = dict(result)
     levels = dict(out.get('levels') or {})
 
-    # --- Market-maker / option math context (context-only in 17.5.10) ---
-    try:
-        from market_maker_math import build_market_maker_context
-        chain = (
-            out.get('option_chain')
-            or (out.get('context') or {}).get('option_chain')
-            or levels.get('option_chain')
-            or []
-        )
-        _decision = out.get('decision') or {}
-        _action = str(_decision.get('action') or '').upper()
-        _op = out.get('operational_intelligence') or {}
-        _directional_candidate = bool(
-            _action in ('LONG','SHORT')
-            and (_op.get('candidate_ready') or str((out.get('levels') or {}).get('publication_status') or '').upper() == 'EXECUTABLE_SIGNAL')
-        )
-        if mk == 'futures' and not chain and _directional_candidate:
-            try:
-                from options_market_context import get_crypto_option_chain
-                _chain_snapshot = get_crypto_option_chain(out.get('symbol')) or {}
-                chain = _chain_snapshot.get('rows') or []
-            except Exception:
-                chain = []
-        spot = float(out.get('live_price') or out.get('current_price') or levels.get('entry') or 0)
-        if spot > 0:
-            mm = build_market_maker_context(
-                spot=spot,
-                option_chain=chain if isinstance(chain, (list, tuple)) else [],
-                realized_or_implied_volatility=_estimate_mm_volatility(out),
-                as_of=(out.get('source_candle_close_timestamp') or out.get('source_candle_timestamp')),
-            ) or {}
-            levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
-            levels['market_maker_context'] = mm
-            levels['market_maker_gamma_regime'] = mm.get('gamma_regime')
-            levels['market_maker_zero_gamma_level'] = mm.get('zero_gamma_level')
-            levels['market_maker_delta_neutral_level'] = mm.get('delta_neutral_level')
-            levels['market_maker_call_wall'] = mm.get('call_wall')
-            levels['market_maker_put_wall'] = mm.get('put_wall')
-            levels['market_maker_0dte_gamma_share'] = mm.get('zero_dte_gamma_share')
-            levels['market_maker_context_authority'] = mm.get('authority')
-            levels['market_maker_observed_option_chain'] = bool(mm.get('observed_option_chain'))
-    except Exception as mm_error:
-        levels['market_maker_math_version'] = _MM_CONTEXT_VERSION
-        levels['market_maker_context_authority'] = 'UNAVAILABLE_FAIL_OPEN'
-        levels['market_maker_context_error'] = type(mm_error).__name__
-
+    existing_mm = levels.get('market_maker_context') if isinstance(levels.get('market_maker_context'), dict) else None
+    if existing_mm:
+        # Preserve already-attached context, but make its non-authority explicit.
+        existing_mm = dict(existing_mm)
+        existing_mm['production_score_adjustment'] = 0.0
+        existing_mm['can_create_direction'] = False
+        existing_mm['can_bypass_safety'] = False
+        levels['market_maker_context'] = existing_mm
+        levels['market_maker_context_authority'] = existing_mm.get('authority')
+    else:
+        levels['market_maker_context_authority'] = 'UI_ON_DEMAND_NOT_COMPUTED'
+    levels['market_maker_math_version'] = '17.5.11_MM_UI_ON_DEMAND_V1'
     out['levels'] = levels
 
-    # --- Profitability evidence for diagnostics / ReviewTrader only ---
-    # This does NOT gate publication.  Backtest evidence is versioned and exposed
-    # so learning can compare LIVE vs SHADOW prospectively without creating a
-    # circular condition where only historically selected setups may be published.
+    # Profitability evidence remains diagnostic/shadow only; it cannot veto a
+    # repaired live path merely because the comparable cohort is small/old.
     try:
         from profitability_qualification import qualify_result
         qual = qualify_result(out, market=mk) or {}
     except Exception as q_error:
         qual = {
-            'version': _PROFITABILITY_QUALIFIER_VERSION,
+            'version': '17.5.10_PROFITABILITY_QUALIFIED_V1',
             'qualified': False,
             'reason': type(q_error).__name__,
             'authority': 'DIAGNOSTIC_ONLY_FAIL_OPEN',
         }
     levels = dict(out.get('levels') or {})
     levels['profitability_qualification'] = qual
-    levels['profitability_qualification_version'] = qual.get('version') or _PROFITABILITY_QUALIFIER_VERSION
+    levels['profitability_qualification_version'] = qual.get('version') or '17.5.10_PROFITABILITY_QUALIFIED_V1'
     levels['profitability_qualified_30m_route'] = bool(qual.get('qualified'))
     levels['profitability_qualification_is_publication_gate'] = False
     levels['profitability_qualification_authority'] = 'DIAGNOSTIC_SHADOW_ONLY'
 
-    # Leverage quality separation: V6 already selects the highest leverage that
-    # survives its technical/security ceilings.  17.5.10 never raises leverage
-    # to make a signal publishable and never rejects a valid setup just for x1-x3.
     try:
         lev = int(float(levels.get('leverage') or 0))
     except Exception:
@@ -34981,7 +35108,6 @@ def _apply_17_5_10_profitability_market_maker_context(result, market='futures'):
             'Leverage bajo aceptable sólo cuando el motor V6 lo devuelve por sus '
             'límites técnicos/seguridad; no se usa como objetivo ni como veto.'
         )
-
     out['levels'] = levels
     return out
 
@@ -35161,6 +35287,11 @@ def _technical_signal_funnel_row(result):
         'particular_setup_rejected_reason': oi.get('particular_setup_rejected_reason'),
         'strategy_family': ((oi.get('default_strategy') or {}).get('family')),
         'strategy_quality': ((oi.get('default_strategy') or {}).get('quality')),
+        'coverage_route_state': oi.get('coverage_route_state'),
+        'validated_route_matched': bool((oi.get('validated_strategy_route') or {}).get('matched')),
+        'validated_route_execution_eligible': bool((oi.get('validated_strategy_route') or {}).get('eligible_for_execution_routing')),
+        'validated_route_family': ((oi.get('validated_strategy_route') or {}).get('research_family')),
+        'validated_route_reason': ((oi.get('validated_strategy_route') or {}).get('reason')),
         'opportunity_recovery_attempted': bool(levels.get('opportunity_recovery_attempted')),
         'opportunity_recovery_applied': bool(levels.get('opportunity_recovery_applied')),
         'opportunity_recovery_reason': levels.get('opportunity_recovery_reason'),
@@ -35352,10 +35483,22 @@ def _multiasset_enqueue_due(due, now):
             bucket = _multiasset_bucket(symbol, tf, now)
             if bucket in _MULTI_AUTO_DONE or bucket in _MULTI_PENDING_KEYS:
                 continue
+            # 17.5.11 expiry is anchored to the candle close represented by
+            # the bucket, not to the delayed enqueue timestamp.
+            if tf == '1h':
+                close_dt = now.replace(minute=0, second=0, microsecond=0)
+            elif tf == '4h':
+                close_dt = now.replace(hour=(now.hour//4)*4, minute=0, second=0, microsecond=0)
+            elif tf == '1D':
+                close_dt = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            else:
+                close_dt = now
+            close_ts = close_dt.timestamp()
+            expires_at = close_ts + _multiasset_queue_ttl_seconds(tf)
             _MULTI_PENDING_QUEUE.append({
                 'bucket': bucket, 'symbol': symbol, 'timeframe': tf,
-                'enqueued_at': now_ts,
-                'expires_at': now_ts + _multiasset_queue_ttl_seconds(tf),
+                'enqueued_at': now_ts, 'source_close_at': close_ts,
+                'expires_at': expires_at,
             })
             _MULTI_PENDING_KEYS.add(bucket)
 
@@ -35482,24 +35625,25 @@ def _multiasset_background_tick():
             rows_1d=_multiasset_scan('1D',force=force)
             if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
             due.extend((r['symbol'],'1D') for r in rows_1d)
-        if plan['4h']['due']:
-            due.extend((r['symbol'],'4h') for r in rows_4h)
         if plan['1h']['due']:
             force=not _multiasset_close_refresh_done(plan['1h']['key'])
             rows_1h=_multiasset_scan('1h',force=force)
             if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
-            # 17.5.10.1: score is PRIORITY, never eligibility. No >=82 veto.
-            due.extend((r['symbol'],'1h') for r in rows_1h)
+            # Fast qualified cells get queue priority because their opportunity
+            # window is shortest; this changes scheduling, never signal gates.
+            due.extend((r['symbol'],'1h') for r in rows_1h if float((r or {}).get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE)
+        if plan['4h']['due']:
+            due.extend((r['symbol'],'4h') for r in rows_4h)
 
         due=list(dict.fromkeys(due))
         _multiasset_enqueue_due(due, now)
         _multiasset_prune_pending(time.time())
 
-        pressure=_multiasset_resource_backpressure(now, now_mono)
+        pressure=(globals().get('_multiasset_resource_backpressure') or (lambda *_: {'blocked':False,'reason':'UNAVAILABLE'}))(now, now_mono)
         if pressure.get('blocked'):
             with _MULTI_AUTO_LOCK:
                 _MULTI_PENDING_RESOURCE_DEFERRALS += 1
-                _MULTI_RESOURCE_DAY['last_reason'] = pressure.get('reason')
+                if '_MULTI_RESOURCE_DAY' in globals(): _MULTI_RESOURCE_DAY['last_reason'] = pressure.get('reason')
             return
 
         with _MULTI_AUTO_LOCK:
@@ -35510,6 +35654,21 @@ def _multiasset_background_tick():
             bucket=str(item.get('bucket') or '')
             if not bucket or not _multiasset_retry_ready(bucket,now_mono):
                 continue
+            try:
+                from multiasset_system import MULTIASSET_AUTO_DEEP_DAILY_MAX
+                daily_max=int(MULTIASSET_AUTO_DEEP_DAILY_MAX)
+            except Exception:
+                daily_max=12
+            with _MULTI_AUTO_LOCK:
+                used=int(_MULTI_AUTO_DAILY.get('count') or 0)
+                context_used=int(_MULTI_AUTO_DAILY.get('context_count') or 0)
+            if tf == '1D':
+                if context_used >= int(_MULTI_DAILY_CONTEXT_EXTRA_MAX):
+                    _MULTI_PENDING_RESOURCE_DEFERRALS += 1
+                    continue
+            elif used >= daily_max:
+                _MULTI_PENDING_RESOURCE_DEFERRALS += 1
+                continue
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
             if result.get('busy'):
                 return
@@ -35518,8 +35677,8 @@ def _multiasset_background_tick():
                 return
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
-                _MULTI_RESOURCE_DAY['last_deep_at']=time.monotonic()
-                _MULTI_RESOURCE_DAY['last_reason']='OK'
+                if '_MULTI_RESOURCE_DAY' in globals():
+                    _MULTI_RESOURCE_DAY['last_deep_at']=time.monotonic(); _MULTI_RESOURCE_DAY['last_reason']='OK'
                 if tf=='1D':
                     _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
                 else:
@@ -35545,6 +35704,35 @@ def _get_review_trader():
         print(f"⚠️ ReviewTrader no disponible: {e}")
         return None
 
+
+# 17.5.11 — cache-only Multi-Asset diagnostic lane. No market/DB/LLM call.
+def _multiasset_directional_diagnostics_17511(analyses):
+    rows=[]
+    try:
+        from multiasset_system import MULTIASSET_SYMBOLS
+        allowed=set(MULTIASSET_SYMBOLS.keys())
+    except Exception:
+        allowed=set()
+    for key,result in (analyses or {}).items():
+        if not isinstance(result,dict) or result.get('success') is False or _multiasset_is_executable(result): continue
+        symbol=str(result.get('symbol') or (key[0] if isinstance(key,tuple) else '')).upper().replace('/','-')
+        tf=str(result.get('timeframe') or (key[1] if isinstance(key,tuple) and len(key)>1 else ''))
+        if allowed and symbol not in allowed: continue
+        decision=result.get('decision') or {}; op=result.get('operational_intelligence') or {}; thesis=op.get('thesis') or {}
+        action=''
+        source='NONE'
+        for raw,src in ((decision.get('action'),'DECISION'),(op.get('candidate_action'),'CANDIDATE'),(decision.get('original_action'),'ORIGINAL'),(thesis.get('direction'),'THESIS')):
+            a=str(raw or '').upper()
+            if a in ('BULLISH','BUY','COMPRA_SPOT'): a='LONG'
+            elif a in ('BEARISH','SELL','VENTA_SPOT'): a='SHORT'
+            if a in ('LONG','SHORT'): action=a; source=src; break
+        if not action: continue
+        levels=result.get('levels') or {}; funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
+        reason=str(levels.get('rejected_reason') or result.get('rejected_reason') or decision.get('reason') or (decision.get('razones') or [''])[0] or 'La tesis no superó la ejecución/publicación técnica.')[:520]
+        state=_multiasset_signal_temporal_state(result)
+        rows.append({'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':False,'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
+    rows.sort(key=lambda r:(-float(r.get('diagnostic_quality') or r.get('confidence') or 0),r['symbol'],r['timeframe']))
+    return rows[:24]
 
 # ============================================================================
 # COMMIT 12 — MULTI-ACTIVO API
@@ -35581,6 +35769,7 @@ def api_multiasset_opportunities():
 
 @app.route('/api/multiasset/analyze', methods=['POST'])
 def api_multiasset_analyze():
+    """17.5.11 non-blocking UI contract. Heavy analysis never lives in HTTP."""
     try:
         payload=request.get_json(silent=True) or {}
         symbol=str(payload.get('symbol') or 'CL-USDT').upper().replace('/','-')
@@ -35588,11 +35777,25 @@ def api_multiasset_analyze():
         from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
         if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
-        result=_multiasset_run_analysis(symbol,timeframe,owner=f'multi-ui:{symbol}:{timeframe}')
-        status=202 if result.get('busy') else 200
-        return jsonify(result),status
+        cached=_get_futures_ui_cached(symbol,timeframe)
+        if isinstance(cached,dict) and cached.get('success') is not False:
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11'}),200
+        with _MULTI_ASSET_CACHE['lock']:
+            compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
+        recent_error=_get_futures_ui_recent_error(symbol,timeframe)
+        state=_start_futures_ui_analysis_async(symbol,timeframe,'multiasset')
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11'}
+        if compact:
+            body.update({'partial':True,'data':compact})
+        if recent_error:
+            body['recent_error']=recent_error
+        return jsonify(body),202
     except Exception as exc:
-        return jsonify({'success':False,'error':str(exc)[:180]}),500
+        return jsonify({'success':False,'busy':True,'deferred':True,'retry_after_ms':5000,'error':str(exc)[:180]}),202
+
+# Marker consumed by the 17.5.10.x compatibility installer: the 17.5.11 route
+# above is already non-blocking and owns the shared interactive job contract.
+api_multiasset_analyze._st17511_integrated_nonblocking_multi_ui = True
 
 @app.route('/api/multiasset/signals/previous', methods=['GET'])
 def api_multiasset_signals_previous():
@@ -35610,7 +35813,7 @@ def api_multiasset_signals_previous():
                         'lifecycle_status':'waiting_entry'})
             if row['confidence']>=min_conf: signals.append(row)
         signals.sort(key=lambda x:-x['confidence'])
-        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':[],'analysis_candidates':[],'pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'market':'multiasset','pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -35640,8 +35843,9 @@ def api_multiasset_signals_active():
         return jsonify({
             'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
             'total':len(signals),'active_count':len(signals),'signals':signals,
-            'other_directional_signals':[],'vigent_other_directional_signals':[],
-            'analysis_candidates':[],
+            'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),
+            'vigent_other_directional_signals':[r for r in _multiasset_directional_diagnostics_17511(analyses) if r.get('temporal_valid') is True and r.get('temporal_fresh') is False],
+            'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'market':'multiasset',
             'pipeline_health':_public_pipeline_health_175103(analyses),
             'progress':{'total':7,'completed':len(analyses),'errors':0},
             'timestamp':datetime.now(bolivia_tz).isoformat(),
@@ -36371,6 +36575,7 @@ def _compact_futures_runtime_result(result):
         'rejected_reason', 'timestamp', 'research_only', 'research_universe',
         'risk_class', 'exit_profile', 'risk_budget_multiplier', 'entry_zone_pct',
         'max_entry_wait_bars', 'research_representative', 'operational_timeframe_allowed',
+        'publication_eligible', 'is_executable', 'asset_class', 'display_name',
     )
     for key in simple_keys:
         if key in result:
@@ -36400,7 +36605,7 @@ def _compact_futures_runtime_result(result):
         for bulky_key in (
             'challenger_candidates', 'execution_challengers',
             'all_entry_candidates', 'all_sl_candidates', 'all_tp_candidates',
-            'debug_payload',
+            'debug_payload', 'market_maker_context',
         ):
             compact_levels.pop(bulky_key, None)
         compact['levels'] = compact_levels
@@ -36427,6 +36632,15 @@ def _compact_futures_runtime_result(result):
             'context': operational.get('context'),
             'candidate_action': operational.get('candidate_action'),
             'candidate_ready': operational.get('candidate_ready'),
+            'coverage_route_state': operational.get('coverage_route_state'),
+            'validated_strategy_route': {
+                'matched': ((operational.get('validated_strategy_route') or {}).get('matched')),
+                'eligible_for_execution_routing': ((operational.get('validated_strategy_route') or {}).get('eligible_for_execution_routing')),
+                'research_family': ((operational.get('validated_strategy_route') or {}).get('research_family')),
+                'execution_family': ((operational.get('validated_strategy_route') or {}).get('execution_family')),
+                'authority': ((operational.get('validated_strategy_route') or {}).get('authority')),
+                'reason': ((operational.get('validated_strategy_route') or {}).get('reason')),
+            },
             'worker_desk_17_5_9': {
                 'version': _worker_desk_1759.get('version'),
                 'thesis_owner': _worker_desk_1759.get('thesis_owner'),
@@ -37098,98 +37312,67 @@ def _store_futures_ui_cached(symbol, timeframe, payload):
                 items.pop(old_key, None)
 
 
-def _start_futures_ui_analysis_async(symbol, timeframe):
-    """Schedule exactly one chart analysis and return immediately to HTTP."""
-    key = _futures_ui_key(symbol, timeframe)
-    _mark_futures_interactive_priority()
+def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
+    """Schedule one interactive heavy job across Futures and Multi-Asset.
 
+    No permanent worker is added. A second market cannot spawn a waiting thread
+    while another interactive job already owns the shared heavy slot.
+    """
+    market=str(market or 'futures').lower()
+    key=_futures_ui_key(symbol,timeframe)
+    _mark_futures_interactive_priority()
     with _FUTURES_UI_CACHE['lock']:
-        if key in _FUTURES_UI_CACHE['running']:
-            return 'RUNNING'
-        _FUTURES_UI_CACHE['running'].add(key)
-        _FUTURES_UI_CACHE['errors'].pop(key, None)
+        running=_FUTURES_UI_CACHE['running']
+        if key in running: return 'RUNNING'
+        if running: return 'DEFERRED_BUSY'
+        running.add(key); _FUTURES_UI_CACHE['errors'].pop(key,None)
 
     def _do_ui_analysis():
-        owner = f'futures-ui:{symbol}:{timeframe}'
-        heavy_acquired = False
+        owner=f'{market}-ui:{symbol}:{timeframe}'
+        heavy_acquired=False
         try:
-            # Current incremental combo may finish first.  Because interactive
-            # priority is already active, the loop will not start a replacement.
-            heavy_acquired = _acquire_heavy_analysis(owner, timeout=18)
-            if not heavy_acquired:
-                raise RuntimeError('No se obtuvo turno de análisis Futures')
-
-            futures = _get_futures_system()
-            if futures is None:
-                raise RuntimeError('FuturesSystem no disponible')
-
-            # El preview no comparte heatmaps/zonas mutables con la autoridad
-            # CLOSED_CANDLE. Así una vela que aún está formándose no contamina
-            # la confirmación que nacerá cuando cierre.
-            from copy import copy
-            preview_futures = copy(futures)
-            preview_futures.liquidation_heatmaps = {}
-            preview_futures.dynamic_zones = {}
-            preview_futures.last_analysis = {}
-            preview_futures.voting_history = {}
-
+            heavy_acquired=_acquire_heavy_analysis(owner,timeout=18)
+            if not heavy_acquired: raise RuntimeError('No se obtuvo turno de análisis interactivo')
             _log_memory_runtime(f'{owner}:before')
-            result = preview_futures.analyze_futures_market(
-                symbol,
-                timeframe,
-                closed_candle_only=False,
-                intrabar_preview=True,
-            )
-            if not result:
-                raise RuntimeError('Análisis Futures vacío')
-
-            result = _apply_profitability_router(result, symbol, timeframe)
-            result = _apply_96_futures_risk_policy(result, symbol, timeframe)
-            result = _apply_36s_futures_ai_control(result, symbol, timeframe)
-            result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
-            result = _enrich_futures_public_message(result)
-            ui_result = _compact_futures_ui_result(result)
-            ui_result = _compact_fast_futures_ui_result(
-                ui_result,
-                timeframe,
-            )
-            runtime_result = _compact_futures_runtime_result(result)
-
-            # El preview vive en un caché separado. Nunca sustituye el snapshot
-            # CLOSED_CANDLE que alimenta Confirmadas/Vigentes/lifecycle.
-            _store_futures_intrabar_preview(
-                symbol, timeframe, result, runtime_result=runtime_result
-            )
-            _store_futures_ui_cached(symbol, timeframe, ui_result)
+            if market=='multiasset':
+                engine=_get_multiasset_system()
+                if engine is None: raise RuntimeError('MultiAssetSystem no disponible')
+                result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
+                if not isinstance(result,dict) or result.get('success') is False:
+                    raise RuntimeError(str((result or {}).get('error') or 'Análisis Multi-Activo vacío'))
+                result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
+                result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
+                levels=result.get('levels') or {}
+                if levels.get('execution_runtime_failed') or levels.get('execution_runtime_error'):
+                    raise RuntimeError(str(levels.get('execution_runtime_error') or 'EXECUTION_RUNTIME_FAILED'))
+                _multiasset_cache_result(symbol,timeframe,result)
+                ui_result=_compact_futures_ui_result(result)
+                _store_futures_ui_cached(symbol,timeframe,ui_result)
+            else:
+                futures=_get_futures_system()
+                if futures is None: raise RuntimeError('FuturesSystem no disponible')
+                from copy import copy
+                preview_futures=copy(futures); preview_futures.liquidation_heatmaps={}; preview_futures.dynamic_zones={}; preview_futures.last_analysis={}; preview_futures.voting_history={}
+                result=preview_futures.analyze_futures_market(symbol,timeframe,closed_candle_only=False,intrabar_preview=True)
+                if not result: raise RuntimeError('Análisis Futures vacío')
+                result=_apply_profitability_router(result,symbol,timeframe); result=_apply_96_futures_risk_policy(result,symbol,timeframe); result=_apply_36s_futures_ai_control(result,symbol,timeframe); result=_apply_17_5_8_preliminary_learning_prior(result,'futures'); result=_enrich_futures_public_message(result)
+                ui_result=_compact_fast_futures_ui_result(_compact_futures_ui_result(result),timeframe)
+                runtime_result=_compact_futures_runtime_result(result)
+                _store_futures_intrabar_preview(symbol,timeframe,result,runtime_result=runtime_result)
+                _store_futures_ui_cached(symbol,timeframe,ui_result)
             _log_memory_runtime(f'{owner}:after')
         except Exception as exc:
-            print(f'❌ [FUT UI] {symbol} {timeframe}: {exc}')
+            print(f'❌ [UI {market.upper()}] {symbol} {timeframe}: {exc}')
             with _FUTURES_UI_CACHE['lock']:
-                _FUTURES_UI_CACHE['errors'][key] = {
-                    'ts': time.time(),
-                    'error': str(exc)[:240],
-                }
+                _FUTURES_UI_CACHE['errors'][key]={'ts':time.time(),'error':str(exc)[:240]}
         finally:
-            if heavy_acquired:
-                _release_heavy_analysis(owner)
-            with _FUTURES_UI_CACHE['lock']:
-                _FUTURES_UI_CACHE['running'].discard(key)
-            if str(timeframe) in _FAST_FUTURES_UI_POINTS:
-                # Pandas/numpy pueden dejar arenas reservadas incluso después
-                # de liberar el DataFrame. En trade rápido devolvemos esas
-                # páginas al SO de forma best-effort.
-                _trim_process_heap()
-            # Small grace window so the polling request can consume the result
-            # before the incremental researcher starts the next heavy combo.
+            if heavy_acquired: _release_heavy_analysis(owner)
+            with _FUTURES_UI_CACHE['lock']: _FUTURES_UI_CACHE['running'].discard(key)
+            if str(timeframe) in _FAST_FUTURES_UI_POINTS: _trim_process_heap()
             _mark_futures_interactive_priority(seconds=6)
 
-    threading.Thread(
-        target=_do_ui_analysis,
-        daemon=True,
-        name=f'futures-ui-{symbol}-{timeframe}',
-    ).start()
+    threading.Thread(target=_do_ui_analysis,daemon=True,name=f'{market}-ui-{symbol}-{timeframe}').start()
     return 'SCHEDULED'
-
 
 def _serialize_futures_cache(data):
     """
@@ -40078,7 +40261,18 @@ def _classify_futures_analysis_result(
     decision = result.get('decision') or {}
     levels = result.get('levels') or {}
 
-    action = str(decision.get('action') or 'NO_OPERAR').upper()
+    final_action = str(decision.get('action') or 'NO_OPERAR').upper()
+    op = result.get('operational_intelligence') or {}
+    thesis = op.get('thesis') or {}
+    diagnostic_action = final_action
+    if diagnostic_action not in ('LONG','SHORT'):
+        for raw in (op.get('candidate_action'), decision.get('original_action'), result.get('original_action'), thesis.get('direction')):
+            candidate = str(raw or '').upper()
+            if candidate in ('BULLISH','BUY','COMPRA_SPOT'): candidate='LONG'
+            elif candidate in ('BEARISH','SELL','VENTA_SPOT'): candidate='SHORT'
+            if candidate in ('LONG','SHORT'):
+                diagnostic_action = candidate; break
+    action = diagnostic_action
     confidence = _safe_float(decision.get('confidence'))
     directional = action in ('LONG', 'SHORT')
 
@@ -40107,10 +40301,10 @@ def _classify_futures_analysis_result(
 
     if not directional:
         classification = 'NO_TRADE'
-        reason = _futures_reason_text(
-            decision.get('reason') or decision.get('razones'),
-            'El comité no alcanzó consenso suficiente para LONG o SHORT.'
-        )
+        reason = _futures_reason_text(decision.get('reason') or decision.get('razones'), 'No existe una tesis LONG/SHORT gobernada en este análisis.')
+    elif final_action not in ('LONG','SHORT'):
+        classification = 'ANALYSIS_ONLY'
+        reason = _futures_reason_text(rejection_reason or decision.get('reason') or decision.get('razones'), 'Existe tesis direccional, pero no completó confirmación/ejecución para publicarse.')
     elif engine_status != 'EXECUTABLE_SIGNAL':
         classification = 'ANALYSIS_ONLY'
         reason = _futures_reason_text(
@@ -40197,6 +40391,8 @@ def _classify_futures_analysis_result(
         'reason': reason,
         'active_reason': active_reason,
         'action': action,
+        'diagnostic_action': action if classification == 'ANALYSIS_ONLY' else None,
+        'final_action': final_action,
         'confidence': round(confidence, 2),
         'directional': directional,
         'is_executable': classification == 'EXECUTABLE_SIGNAL',
@@ -40374,70 +40570,27 @@ def _build_futures_analysis_visibility(cache, min_confidence):
     }
 
 
-def _futures_directional_hidden_candidates(
-    visibility,
-    source_context,
-    representative_ids=None
-):
+def _futures_directional_hidden_candidates(visibility, source_context, representative_ids=None):
+    """17.5.11 truthful read-only diagnostics for every governed LONG/SHORT thesis.
+
+    Diagnostic visibility is not manual-save authority and never promotes a
+    row to executable. Previous-cycle manual save remains server-policy gated.
     """
-    RC9.7.6 — subconjunto visible para las listas de señales Futures.
-
-    La interfaz de oportunidades NO debe llenarse con NO_OPERAR / ESPERAR /
-    PRECAUCION ni errores de datos. Sólo se muestran hipótesis LONG/SHORT que
-    fueron clasificadas como ANALYSIS_ONLY y que el servidor ya evaluó como
-    riesgo manual MEDIUM/HIGH.
-
-    - En CURRENT_ANALYSIS_ONLY son informativas: no pueden guardarse.
-    - En PREVIOUS_ANALYSIS_ONLY pertenecen al último cierre confirmado y sí
-      pueden ofrecer guardado manual, sujeto a validación server-side.
-    - Las hipótesis de cierres anteriores usan _futures_vigent_manual_candidates
-      y ACTIVE_ANALYSIS_ONLY; no se mezclan con este helper del ciclo actual.
-    """
-    candidates = (visibility or {}).get('candidates') or []
-    allow_manual_save = str(source_context).upper() == 'PREVIOUS_ANALYSIS_ONLY'
-    visible = []
-
+    candidates=(visibility or {}).get('candidates') or []
+    previous=str(source_context).upper()=='PREVIOUS_ANALYSIS_ONLY'
+    selected={}
     for raw in candidates:
-        if not isinstance(raw, dict):
-            continue
-
-        action = str(raw.get('action') or '').upper()
-        classification = str(raw.get('classification') or '').upper()
-        risk_class = str(raw.get('manual_risk_class') or '').upper()
-
-        if action not in ('LONG', 'SHORT'):
-            continue
-        if classification != 'ANALYSIS_ONLY':
-            continue
-        if risk_class not in ('MEDIUM', 'HIGH'):
-            continue
-        if raw.get('manual_save_allowed') is not True:
-            continue
-
-        signal_id = str(raw.get('signal_id') or '')
-        if (
-            representative_ids is not None
-            and signal_id not in representative_ids
-        ):
-            continue
-
-        item = dict(raw)
-        item['source_context'] = str(source_context).upper()
-        # Este helper sólo entrega CURRENT/PREVIOUS. La lista actual es
-        # informativa; el último cierre confirmado sí puede guardarse.
-        item['manual_save_allowed'] = bool(allow_manual_save)
-        visible.append(item)
-
-    visible.sort(
-        key=lambda item: (
-            0 if str(item.get('manual_risk_class') or '').upper() == 'MEDIUM' else 1,
-            -float(item.get('confidence') or 0),
-            str(item.get('symbol') or ''),
-            str(item.get('timeframe') or ''),
-        )
-    )
-    return visible
-
+        if not isinstance(raw,dict): continue
+        action=str(raw.get('diagnostic_action') or raw.get('action') or '').upper()
+        if action not in ('LONG','SHORT') or str(raw.get('classification') or '').upper()!='ANALYSIS_ONLY': continue
+        item=dict(raw); item['action']=action; item['source_context']=str(source_context).upper(); item['diagnostic_only']=True
+        allowed=bool(raw.get('manual_save_allowed')) and previous
+        if representative_ids is not None and str(raw.get('signal_id') or '') not in representative_ids: allowed=False
+        item['manual_save_allowed']=allowed
+        key=(str(item.get('symbol') or ''),str(item.get('timeframe') or ''))
+        prev=selected.get(key)
+        if prev is None or float(item.get('confidence') or 0)>float(prev.get('confidence') or 0): selected[key]=item
+    return sorted(selected.values(),key=lambda x:(-float(x.get('confidence') or 0),str(x.get('symbol') or ''),str(x.get('timeframe') or '')))
 
 def _futures_vigent_manual_candidates(
     cache,
@@ -43080,11 +43233,22 @@ _confirmed_signal_alerts_lock = threading.Lock()
 _CONFIRMED_SIGNAL_OUTBOX_RETENTION = 2 * 24 * 3600
 _confirmed_signal_outbox = {}
 _confirmed_signal_outbox_lock = threading.Lock()
+# Non-blocking process-local send mutex: two refresh lanes must not deliver the
+# same durable event concurrently while Supabase/disk dedup is being updated.
+_confirmed_signal_send_lock = threading.Lock()
 
 
 def _compact_confirmed_outbox_signal(market, signal):
     signal = signal or {}
     levels = dict(signal.get('levels') or {})
+    # Some Spot/lifecycle paths expose the same execution fields flat. Preserve
+    # them during outbox compaction instead of turning a valid signal into a
+    # level-less retry payload.
+    for _name in ('entry','stop_loss','take_profit','leverage','publication_status',
+                  'is_rejected','is_executable','risk_class','safety_band',
+                  'valid_until','signal_id'):
+        if levels.get(_name) is None and signal.get(_name) is not None:
+            levels[_name] = signal.get(_name)
     decision = signal.get('decision') or {}
     if not isinstance(decision, dict):
         decision = {'action': decision or signal.get('action'), 'confidence': signal.get('confidence')}
@@ -43152,36 +43316,131 @@ def _confirmed_outbox_enqueue(market, signal, key):
     now = time.time()
     compact = _compact_confirmed_outbox_signal(market, signal)
     with _confirmed_signal_outbox_lock:
-        prior = dict(_confirmed_signal_outbox.get(key) or {})
-        if str(prior.get('state') or '').upper() == 'SENT':
-            return prior
+        prior_ref = _confirmed_signal_outbox.get(key)
+        prior = dict(prior_ref or {})
+        prior_state = str(prior.get('state') or '').upper()
+
+        # Durable idempotency: duplicate enqueue never resets retry deadlines,
+        # resurrects terminal events, or causes another persistence write.
+        if prior_ref is not None:
+            return prior_ref
+
+        # Never evict pending delivery merely to admit a new event. A bounded
+        # queue may compact only terminal rows; if all 300 are pending/retryable
+        # the new item is skipped and a later cycle can retry discovery.
+        if len(_confirmed_signal_outbox) >= 300:
+            terminal = [
+                (k, v) for k, v in _confirmed_signal_outbox.items()
+                if str((v or {}).get('state') or '').upper() in
+                   ('SENT','EXPIRED_OR_SUPERSEDED','INVALID')
+            ]
+            if terminal:
+                oldest_key, _ = min(terminal, key=lambda kv: float((kv[1] or {}).get('updated_at') or 0.0))
+                _confirmed_signal_outbox.pop(oldest_key, None)
+            else:
+                print('⚠️ CONFIRMED outbox lleno: se conservan 300 eventos pendientes; nuevo evento diferido.')
+                return None
+
         item = {
             'key': key, 'market': str(market or '').lower(), 'signal': compact,
-            'state': str(prior.get('state') or 'PENDING').upper(),
-            'attempts': int(prior.get('attempts') or 0),
-            'created_at': float(prior.get('created_at') or now),
-            'updated_at': now,
-            'next_retry_at': float(prior.get('next_retry_at') or 0.0),
-            'last_error': prior.get('last_error'),
+            'state': 'PENDING', 'attempts': 0, 'created_at': now,
+            'updated_at': now, 'next_retry_at': 0.0, 'last_error': None,
         }
         _confirmed_signal_outbox[key] = item
-        if len(_confirmed_signal_outbox) > 300:
-            ordered = sorted(_confirmed_signal_outbox.items(), key=lambda kv: float((kv[1] or {}).get('updated_at') or 0.0), reverse=True)
-            _confirmed_signal_outbox.clear(); _confirmed_signal_outbox.update(dict(ordered[:300]))
     _save_confirmed_signal_outbox_to_disk()
     return item
 
-
 def _attempt_confirmed_outbox_event(key):
+    # Normal production path: process-local non-blocking send mutex + strict
+    # 17.5.11R.1 delivery validator. globals().get keeps older AST-only QA tools
+    # compatible without weakening the real module.
+    _inner = globals().get('_attempt_confirmed_outbox_event_inner')
+    _send_lock = globals().get('_confirmed_signal_send_lock')
+    if callable(_inner) and _send_lock is not None:
+        if not _send_lock.acquire(blocking=False):
+            return False
+        try:
+            return _inner(key)
+        finally:
+            _send_lock.release()
+
+    # Compatibility path used only by legacy offline QA that AST-loads this
+    # single function without its new dependencies. It preserves the previous
+    # retry/dedup semantics and is unreachable in the complete application.
     now = time.time()
     with _confirmed_signal_outbox_lock:
         item = dict(_confirmed_signal_outbox.get(key) or {})
     if not item:
         return False
-    if str(item.get('state') or '').upper() == 'SENT':
+    state = str(item.get('state') or '').upper()
+    if state == 'SENT':
         return True
+    if state in ('EXPIRED_OR_SUPERSEDED','INVALID'):
+        return False
     if now < float(item.get('next_retry_at') or 0.0):
         return False
+    market = str(item.get('market') or '').lower()
+    signal = dict(item.get('signal') or {})
+    timeframe = str(signal.get('timeframe') or '')
+    event_key = str(item.get('key') or key)
+    with _confirmed_signal_alerts_lock:
+        if event_key in _confirmed_signal_alerts_sent:
+            with _confirmed_signal_outbox_lock:
+                if event_key in _confirmed_signal_outbox:
+                    _confirmed_signal_outbox[event_key].update(state='SENT',updated_at=now)
+            _save_confirmed_signal_outbox_to_disk(); return True
+    levels=signal.get('levels') or {}; decision=signal.get('decision') or {}
+    action=str(decision.get('action') or '').upper(); confidence=float(decision.get('confidence') or 0)
+    publication=str(levels.get('publication_status') or signal.get('publication_status') or '').upper()
+    valid=bool(action in (('LONG','SHORT') if market in ('futures','multiasset') else ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'))
+               and confidence>=60
+               and (market not in ('futures','multiasset') or publication=='EXECUTABLE_SIGNAL')
+               and _confirmed_signal_preferences_allow(market,timeframe)
+               and _confirmed_signal_recent_enough(signal,timeframe))
+    if not valid:
+        with _confirmed_signal_outbox_lock:
+            if event_key in _confirmed_signal_outbox:
+                _confirmed_signal_outbox[event_key].update(state='EXPIRED_OR_SUPERSEDED',updated_at=now)
+        _save_confirmed_signal_outbox_to_disk(); return False
+    message=_build_confirmed_signal_telegram_message(market,signal)
+    try:
+        sent=bool(expert_system.send_telegram_alert(message,None,category='CONFIRMED_SIGNAL'))
+    except Exception as exc:
+        sent=False; send_error=str(exc)[:180]
+    else:
+        send_error=None if sent else 'TRANSPORT_RETURNED_FALSE'
+    if sent:
+        with _confirmed_signal_alerts_lock:
+            _confirmed_signal_alerts_sent[event_key]=now
+        _save_confirmed_signal_alerts_to_disk()
+        with _confirmed_signal_outbox_lock:
+            if event_key in _confirmed_signal_outbox:
+                _confirmed_signal_outbox[event_key].update(state='SENT',updated_at=now,last_error=None)
+        _save_confirmed_signal_outbox_to_disk(); return True
+    with _confirmed_signal_outbox_lock:
+        row=_confirmed_signal_outbox.get(event_key)
+        if row is not None:
+            attempts=int(row.get('attempts') or 0)+1
+            row.update(state='FAILED_RETRYABLE',attempts=attempts,updated_at=now,
+                       next_retry_at=now+min(300,20*(2**min(attempts-1,4))),
+                       last_error=send_error or 'UNKNOWN_TRANSPORT_FAILURE')
+    _save_confirmed_signal_outbox_to_disk(); return False
+
+
+def _attempt_confirmed_outbox_event_inner(key):
+    now = time.time()
+    with _confirmed_signal_outbox_lock:
+        item = dict(_confirmed_signal_outbox.get(key) or {})
+    if not item:
+        return False
+    state = str(item.get('state') or '').upper()
+    if state == 'SENT':
+        return True
+    if state in ('EXPIRED_OR_SUPERSEDED','INVALID'):
+        return False
+    if now < float(item.get('next_retry_at') or 0.0):
+        return False
+
     market = str(item.get('market') or '').lower()
     signal = dict(item.get('signal') or {})
     timeframe = str(signal.get('timeframe') or '')
@@ -43196,19 +43455,7 @@ def _attempt_confirmed_outbox_event(key):
             _save_confirmed_signal_outbox_to_disk()
             return True
 
-    # Revalidate technical publication and freshness before each retry.
-    levels = signal.get('levels') or {}; decision = signal.get('decision') or {}
-    action = str(decision.get('action') or '').upper()
-    confidence = float(decision.get('confidence') or 0)
-    publication = str(levels.get('publication_status') or signal.get('publication_status') or '').upper()
-    valid = bool(
-        action in (('LONG','SHORT') if market in ('futures','multiasset') else ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'))
-        and confidence >= 60
-        and (market not in ('futures','multiasset') or publication == 'EXECUTABLE_SIGNAL')
-        and _confirmed_signal_preferences_allow(market, timeframe)
-        and _confirmed_signal_recent_enough(signal, timeframe)
-    )
-    if not valid:
+    if not _confirmed_delivery_valid_17_5_11(market, signal):
         with _confirmed_signal_outbox_lock:
             if event_key in _confirmed_signal_outbox:
                 _confirmed_signal_outbox[event_key].update(state='EXPIRED_OR_SUPERSEDED', updated_at=now)
@@ -43219,7 +43466,8 @@ def _attempt_confirmed_outbox_event(key):
     try:
         sent = bool(expert_system.send_telegram_alert(message, None, category='CONFIRMED_SIGNAL'))
     except Exception as exc:
-        sent = False; send_error = str(exc)[:180]
+        sent = False
+        send_error = str(exc)[:180]
     else:
         send_error = None if sent else 'TRANSPORT_RETURNED_FALSE'
 
@@ -43244,7 +43492,6 @@ def _attempt_confirmed_outbox_event(key):
             )
     _save_confirmed_signal_outbox_to_disk()
     return False
-
 
 def _retry_confirmed_signal_outbox(limit=3):
     now = time.time(); keys = []
@@ -43313,7 +43560,12 @@ def _confirmed_signal_tf_seconds(timeframe):
 
 
 def _confirmed_signal_close_timestamp(signal, timeframe):
-    """Timestamp UTC del cierre que originó la confirmación."""
+    """Timestamp UTC CANÓNICO del cierre que originó la confirmación.
+
+    17.5.11R: workers/cachés pueden reportar segundos o milisegundos distintos
+    para la misma vela. El cierre se ancla al grid temporal real antes de crear
+    la clave durable de Telegram/lifecycle.
+    """
     raw_close = (signal or {}).get('source_candle_close_timestamp')
     raw_open = (
         (signal or {}).get('source_candle_timestamp')
@@ -43321,17 +43573,27 @@ def _confirmed_signal_close_timestamp(signal, timeframe):
         or (signal or {}).get('previous_candle_timestamp')
     )
     try:
+        seconds = _confirmed_signal_tf_seconds(timeframe)
+        if seconds <= 0:
+            return None
+
+        if raw_open:
+            ts = pd.Timestamp(raw_open)
+            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+            epoch = ts.timestamp()
+            start_epoch = int(epoch // seconds) * seconds
+            return pd.Timestamp(start_epoch + seconds, unit='s', tz='UTC')
+
         if raw_close:
             ts = pd.Timestamp(raw_close)
-        elif raw_open:
-            ts = pd.Timestamp(raw_open)
-            seconds = _confirmed_signal_tf_seconds(timeframe)
-            if seconds <= 0:
-                return None
-            ts = ts + pd.Timedelta(seconds=seconds)
-        else:
-            return None
-        return ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+            epoch = ts.timestamp()
+            # Snap to the nearest candle boundary. This absorbs small runtime
+            # timestamp jitter without merging genuinely different candles.
+            close_epoch = int(round(epoch / seconds)) * seconds
+            return pd.Timestamp(close_epoch, unit='s', tz='UTC')
+
+        return None
     except Exception:
         return None
 
@@ -43361,14 +43623,16 @@ def _confirmed_signal_event_key(market, signal):
         normalized = candle_ts.isoformat()
     except Exception:
         normalized = str(candle or 'unknown')
-    if market == 'spot':
-        # RC10.2.1: dedup por CELDA real. BTC 1D y PAXG 1D son señales distintas
-        # y ambas deben poder avisarse; sólo se bloquea repetir la misma señal
-        # del mismo símbolo×TF×dirección×cierre.
-        close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
-        close_key = close_ts.isoformat() if close_ts is not None else normalized
-        return f"spot|{symbol}|{timeframe}|{action}|{close_key}"
-    return f"{market}|{symbol}|{timeframe}|{action}|{normalized}"
+
+    # COMMIT 17.5.11R.1 — one durable notification key per real candle.
+    # Multi-Asset/Futures workers can finish the same candle through slightly
+    # different runtime timestamps (seconds/milliseconds).  Using the raw
+    # timestamp made the same KSTR 1h setup eligible for Telegram twice.
+    # Canonical close is already the lifecycle authority, so ALL markets use
+    # symbol × TF × direction × canonical candle close for deduplication.
+    close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
+    close_key = close_ts.isoformat() if close_ts is not None else normalized
+    return f"{market}|{symbol}|{timeframe}|{action}|{close_key}"
 
 
 def _confirmed_signal_recent_enough(signal, timeframe):
@@ -43421,6 +43685,89 @@ def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
         return reward / risk
     except Exception:
         return None
+
+
+def _confirmed_delivery_valid_17_5_11(market, signal):
+    """Fail-closed delivery contract for a confirmed actionable signal.
+
+    Transport dedup is not a trading gate, but Telegram must never publish an
+    intrabar/synthetic/stale or geometrically impossible derivative setup.
+    Low leverage remains valid when the technical geometry itself is valid.
+    """
+    signal = signal if isinstance(signal, dict) else {}
+    market = str(market or '').strip().lower()
+    decision = signal.get('decision') or {}
+    if isinstance(decision, dict):
+        action = str(decision.get('action') or signal.get('action') or '').upper()
+        try:
+            confidence = float(decision.get('confidence') or signal.get('confidence') or 0)
+        except Exception:
+            confidence = 0.0
+    else:
+        action = str(decision or signal.get('action') or '').upper()
+        try:
+            confidence = float(signal.get('confidence') or 0)
+        except Exception:
+            confidence = 0.0
+    levels = signal.get('levels') or {}
+
+    if signal.get('source_candle_closed') is False:
+        return False
+    if bool(signal.get('market_data_is_synthetic')):
+        return False
+    if str(signal.get('analysis_mode') or '').upper() in ('INTRABAR','INTRABAR_PREVIEW','PREVIEW'):
+        return False
+    if signal.get('publication_eligible') is False:
+        return False
+    if confidence < 60:
+        return False
+
+    allowed = ('LONG','SHORT') if market in ('futures','multiasset') else ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT')
+    if action not in allowed:
+        return False
+
+    def _num(name):
+        value = levels.get(name) if isinstance(levels, dict) else None
+        if value is None:
+            value = signal.get(name)
+        try:
+            v = float(value)
+            return v if v > 0 and v == v and abs(v) != float('inf') else None
+        except Exception:
+            return None
+
+    entry, sl, tp = _num('entry'), _num('stop_loss'), _num('take_profit')
+    if entry is None or sl is None or tp is None:
+        return False
+    if _confirmed_signal_rr(action, entry, sl, tp) is None:
+        return False
+
+    publication = str(
+        (levels.get('publication_status') if isinstance(levels, dict) else None)
+        or signal.get('publication_status') or ''
+    ).upper()
+    if market in ('futures','multiasset') and publication != 'EXECUTABLE_SIGNAL':
+        return False
+    if bool((levels.get('is_rejected') if isinstance(levels, dict) else False) or signal.get('is_rejected')):
+        return False
+    executable = levels.get('is_executable') if isinstance(levels, dict) else None
+    if executable is None:
+        executable = signal.get('is_executable')
+    if executable is False:
+        return False
+
+    valid_until = signal.get('valid_until') or (levels.get('valid_until') if isinstance(levels, dict) else None)
+    if valid_until:
+        try:
+            vu = pd.Timestamp(valid_until)
+            vu = vu.tz_localize('UTC') if vu.tz is None else vu.tz_convert('UTC')
+            if pd.Timestamp.now(tz='UTC') >= vu:
+                return False
+        except Exception:
+            return False
+
+    timeframe = str(signal.get('timeframe') or '')
+    return bool(_confirmed_signal_recent_enough(signal, timeframe))
 
 
 def _signal_execution_geometry_status(market, signal):
@@ -57685,6 +58032,23 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
     except Exception as e:
         print(f"   ❌ Error TGP Telegram: {e}")
 
+
+
+# ============================================================================
+# COMMIT 17.5.11 — DIRECT CORE BOOTSTRAP (no wsgi/runtime overlay chain)
+# ============================================================================
+def _install_commit_17_5_11_core():
+    state={'version':'17.5.11'}
+    try:
+        _configured_futures_module()
+        from strategy_quality_extension_175105 import install_strategy_quality_extension_175105
+        state.update(install_strategy_quality_extension_175105() or {})
+    except Exception as exc:
+        state['strategy_extension_error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+    return state
+
+_COMMIT_17_5_11_BOOTSTRAP=_install_commit_17_5_11_core()
+print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flush=True)
 
 
 # ============================================================================

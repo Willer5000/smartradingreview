@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "RC9_2_CONTINGENCY_PLAYBOOK_V1"
+VERSION = "COMMIT17_5_11R_1_VALIDATED_ROUTE_PLAYBOOK_V1"
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 _NEGATIVE_RESEARCH = {"REJECTED_OOS", "NEGATIVE_OOS", "SHADOW_DIVERGED", "ALPHA_DECAY", "DEGRADED", "REVOKED"}
 _POSITIVE_RESEARCH = {"SHADOW_READY", "OOS_VALIDATED", "OOS_PLUS_SHADOW", "CHAMPION", "VALIDATED"}
@@ -472,6 +472,24 @@ def build_contingency_playbook(
     strategy = str(bank_pick.get("id") or "NO_PLAYBOOK")
     setup_family = str(bank_pick.get("family") or "NONE")
     strategy_quality = float(bank_pick.get("quality") or 0.0)
+
+    # Commit 17.5.11R.1 — when an exact local Research specialist passed the
+    # governed OOS+walk-forward contract, the price-level desk must solve the
+    # same kind of setup that Research validated.  This is semantic alignment
+    # only: no level is copied from Research, no direction is created and the
+    # existing structural Entry/SL/TP/Safety gates remain authoritative.
+    validated_route = dict(operational.get("validated_strategy_route") or {})
+    if (
+        validated_route.get("eligible_for_execution_routing")
+        and _u(validated_route.get("action")) == _u(target_action)
+    ):
+        _route_execution_family = str(validated_route.get("execution_family") or "").upper()
+        if _route_execution_family:
+            setup_family = _route_execution_family
+        _route_strategy_id = str(validated_route.get("strategy_id") or "")
+        if _route_strategy_id:
+            strategy = _route_strategy_id
+
     candidate_source = str(operational.get("candidate_source") or "NONE").upper()
     thesis_quality = float((operational.get("thesis") or {}).get("quality") or 0.0)
     # RC9.7: a named default strategy is one valid contingency source, not a
@@ -624,6 +642,16 @@ def build_contingency_playbook(
         "setup_family": setup_family,
         "strategy_quality": round(strategy_quality, 2),
         "candidate_source": candidate_source,
+        "validated_strategy_route": {
+            "matched": bool(validated_route.get("matched")),
+            "eligible_for_execution_routing": bool(validated_route.get("eligible_for_execution_routing")),
+            "research_family": validated_route.get("research_family"),
+            "execution_family": validated_route.get("execution_family"),
+            "strategy_id": validated_route.get("strategy_id"),
+            "action": validated_route.get("action"),
+            "authority": validated_route.get("authority"),
+            "reason": validated_route.get("reason"),
+        },
         "thesis_quality": round(thesis_quality, 2),
         "default_strategy_required": bool(default_required_for_path),
         "candidate_path_quality_ok": bool(candidate_path_quality_ok),

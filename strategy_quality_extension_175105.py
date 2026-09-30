@@ -548,6 +548,10 @@ def _install_multiasset_nonblocking_ui() -> bool:
     original = getattr(appmod, "api_multiasset_analyze", None)
     if flask_app is None or not callable(original):
         return False
+    # 17.5.11 integrates the non-blocking Multi contract directly in app.py.
+    # Do not replace that route with the older queue-only compatibility wrapper.
+    if getattr(original, "_st17511_integrated_nonblocking_multi_ui", False):
+        return True
     if getattr(original, "_st175107_nonblocking_multi_ui", False):
         return True
 

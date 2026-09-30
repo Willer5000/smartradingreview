@@ -1,4 +1,4 @@
-/* Commit 17.5.10.2 — Delta / Gamma / Theta trader-facing panel.
+/* Commit 17.5.11 — Delta / Gamma / Theta trader-facing panel.
  *
  * Design goals:
  * - visually match a professional aggregated Greeks/GEX chart;
@@ -9,11 +9,12 @@
  */
 (function () {
     'use strict';
-    if (window.__MM_OPTIONS_FRONTEND_175102__) return;
-    window.__MM_OPTIONS_FRONTEND_175102__ = true;
+    if (window.__MM_OPTIONS_FRONTEND_17511__) return;
+    window.__MM_OPTIONS_FRONTEND_17511__ = true;
 
     const $ = id => document.getElementById(id);
     const finite = v => {
+        if (v === null || v === undefined || v === '') return null;
         const n = Number(v);
         return Number.isFinite(n) ? n : null;
     };
@@ -79,6 +80,7 @@
     }
 
     function styleHeader(observed) {
+        if (typeof document.querySelector !== 'function') return;
         const card = document.querySelector('[data-indicator="market-maker-options"]');
         if (!card) return;
         const title = card.querySelector('.card-header h5');
@@ -123,7 +125,7 @@
                 if (window.Plotly) window.Plotly.purge(chart);
             } catch (_) {}
             chart.innerHTML =
-                '<div class="d-flex h-100 align-items-center justify-content-center text-muted text-center px-3">Sin contexto de opciones compatible.</div>';
+                '<div class="d-flex h-100 align-items-center justify-content-center text-muted text-center px-3">Contexto de opciones no disponible.</div>';
         }
         styleHeader(false);
     }
@@ -200,18 +202,24 @@
                 : 'SHADOW teórico: no cambia señal, Entry, SL, TP, leverage ni Safety.'
         );
 
-        const gex = Array.isArray(mm.gex_curve) ? mm.gex_curve : [];
-        const delta = Array.isArray(mm.delta_curve) ? mm.delta_curve : [];
+        const cleanPairs = rows => (Array.isArray(rows) ? rows : [])
+            .map(r => [finite(r?.[0]), finite(r?.[1])])
+            .filter(([x, y]) => x !== null && y !== null);
+        const gex = cleanPairs(mm.gex_curve);
+        const delta = cleanPairs(mm.delta_curve);
+        const theta = cleanPairs(mm.theta_curve);
         if (!window.Plotly || !gex.length || !delta.length) {
             chart.innerHTML =
                 '<div class="d-flex h-100 align-items-center justify-content-center text-muted">Greeks disponibles; curva compacta no disponible.</div>';
             return;
         }
 
-        const gx = gex.map(r => Number(r?.[0]));
-        const gy = gex.map(r => Number(r?.[1]));
-        const dx = delta.map(r => Number(r?.[0]));
-        const dy = delta.map(r => Number(r?.[1]));
+        const gx = gex.map(r => r[0]);
+        const gy = gex.map(r => r[1]);
+        const dx = delta.map(r => r[0]);
+        const dy = delta.map(r => r[1]);
+        const tx = theta.map(r => r[0]);
+        const ty = theta.map(r => r[1]);
 
         const traces = [
             {
@@ -245,6 +253,24 @@
                 hovertemplate: 'Precio %{x:,.2f}<br>Delta neta %{y:.3s}<extra></extra>'
             }
         ];
+        if (theta.length) {
+            traces.push({
+                x: tx,
+                y: ty,
+                type: 'scatter',
+                mode: 'lines',
+                name: 'Theta teórica / día',
+                yaxis: 'y3',
+                line: {
+                    width: 2.0,
+                    dash: 'dash',
+                    color: '#b38cff',
+                    shape: 'spline',
+                    smoothing: 1.0
+                },
+                hovertemplate: 'Precio %{x:,.2f}<br>Theta %{y:.4f}<extra></extra>'
+            });
+        }
 
         const shapes = [];
         const annotations = [];
@@ -315,6 +341,15 @@
                 tickformat: '.3~s',
                 separatethousands: true
             },
+            yaxis3: {
+                title: '',
+                overlaying: 'y',
+                side: 'right',
+                position: 0.96,
+                showgrid: false,
+                zeroline: false,
+                showticklabels: false
+            },
             shapes,
             annotations,
             hovermode: 'x unified',
@@ -323,7 +358,7 @@
                 bordercolor: '#3a424a',
                 font: { color: '#f2f5f7' }
             },
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175102`
+            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-17511`
         };
 
         window.Plotly.react(
@@ -375,13 +410,13 @@
     }
 
     function schedule(ms) {
-        clearTimeout(timer);
-        timer = setTimeout(refresh, ms || 120);
+        if (typeof clearTimeout === 'function') clearTimeout(timer);
+        if (typeof setTimeout === 'function') timer = setTimeout(refresh, ms || 120);
     }
 
     function installAnalysisHook() {
         if (
-            window.__MM_OPTIONS_UPDATE_HOOKED_175102__
+            window.__MM_OPTIONS_UPDATE_HOOKED_17511__
             || typeof window.updateAllCharts !== 'function'
         ) return;
         const original = window.updateAllCharts;
@@ -390,16 +425,16 @@
             try { render(data); } catch (_) {}
             return out;
         };
-        window.__MM_OPTIONS_UPDATE_HOOKED_175102__ = true;
+        window.__MM_OPTIONS_UPDATE_HOOKED_17511__ = true;
     }
 
     function init() {
-        if (!window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) return;
+        if (window.IS_FUTURES_PAGE === false || window.IS_MULTI_ASSET_PAGE === true) return;
         installAnalysisHook();
         document.getElementById('symbol-select')
-            ?.addEventListener('change', () => schedule(180));
+            ?.addEventListener?.('change', () => schedule(180));
         document.getElementById('interval-select')
-            ?.addEventListener('change', () => schedule(180));
+            ?.addEventListener?.('change', () => schedule(180));
         schedule(250);
         // Bounded hook retry only. This is NOT market-data polling.
         setTimeout(installAnalysisHook, 800);

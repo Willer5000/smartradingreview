@@ -20,7 +20,7 @@ from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_9_WORKER_RECOVERY_V1"
+VERSION = "COMMIT17_5_11R_1_CONTEXT_ALIGNED_EXECUTION_V1"
 
 try:
     from preliminary_backtest_prior import (
@@ -530,25 +530,67 @@ def _cluster_evidence(candidate: Dict[str, Any], universe: List[Dict[str, Any]],
 
 def evaluate_sl_reaction_conflict(*, structure: Dict[str, Any], direction: str,
                                   entry: float, stop_loss: float, atr: float) -> Dict[str, Any]:
-    """Reject only a *local, setup-relevant* reaction collision.
+    """Fail closed on invalid input and reject only local, still-valid reaction collisions.
 
-    17.5.10 fixes the false-veto where any strong historical support/resistance
-    on the invalidation side could force the SL beyond a level dozens of ATR
-    away. A reaction level is relevant only when it belongs to the planned
-    invalidation corridor derived from Entry→SL risk geometry. This does not
-    widen/tighten SL, create direction or relax the strong-zone requirement.
+    17.5.11 also protects the *full width* of a valid Order Block. A stop inside
+    the body of a reaction zone is not an invalidation; it is precisely where a
+    reaction may occur. Far historical levels remain irrelevant.
     """
     direction = str(direction or "").lower()
-    entry = _f(entry, 0.0)
-    stop_loss = _f(stop_loss, 0.0)
-    atr = _f(atr, 0.0)
-    if direction not in {"long", "short"} or min(entry, stop_loss, atr) <= 0:
-        return {"conflict": False, "reason": "INSUFFICIENT_INPUT"}
+    try:
+        raw_entry, raw_stop, raw_atr = float(entry), float(stop_loss), float(atr)
+    except Exception:
+        raw_entry = raw_stop = raw_atr = float("nan")
+    if (
+        direction not in {"long", "short"}
+        or not isfinite(raw_entry) or raw_entry <= 0
+        or not isfinite(raw_stop) or raw_stop <= 0
+        or not isfinite(raw_atr) or raw_atr <= 0
+    ):
+        return {"conflict": True, "reason": "INVALID_SL_GUARD_INPUT",
+                "source": "Execution input", "level": None}
+    entry, stop_loss, atr = raw_entry, raw_stop, raw_atr
     if not _is_correct_side(stop_loss, entry, direction, "sl"):
         return {"conflict": True, "reason": "SL_WRONG_SIDE", "level": entry,
                 "source": "Entry", "distance_atr": 0.0}
 
-    reaction_universe = _collect_entry_candidates(_execution_structure(_d(structure)), direction, entry)
+    clean_structure = _execution_structure(_d(structure))
+    # Full-zone semantic guard for active Order Blocks. The invalidation edge is
+    # the far edge of the block, not merely the candidate edge used for Entry.
+    for ob in clean_structure.get("order_blocks") or []:
+        if not isinstance(ob, dict) or ob.get("invalidated") or ob.get("mitigated"):
+            continue
+        wanted = "bullish" if direction == "long" else "bearish"
+        if str(ob.get("type") or "").lower() != wanted:
+            continue
+        band = ob.get("price_range") or []
+        if len(band) < 2:
+            continue
+        lo, hi = sorted((_f(band[0], 0.0), _f(band[1], 0.0)))
+        if not (0 < lo < hi):
+            continue
+        if direction == "long" and hi >= entry:
+            continue
+        if direction == "short" and lo <= entry:
+            continue
+        risk_distance = abs(entry - stop_loss)
+        nearest = hi if direction == "long" else lo
+        if abs(entry - nearest) > max(risk_distance * 1.75, atr * 4.0):
+            continue
+        edge = lo if direction == "long" else hi
+        clearance = max(atr * 0.16, abs(edge) * 0.0006)
+        inside = (stop_loss >= edge - clearance) if direction == "long" else (stop_loss <= edge + clearance)
+        if inside:
+            return {
+                "conflict": True, "reason": "SL_INSIDE_STRONG_REACTION_ZONE",
+                "level": round(edge, 12), "source": "Order Block",
+                "families": 1, "strength": 4.5,
+                "distance_atr": round(abs(stop_loss-edge)/atr, 4),
+                "required_clearance_atr": round(clearance/atr, 4),
+                "setup_risk_distance_atr": round(risk_distance/atr, 4),
+            }
+
+    reaction_universe = _collect_entry_candidates(clean_structure, direction, entry)
     risk_distance = abs(entry - stop_loss)
     best = None
     for lvl in reaction_universe:
@@ -610,8 +652,11 @@ def _strategy_family(setup_family: Any) -> str:
     # Commit 17.3: explicit generic families first so a structure reversal is
     # not accidentally classified as SWEEP and expansion is not forced into
     # BREAKOUT_RETEST.  This changes only price-level specialization.
+    if "RSI_TREND" in text or "TREND_CONTINUATION" in text: return "MOMENTUM_CONTINUATION"
     if "MOMENTUM_CONTINUATION" in text or ("MOMENTUM" in text and "CONTINU" in text): return "MOMENTUM_CONTINUATION"
-    if "COMPRESSION_EXPANSION" in text or "SQUEEZE_EXPANSION" in text: return "COMPRESSION_EXPANSION"
+    if "BOLLINGER_SQUEEZE" in text or "COMPRESSION_EXPANSION" in text or "SQUEEZE_EXPANSION" in text: return "COMPRESSION_EXPANSION"
+    if "RSI_MAVERICK_REVERSAL" in text: return "MEAN_REVERSION"
+    if "SUPERTREND_PULLBACK" in text: return "TREND_PULLBACK"
     if "STRUCTURE_REVERSAL" in text or "TREND_REVERSAL" in text: return "STRUCTURE_REVERSAL"
     if "SWEEP" in text: return "SWEEP_REVERSAL"
     if "BREAK" in text or "RETEST" in text: return "BREAKOUT_RETEST"
@@ -718,11 +763,46 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
     except Exception:
         backtest_score = 50.0
 
-    return {
+    scores = {
         "reaction": reaction, "smc": smc, "strategy": strategy,
         "reachability": reach, "volatility": noise, "flow": flow,
         "context": context_score, "backtest_prior": _clip(backtest_score),
     }
+
+    # COMMIT 17.5.11R — validated execution route (ranker only).
+    # Historical execution-forensics were split chronologically 70/30 before
+    # promotion. LIQUIDITY_SWEEP_MSS_POI passed the stricter hit-efficiency +
+    # expectancy test only on 30m: IS +0.859R (7 TP / 4 SL) and OOS +1.800R
+    # (5 TP / 0 SL). 1h kept slightly positive expectancy but failed the user's
+    # TP-vs-SL efficiency objective (OOS 2 TP / 7 SL), 2h failed OOS, and 4h
+    # has N too small. Those timeframes receive NO production ranking lift.
+    # This specialist never creates direction, never changes Safety/RR gates,
+    # and is omitted (not scored neutral) when the exact observed route is
+    # absent or the market/timeframe is outside validated scope.
+    _tf = str(context.get("timeframe") or "").lower()
+    _market = str(market_type or "").lower()
+    _has_sweep = bool(
+        smc_ctx.get("liquidity_sweep") or smc_ctx.get("sweep")
+        or structure.get("liquidity_sweep") or structure.get("sweep")
+    )
+    _has_shift = bool(
+        smc_ctx.get("mss") or smc_ctx.get("bos")
+        or structure.get("mss") or structure.get("bos")
+    )
+    _has_displacement = bool(
+        smc_ctx.get("displacement") or structure.get("displacement")
+    )
+    _poi_candidate = fam in {"smc_poi", "liquidity", "swing", "structure"}
+    if (
+        _market == "futures"
+        and _tf == "30m"
+        and _has_sweep
+        and (_has_shift or _has_displacement)
+        and _poi_candidate
+    ):
+        scores["validated_liquidity_route"] = 88.0
+
+    return scores
 
 
 def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
@@ -937,18 +1017,19 @@ def _weights_for(role: str, market_type: str) -> Dict[str, float]:
     if role == "entry":
         # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
         base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
-                "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.35}
+                "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.0,
+                "validated_liquidity_route":0.90}
         if market in {"futures","multiasset"}:
             base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
         return base
     if role == "sl":
         base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
-                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.15}
+                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0}
         if market == "spot": base["risk"] = 1.0
         return base
     return {"target":1.20,"path":1.25,"touch_probability":1.25,
             "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7,
-            "backtest_prior":0.20}
+            "backtest_prior":0.0}
 
 
 def _harmonic(values: Iterable[float]) -> Optional[float]:
@@ -962,7 +1043,11 @@ def _score_candidate(scores: Dict[str, float], weights: Dict[str, float], role: 
     pairs = [(scores[k], weights.get(k, 1.0)) for k in scores if k in weights]
     agg = _weighted_mean(pairs)
     if agg is None: return 0.0, 0.0
-    agree = _consensus(list(scores.values()))
+    # 17.5.11: a zero-authority/shadow specialist must not affect either the
+    # weighted mean OR the agreement term. This prevents N-small historical
+    # priors from silently changing live Entry/SL/TP ranking.
+    agreement_values = [scores[k] for k in scores if float(weights.get(k, 0.0)) > 0.0]
+    agree = _consensus(agreement_values)
 
     # Each committee has a small set of indispensable specialist dimensions.
     # Harmonic synthesis prevents one excellent opinion from hiding a very weak
@@ -1439,10 +1524,19 @@ def recover_execution_geometry_from_structure(*, direction: str, current_price: 
     context.setdefault("timeframe", str(timeframe or ""))
     market = str(market_type or "futures").lower()
     direction = str(direction or "").lower()
-    current_price = _f(current_price, 0.0)
-    atr = max(_f(atr, 0.0), abs(current_price) * 1e-6, 1e-12)
-    if direction not in {"long", "short"} or current_price <= 0 or atr <= 0:
+    try:
+        raw_current_price = float(current_price)
+        raw_atr = float(atr)
+    except Exception:
+        raw_current_price = raw_atr = float("nan")
+    if (
+        direction not in {"long", "short"}
+        or not isfinite(raw_current_price) or raw_current_price <= 0
+        or not isfinite(raw_atr) or raw_atr <= 0
+    ):
         return {"success": False, "reason": "INVALID_RECOVERY_INPUT", "version": VERSION}
+    current_price = raw_current_price
+    atr = raw_atr
 
     rr_floor = max(1.0, _f(rr_floor, 1.8))
     rr_ceiling = max(rr_floor, _f(rr_ceiling, 4.5))

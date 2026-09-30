@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from math import erf, exp, log, pi, sqrt
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-VERSION = "COMMIT17_5_10_2_MM_MATH_V2"
+VERSION = "COMMIT17_5_11R_MM_MATH_QA_V3"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -124,7 +124,10 @@ def _normalize_chain_row(row: Mapping[str, Any], *, as_of: datetime) -> Optional
     )
     if strike <= 0 or oi <= 0 or iv <= 0 or typ not in {"CALL", "PUT"} or expiry is None:
         return None
-    seconds = max(60.0, (expiry - as_of).total_seconds())
+    seconds = (expiry - as_of).total_seconds()
+    if seconds <= 0:
+        return None
+    seconds = max(60.0, seconds)
     t_years = seconds / (365.0 * 24.0 * 3600.0)
     multiplier = max(_f(row.get("contract_multiplier") or row.get("multiplier"), 1.0), 1e-12)
     return {
@@ -161,17 +164,24 @@ def _exposure_at_spot(
     return signed_gex, net_delta_dollars
 
 
-def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float]) -> Optional[float]:
-    if not points:
-        return fallback
-    best = min(points, key=lambda p: abs(p[1]))
+def _nearest_zero(points: List[Tuple[float, float]], fallback: Optional[float] = None) -> Optional[float]:
+    """Return a zero only when the sampled curve actually crosses zero.
+
+    A smallest absolute value is not a zero-gamma/delta-neutral level.  Using
+    it as one produced false precision in the UI and in shadow context.
+    """
+    if len(points) < 2:
+        return None
+    values = [float(y) for _, y in points]
+    if not any(v > 0 for v in values) or not any(v < 0 for v in values):
+        return None
     for (x1, y1), (x2, y2) in zip(points, points[1:]):
-        if y1 == 0:
-            return x1
+        if y1 == 0 and y2 != 0:
+            return float(x1)
         if y1 * y2 < 0:
             w = abs(y1) / max(abs(y1) + abs(y2), 1e-12)
-            return x1 + (x2 - x1) * w
-    return best[0]
+            return float(x1 + (x2 - x1) * w)
+    return None
 
 
 def _distance_pct(level: Any, spot: float) -> Optional[float]:
@@ -286,11 +296,15 @@ def aggregate_gamma_exposure(
         }
 
     rows: List[Dict[str, Any]] = []
+    # Hard CPU/RAM bound: option-chain context is shadow-only and must never
+    # turn a large provider payload/generator into unbounded work.
     for raw in option_chain or []:
         if isinstance(raw, Mapping):
             normalized = _normalize_chain_row(raw, as_of=now)
             if normalized is not None:
                 rows.append(normalized)
+                if len(rows) >= 128:
+                    break
     if not rows:
         return {
             "version": VERSION, "available": False,
@@ -354,10 +368,19 @@ def aggregate_gamma_exposure(
     grid = [lo + (hi - lo) * i / (ngrid - 1) for i in range(ngrid)]
     gex_curve: List[Tuple[float, float]] = []
     delta_curve: List[Tuple[float, float]] = []
+    theta_curve: List[Tuple[float, float]] = []
     for px in grid:
         sg, sd = _exposure_at_spot(rows, px, rate=rate)
+        total_theta = 0.0
+        for r in rows:
+            g = black_scholes_greeks(
+                spot=px, strike=r["strike"], t_years=r["t_years"],
+                volatility=r["iv"], option_type=r["option_type"], rate=rate,
+            )
+            total_theta += g["theta_per_day"] * r["open_interest"] * r["multiplier"]
         gex_curve.append((px, sg))
         delta_curve.append((px, sd))
+        theta_curve.append((px, total_theta))
 
     zero_gamma = _nearest_zero(gex_curve, s)
     delta_neutral = _nearest_zero(delta_curve, s)
@@ -446,6 +469,10 @@ def aggregate_gamma_exposure(
             [round(float(px), 10), round(float(value), 6)]
             for px, value in delta_curve
         ],
+        "theta_curve": [
+            [round(float(px), 10), round(float(value), 6)]
+            for px, value in theta_curve
+        ],
         "specialist_shadow_context": specialist_shadow,
         "production_score_adjustment": 0.0,
         "can_create_direction": False,
@@ -457,6 +484,7 @@ def aggregate_gamma_exposure(
 def theoretical_gamma_shape(
     *, spot: float, volatility: float, as_of: Any = None, expiry_hours: float = 6.5
 ) -> Dict[str, Any]:
+    """Black-Scholes shape only; no option-chain/OI levels are invented."""
     s = max(_f(spot), 0.0)
     vol = max(_f(volatility), 1e-4)
     if vol > 3.0:
@@ -468,35 +496,51 @@ def theoretical_gamma_shape(
         }
     now = _utc(as_of) or datetime.now(timezone.utc)
     t = max(1.0, _f(expiry_hours, 6.5)) / (365.0 * 24.0)
-    rows = []
-    for m in (0.94, 0.96, 0.98, 0.99, 1.0, 1.01, 1.02, 1.04, 1.06):
-        k = s * m
-        for typ in ("CALL", "PUT"):
-            rows.append({
-                "strike": k, "open_interest": 1.0, "iv": vol,
-                "option_type": typ,
-                "expiry": now.timestamp() + t * 365.0 * 24.0 * 3600.0,
-                "multiplier": 1.0,
-            })
-    out = aggregate_gamma_exposure(rows, spot=s, as_of=now)
-    out.update({
-        "authority": "SHADOW_THEORETICAL_ONLY",
-        "observed_option_chain": False,
-        "dealer_position_sign": "NOT_AVAILABLE_THEORETICAL_SHAPE_ONLY",
-        "confidence": "THEORETICAL",
-        "production_score_adjustment": 0.0,
-        "can_create_direction": False,
-    })
-    shadow = dict(out.get("specialist_shadow_context") or {})
+    ngrid = 41
+    grid = [s * (0.90 + 0.20 * i / (ngrid - 1)) for i in range(ngrid)]
+    gex_curve = []
+    delta_curve = []
+    theta_curve = []
+    # ATM theoretical contract: gamma is unsigned/positive by construction.
+    # It illustrates convexity concentration only; it cannot imply dealer sign,
+    # gamma walls, zero-gamma or delta-neutral levels without observed OI.
+    for px in grid:
+        call = black_scholes_greeks(
+            spot=px, strike=s, t_years=t, volatility=vol, option_type="CALL"
+        )
+        put = black_scholes_greeks(
+            spot=px, strike=s, t_years=t, volatility=vol, option_type="PUT"
+        )
+        gex_curve.append([round(float(px),10), round(float((call["gamma"] + put["gamma"]) * px * px * 0.01),6)])
+        delta_curve.append([round(float(px),10), round(float(call["delta"] + put["delta"]),6)])
+        theta_curve.append([round(float(px),10), round(float(call["theta_per_day"] + put["theta_per_day"]),6)])
+
+    shadow = _shadow_context(
+        spot=s, contracts_used=0, confidence="THEORETICAL", observed=False,
+        gamma_regime="THEORETICAL_SHAPE", zero_dte_share=0.0,
+        zero_gamma=None, delta_neutral=None, gamma_wall=None, call_wall=None,
+        put_wall=None, gex_curve=[(float(x),float(y)) for x,y in gex_curve], as_of=now,
+    )
     shadow.update({
         "authority": "SHADOW_THEORETICAL_ONLY",
         "observed_chain": False,
         "context_quality_score": 0.0,
         "requires_observed_chain_for_learning": True,
     })
-    out["specialist_shadow_context"] = shadow
-    return out
-
+    return {
+        "version": VERSION, "available": True,
+        "authority": "SHADOW_THEORETICAL_ONLY",
+        "observed_option_chain": False,
+        "dealer_position_sign": "NOT_AVAILABLE_THEORETICAL_SHAPE_ONLY",
+        "confidence": "THEORETICAL", "contracts_used": 0, "spot": round(s,10),
+        "gamma_regime": "THEORETICAL_SHAPE",
+        "gamma_wall": None, "call_wall": None, "put_wall": None,
+        "zero_gamma_level": None, "delta_neutral_level": None,
+        "gex_curve": gex_curve, "delta_curve": delta_curve, "theta_curve": theta_curve,
+        "specialist_shadow_context": shadow, "production_score_adjustment": 0.0,
+        "can_create_direction": False, "can_bypass_safety": False,
+        "can_move_levels_without_execution_validation": False,
+    }
 
 def build_market_maker_context(
     *, spot: float, option_chain: Optional[Iterable[Mapping[str, Any]]] = None,

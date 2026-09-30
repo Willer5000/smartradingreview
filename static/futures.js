@@ -617,224 +617,35 @@ window.openManualAnalysisSave = function(
     );
 };
 function futRenderAnalysisDiagnostics(json, context) {
-    // RC9.7.6 — en las listas de señales sólo interesan otras hipótesis
-    // LONG/SHORT de riesgo MEDIO/ALTO. NO_OPERAR / ESPERAR / PRECAUCIÓN y
-    // errores de datos siguen disponibles para aprendizaje interno, pero no
-    // ocupan espacio en una lista que el usuario interpreta como oportunidad.
-    const candidateKey = context === 'vigent'
-        ? 'vigent_other_directional_signals'
-        : 'other_directional_signals';
-
-    // Commit 12.4: an explicit empty server list means EMPTY. Do not fall
-    // back to analysis_candidates, because that legacy fallback could revive a
-    // second signal for the same symbol×timeframe in another UI lane.
-    const hasServerCandidateList = Array.isArray(json && json[candidateKey]);
-    let candidates = hasServerCandidateList
-        ? json[candidateKey]
-        : [];
-
-    // Backward compatibility only when the backend truly does not expose the
-    // dedicated candidate list (mixed deploy), never when it explicitly sent [].
-    if (
-        context !== 'vigent'
-        && !hasServerCandidateList
-        && Array.isArray(json && json.analysis_candidates)
-    ) {
-        candidates = json.analysis_candidates.filter(candidate => {
-            const action = String(candidate.action || '').toUpperCase();
-            const classification = String(candidate.classification || '').toUpperCase();
-            const riskClass = String(candidate.manual_risk_class || '').toUpperCase();
-            return (
-                (action === 'LONG' || action === 'SHORT')
-                && classification === 'ANALYSIS_ONLY'
-                && (riskClass === 'MEDIUM' || riskClass === 'HIGH')
-                && candidate.manual_save_allowed === true
-            );
-        }).map(candidate => ({
-            ...candidate,
-            // En el análisis actual nunca se ofrece guardado; sólo la vela
-            // anterior puede transformarse en seguimiento manual.
-            manual_save_allowed: context === 'previous',
-            source_context: context === 'previous'
-                ? 'PREVIOUS_ANALYSIS_ONLY'
-                : 'CURRENT_ANALYSIS_ONLY'
-        }));
+    // 17.5.11 — diagnostics show every governed LONG/SHORT thesis that did
+    // not become executable. Visibility is not authorization to save/trade.
+    const candidateKey = context === 'vigent' ? 'vigent_other_directional_signals' : 'other_directional_signals';
+    const hasDedicated = Array.isArray(json?.[candidateKey]);
+    let candidates = hasDedicated ? json[candidateKey] : (Array.isArray(json?.analysis_candidates) ? json.analysis_candidates : []);
+    const byCell = new Map();
+    for (const raw of candidates) {
+        if (!raw || typeof raw !== 'object' || _isSignalSavedByCurrentUser(raw)) continue;
+        const action=String(raw.diagnostic_action||raw.action||'').toUpperCase();
+        if (!['LONG','SHORT'].includes(action) || raw.is_executable===true || String(raw.classification||'ANALYSIS_ONLY').toUpperCase()==='EXECUTABLE_SIGNAL') continue;
+        const key=`${raw.symbol||''}|${raw.timeframe||''}`;
+        const score=Number(raw.diagnostic_quality??raw.thesis_quality??raw.confidence??0);
+        const prev=byCell.get(key); const prevScore=Number(prev?.diagnostic_quality??prev?.thesis_quality??prev?.confidence??-1);
+        if (!prev || score>prevScore) byCell.set(key,{...raw,action});
     }
-
-    // RC9.8.2: una hipótesis ya guardada por ESTE usuario vive sólo en
-    // Guardadas para él. No se oculta para otros usuarios.
-    candidates = candidates.filter(candidate => !_isSignalSavedByCurrentUser(candidate));
-
-    const title = 'Por qué no aparecen otras señales';
-
-    if (candidates.length === 0) {
-        return `
-            <details class="mt-2 px-2 pb-2">
-                <summary class="text-secondary" style="cursor:pointer;">
-                    ${title} (0)
-                </summary>
-                <div class="small text-muted mt-2">
-                    No hubo otras hipótesis LONG/SHORT de riesgo medio o alto en este ciclo.
-                </div>
-            </details>
-        `;
-    }
-
-    let rows = '';
-
-    candidates.forEach(candidate => {
-        const action = String(candidate.action || '').toUpperCase();
-        if (action !== 'LONG' && action !== 'SHORT') return;
-
-        const riskClass = String(candidate.manual_risk_class || '').toUpperCase();
-        if (riskClass !== 'MEDIUM' && riskClass !== 'HIGH') return;
-
-        const isLong = action === 'LONG';
-        const directionBadge = isLong ? 'success' : 'danger';
-        const riskBadge = riskClass === 'MEDIUM'
-            ? 'warning text-dark'
-            : 'danger';
-        const riskLabel = riskClass === 'MEDIUM'
-            ? 'RIESGO MEDIO'
-            : 'RIESGO ALTO';
-        const symbol = futEscapeHtml(String(candidate.symbol || '').replace('-', '/'));
-        const timeframe = futEscapeHtml(candidate.timeframe || '--');
-        const confidence = fmtConfidence(candidate.confidence);
-        const reason = futEscapeHtml(
-            candidate.manual_risk_reason
-            || candidate.reason
-            || 'No superó el filtro final de publicación.'
-        );
-
-        let saveHtml = '';
-        const canManualSave = (
-            (context === 'previous' || context === 'vigent')
-            && candidate.manual_save_allowed === true
-            && candidate.signal_id
-        );
-
-        if (canManualSave) {
-            const manualKey = String(candidate.signal_id);
-            const sourceContext = context === 'vigent'
-                ? 'ACTIVE_ANALYSIS_ONLY'
-                : 'PREVIOUS_ANALYSIS_ONLY';
-
-            window._manualAnalysisCandidates[manualKey] = {
-                ...candidate,
-                source_context: sourceContext
-            };
-
-            if (context === 'vigent') {
-                const entryTouched = (
-                    candidate.entry_touched === true
-                    || candidate.lifecycle_status === 'entry_touched'
-                );
-
-                saveHtml = entryTouched
-                    ? `
-                        <div class="mt-2">
-                            <button
-                                type="button"
-                                class="btn btn-sm btn-success"
-                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', true);"
-                            >
-                                ✅ Guardar en operación
-                            </button>
-                            <div class="small text-muted mt-1">
-                                Entry ya fue alcanzado. El guardado queda en seguimiento y Guardian puede actuar desde este punto.
-                            </div>
-                        </div>
-                    `
-                    : `
-                        <div class="d-flex flex-wrap gap-2 mt-2">
-                            <button
-                                type="button"
-                                class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
-                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', false);"
-                            >
-                                ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
-                            </button>
-                            <button
-                                type="button"
-                                class="btn btn-sm btn-success"
-                                onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', true);"
-                            >
-                                ✅ Guardar en operación
-                            </button>
-                        </div>
-                        <div class="small text-muted mt-1">
-                            Conserva la vigencia original; guardar no reinicia el reloj pre-Entry.
-                        </div>
-                    `;
-            } else {
-                saveHtml = `
-                    <div class="mt-2">
-                        <button
-                            type="button"
-                            class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}"
-                            onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey}', false);"
-                        >
-                            ${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar experimental'}
-                        </button>
-                        <div class="small text-muted mt-1">
-                            Guardado manual: conserva la clasificación de riesgo y no convierte la señal en recomendación oficial.
-                        </div>
-                    </div>
-                `;
-            }
-        }
-
-        const contextText = context === 'previous'
-            ? 'Hipótesis LONG/SHORT del último cierre que no superó el filtro final.'
-            : (context === 'vigent'
-                ? 'Hipótesis LONG/SHORT de cierres anteriores que todavía conservan vigencia técnica.'
-                : 'Hipótesis LONG/SHORT del análisis actual que no superó el filtro final.');
-
-        rows += `
-            <div class="border-top border-secondary py-2"
-                 style="cursor:pointer;"
-                 onclick="window.changeToSignal('${String(candidate.symbol || '').replace(/'/g, "\'")}', '${String(candidate.timeframe || '').replace(/'/g, "\'")}')">
-                <div class="d-flex flex-wrap justify-content-between gap-1">
-                    <div>
-                        <span class="badge bg-${directionBadge} me-1">${action}</span>
-                        <strong>${symbol}</strong>
-                        <span class="badge bg-dark ms-1">${timeframe}</span>
-                    </div>
-                    <div>
-                        <span class="badge bg-${riskBadge}">${riskLabel}</span>
-                        <span class="badge bg-secondary ms-1">${confidence}%</span>
-                    </div>
-                </div>
-                <div class="small text-muted mt-1">${contextText}</div>
-                <div class="small text-light mt-1">${reason}</div>
-                ${context === 'vigent' ? `
-                    <div class="small ${candidate.lifecycle_status === 'entry_touched' ? 'text-info' : 'text-warning'} mt-1">
-                        ${candidate.lifecycle_status === 'entry_touched'
-                            ? '📍 Entry alcanzado · seguimiento activo'
-                            : `⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(candidate.tiempo_restante || 0))}</strong>`}
-                    </div>
-                ` : ''}
-                ${saveHtml}
-            </div>
-        `;
-    });
-
-    return `
-        <details class="mt-2 px-2 pb-2">
-            <summary class="text-warning" style="cursor:pointer;">
-                ${title} (${candidates.length})
-            </summary>
-            <div class="mt-2" style="max-height:360px; overflow-y:auto;">
-                ${rows}
-            </div>
-        </details>
-    `;
+    candidates=[...byCell.values()].sort((a,b)=>Number(b.diagnostic_quality??b.confidence??0)-Number(a.diagnostic_quality??a.confidence??0));
+    const title='Por qué no aparecen otras señales';
+    if (!candidates.length) return `<details class="mt-2 px-2 pb-2"><summary class="text-secondary" style="cursor:pointer;">${title} (0)</summary><div class="small text-muted mt-2">No hay otra tesis LONG/SHORT no ejecutable en el snapshot analizado. Un cero no se interpreta como prueba de que el mercado carece de oportunidades.</div></details>`;
+    const rows=candidates.map(c=>{
+        const action=String(c.action||'').toUpperCase(), cls=action==='LONG'?'success':'danger';
+        const symbol=futEscapeHtml(String(c.display_name||c.symbol||'').replace('-','/')), tf=futEscapeHtml(c.timeframe||'--');
+        const reason=futEscapeHtml(c.reason||c.manual_risk_reason||'No superó una condición técnica de ejecución/publicación.');
+        const q=Number(c.diagnostic_quality??c.thesis_quality); const conf=Number(c.confidence);
+        const metric=Number.isFinite(q)?`Calidad ${q.toFixed(0)}/100`:(Number.isFinite(conf)&&conf>0?`Confianza ${conf.toFixed(0)}%`:'');
+        const stage=c.diagnostic_stage?` · ${futEscapeHtml(String(c.diagnostic_stage).replaceAll('_',' '))}`:'';
+        return `<div class="border-top border-secondary py-2"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric?`<span class="badge bg-secondary">${metric}</span>`:''}</div><div class="small text-light mt-1">${reason}</div><div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div></div>`;
+    }).join('');
+    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis detectadas que no superaron la ejecución/publicación. No se convierten en operación por mostrarse aquí.</div><div style="max-height:420px;overflow:auto;">${rows}</div></details>`;
 }
-
-
-// ============================================================================
-// PANEL DE REVIEWTRADER (mantenido de la versión anterior)
-// ============================================================================
 
 function insertReviewTraderPanel() {
     // RC9.7.17 — estos cuadros eran diagnóstico interno sin valor operativo

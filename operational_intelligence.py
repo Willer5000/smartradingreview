@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-VERSION = "COMMIT17_5_1_STABLE_MULTI_RUNTIME_V1"
+VERSION = "COMMIT17_5_11R_1_COVERAGE_ROUTE_V1"
 
 DIRECTIONAL_ACTIONS = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 NON_DIRECTIONAL_ACTIONS = {"ESPERAR", "PRECAUCION", "NO_OPERAR"}
@@ -713,6 +713,31 @@ def prepare_operational_intelligence(
         and _research_negative(research_map.get(selected_action) or {})
     )
 
+    # Commit 17.5.11R.1 — exact validated context route.  Research already
+    # proved a handful of market×symbol×TF×direction specialists with causal
+    # discovery/selection/OOS + walk-forward.  Main previously knew that an
+    # exact prior was positive, but the generic Strategy Bank / execution desk
+    # could still receive a different setup family.  This bridge only aligns
+    # routing semantics; it never creates direction and never changes Safety.
+    validated_strategy_route: Dict[str, Any] = {
+        "matched": False, "eligible_for_execution_routing": False,
+        "reason": "NOT_EVALUATED",
+    }
+    if market == "FUTURES" and not is_multiasset and selected_action in DIRECTIONAL_ACTIONS:
+        try:
+            from validated_strategy_routes_175111r1 import resolve_validated_route
+            validated_strategy_route = resolve_validated_route(
+                prior=selected_prior or research_map.get(selected_action) or {},
+                symbol=symbol, timeframe=timeframe, action=selected_action,
+                regime=regime, volatility=vol_state,
+            )
+        except Exception as _validated_route_error:
+            validated_strategy_route = {
+                "matched": False, "eligible_for_execution_routing": False,
+                "reason": "VALIDATED_ROUTE_RUNTIME_ERROR",
+                "error": str(_validated_route_error)[:160],
+            }
+
     strategy: Dict[str, Any] = {
         "id": "NO_PLAYBOOK", "family": "NONE", "quality": 0.0,
         "confirmations": [], "conflicts": [],
@@ -734,10 +759,19 @@ def prepare_operational_intelligence(
             try:
                 from default_strategy_bank import select_strategy
                 _selected_prior_for_strategy = research_map.get(selected_action) or {}
+                _validated_bank_family = (
+                    str(validated_strategy_route.get("bank_family") or "")
+                    if validated_strategy_route.get("eligible_for_execution_routing")
+                    else ""
+                )
+                _group_prior_family = str(_selected_prior_for_strategy.get("group_prior_strategy_family") or "")
                 strategy = select_strategy(
                     selected_action, regime, vol_state, indicator_groups,
                     symbol=_u(symbol), timeframe=_u(timeframe), market=market,
-                    preferred_family=str(_selected_prior_for_strategy.get("group_prior_strategy_family") or ""),
+                    # Exact OOS-validated local route outranks a representative
+                    # group prior. It only chooses among already-eligible bank
+                    # playbooks; live indicator quality still scores the row.
+                    preferred_family=(_validated_bank_family or _group_prior_family),
                 )
             except Exception as exc:
                 strategy = {
@@ -837,12 +871,25 @@ def prepare_operational_intelligence(
             "candidate_source": candidate_source,
             "default_archetype_id": strategy.get("archetype_id"),
             "default_specialization_key": strategy.get("specialization_key"),
+            "validated_context_route": bool(validated_strategy_route.get("eligible_for_execution_routing")),
+            "coverage_route_state": (
+                "VALIDATED" if validated_strategy_route.get("eligible_for_execution_routing")
+                else "SHADOW" if validated_strategy_route.get("matched") else "GAP"
+            ),
         },
         "selected_specialist_source": specialist_source,
         "candidate_source": candidate_source,
         "autonomous_thesis_min_quality": autonomous_min_quality,
         "default_strategy_required": False,
         "selected_research_prior": selected_prior,
+        "validated_strategy_route": validated_strategy_route,
+        "coverage_route_state": (
+            "VALIDATED_CONTEXT_ROUTE"
+            if validated_strategy_route.get("eligible_for_execution_routing")
+            else "VALIDATED_ROUTE_SHADOW"
+            if validated_strategy_route.get("matched")
+            else "NO_EXACT_VALIDATED_CONTEXT_ROUTE"
+        ),
         "group_prior_advisory": dict(research_map.get(selected_action) or {}) if str((research_map.get(selected_action) or {}).get("state") or "") == "GROUP_PRIOR" else {},
         "research_candidates": research_map,
         "research_blocks_selected_action": blocked_by_research,

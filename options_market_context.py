@@ -20,7 +20,7 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
-VERSION = "COMMIT17_5_10_2_OPTIONS_CONTEXT_V2"
+VERSION = "COMMIT17_5_11R_OPTIONS_CONTEXT_QA_V3"
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
 CACHE_TTL = max(
     900,
@@ -37,9 +37,11 @@ MAX_NORMALIZED_ROWS = max(
     80,
     min(320, int(os.getenv("OPTIONS_MM_MAX_CHAIN_ROWS", "220") or 220)),
 )
+MAX_RESPONSE_BYTES = max(262144, min(4194304, int(os.getenv("OPTIONS_MM_MAX_RESPONSE_BYTES", "1572864") or 1572864)))
 
 _LOCK = threading.Lock()
 _CACHE: Dict[str, Dict[str, Any]] = {}
+_INFLIGHT = set()
 
 
 def _currency_for_symbol(symbol: Any) -> Optional[str]:
@@ -142,74 +144,89 @@ def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
     currency = _currency_for_symbol(symbol)
     if not currency:
         return {
-            "available": False,
-            "currency": None,
-            "rows": [],
-            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY",
-            "version": VERSION,
-            "observed": False,
-            "direct_underlying_match": False,
+            "available": False, "currency": None, "rows": [],
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+            "observed": False, "direct_underlying_match": False,
             "reason": "NO_DIRECT_OPTION_UNDERLYING_FOR_SYMBOL",
         }
 
     now_mono = time.monotonic()
     with _LOCK:
         cached = dict(_CACHE.get(currency) or {})
-        if (
-            cached
-            and now_mono - float(cached.get("at") or 0.0) < CACHE_TTL
-        ):
+        if cached and now_mono - float(cached.get("at") or 0.0) < CACHE_TTL:
             value = dict(cached.get("value") or {})
             value["cache_hit"] = True
             return value
+        if currency in _INFLIGHT:
+            return {
+                "available": False, "currency": currency, "rows": [],
+                "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+                "observed": False, "direct_underlying_match": True,
+                "reason": "FETCH_IN_PROGRESS", "cache_hit": False,
+            }
 
     if not ENABLED or requests is None:
         return {
-            "available": False,
-            "currency": currency,
-            "rows": [],
-            "reason": "DISABLED_OR_REQUESTS_UNAVAILABLE",
-            "version": VERSION,
-            "observed": False,
-            "direct_underlying_match": True,
+            "available": False, "currency": currency, "rows": [],
+            "reason": "DISABLED_OR_REQUESTS_UNAVAILABLE", "version": VERSION,
+            "observed": False, "direct_underlying_match": True,
         }
 
+    with _LOCK:
+        # Recheck after the fast path to avoid a race between readers.
+        if currency in _INFLIGHT:
+            return {
+                "available": False, "currency": currency, "rows": [],
+                "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+                "observed": False, "direct_underlying_match": True,
+                "reason": "FETCH_IN_PROGRESS", "cache_hit": False,
+            }
+        _INFLIGHT.add(currency)
+
+    resp = None
     try:
         resp = requests.get(
-            DERIBIT_URL,
-            params={"currency": currency, "kind": "option"},
-            timeout=_TIMEOUT,
-            headers={"User-Agent": "SmartradingReview/17.5.10.2"},
+            DERIBIT_URL, params={"currency": currency, "kind": "option"},
+            timeout=_TIMEOUT, headers={"User-Agent": "SmartradingReview/17.5.11R"},
         )
+        content_length = 0
+        try:
+            content_length = int((getattr(resp, "headers", {}) or {}).get("Content-Length") or 0)
+        except Exception:
+            content_length = 0
+        if content_length > MAX_RESPONSE_BYTES:
+            raise ValueError("OPTION_RESPONSE_TOO_LARGE")
         resp.raise_for_status()
         payload = resp.json() if hasattr(resp, "json") else {}
         rows = _normalize_summary_rows((payload or {}).get("result") or [])
         value = {
-            "available": bool(rows),
-            "currency": currency,
-            "rows": rows,
-            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY",
-            "version": VERSION,
-            "observed": bool(rows),
-            "direct_underlying_match": True,
+            "available": bool(rows), "currency": currency, "rows": rows,
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+            "observed": bool(rows), "direct_underlying_match": True,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
-            "cache_ttl_seconds": CACHE_TTL,
-            "rows_used": len(rows),
+            "cache_ttl_seconds": CACHE_TTL, "rows_used": len(rows),
             "cache_hit": False,
         }
     except Exception as exc:
         value = {
-            "available": False,
-            "currency": currency,
-            "rows": [],
-            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY",
-            "version": VERSION,
-            "observed": False,
-            "direct_underlying_match": True,
-            "reason": type(exc).__name__,
+            "available": False, "currency": currency, "rows": [],
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+            "observed": False, "direct_underlying_match": True,
+            "reason": type(exc).__name__ if str(exc) != "OPTION_RESPONSE_TOO_LARGE" else "OPTION_RESPONSE_TOO_LARGE",
             "cache_hit": False,
         }
+    finally:
+        try:
+            if resp is not None and hasattr(resp, "close"):
+                resp.close()
+            elif resp is not None and hasattr(resp, "__exit__"):
+                resp.__exit__(None, None, None)
+        except Exception:
+            pass
+        with _LOCK:
+            _INFLIGHT.discard(currency)
 
     with _LOCK:
         _CACHE[currency] = {"at": now_mono, "value": dict(value)}
     return value
+

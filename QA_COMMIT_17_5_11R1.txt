@@ -1,0 +1,31 @@
+COMMIT 17.5.11R.1 QA — 30/09/2026
+
+Syntax:
+- Python changed files: PASS
+- static/futures.js: PASS
+- static/script.js: PASS
+- static/market_maker_frontend.js: PASS
+
+Suites:
+- qa_commit17_5_11_runtime.py: 34/34 PASS
+- qa_commit17_5_11_scheduler.py: 8/8 PASS
+- qa_commit17_5_11_structure_regression.py: 23/23 PASS
+- qa_commit17_5_11_frontend.js: 11/11 PASS
+- qa_commit17_5_11r1.py: 18/18 PASS
+
+TOTAL PRINCIPAL: 94 checks PASS
+
+R.1 specific invariants:
+1. 6 exact Research routes audited.
+2. Only ETH 2H LONG, SOL 2H SHORT and XRP 2H SHORT have positive train/selection/OOS and get routing authority.
+3. ADA 2H, LINK 2H, ADA 4H remain SHADOW.
+4. Wrong regime cannot activate exact route.
+5. Alpha decay/recycle blocks route.
+6. Volatility ANY does not become a LOW-vol veto.
+7. Unknown cells do not receive fabricated alpha.
+8. Research family -> execution geometry mapping deterministic.
+9. Route action must equal live action before contingency override.
+10. 30m LIQUIDITY_SWEEP_MSS_POI Entry route retained.
+11. Historical RR only soft-aligns preferred ranking; technical floor/ceiling unchanged.
+12. Backtest prior remains zero-weight in execution consensus.
+13. Multi fixes/dedup/options protections inherited from 17.5.11R remain covered by prior suites.
