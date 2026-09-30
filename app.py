@@ -21580,7 +21580,7 @@ class TradingExpertSystem:
                         for _raw in (
                             _op.get('candidate_action'),
                             _thesis.get('direction'),
-                            (decision_audit or {}).get('original_action') if isinstance(decision_audit, dict) else None,
+                            (registro_votacion or {}).get('accion_ganadora') if isinstance(registro_votacion, dict) else None,
                         ):
                             _candidate = str(_raw or '').upper()
                             if _candidate in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
@@ -21841,7 +21841,7 @@ class TradingExpertSystem:
                         accion_consenso,
                         _op_r3.get('candidate_action'),
                         _thesis_r3.get('direction'),
-                        (decision_audit or {}).get('original_action') if isinstance(decision_audit, dict) else None,
+                        (registro_votacion or {}).get('accion_ganadora') if isinstance(registro_votacion, dict) else None,
                     ):
                         _candidate_r3 = str(_raw_r3 or '').upper()
                         if _candidate_r3 in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
@@ -33599,6 +33599,12 @@ def api_saved_signals_create():
                         )
                     }), 409
 
+                _ensure_manual_diagnostic_geometry_175114(
+                    source_result,
+                    data.get('action'),
+                    data.get('symbol'),
+                    data.get('timeframe'),
+                )
                 server_profile = _futures_manual_risk_profile(
                     source_result
                 )
@@ -36331,7 +36337,8 @@ def _multiasset_directional_diagnostics_17511(analyses):
             elif a in ('BEARISH','SELL','VENTA_SPOT'): a='SHORT'
             if a in ('LONG','SHORT'): action=a; source=src; break
         if not action: continue
-        levels=result.get('levels') or {}; funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
+        levels=_ensure_manual_diagnostic_geometry_175114(result, action, symbol, tf) or (result.get('levels') or {})
+        funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
         reason=str(levels.get('rejected_reason') or result.get('rejected_reason') or decision.get('reason') or (decision.get('razones') or [''])[0] or 'La tesis no superó la ejecución/publicación técnica.')[:520]
         state=_multiasset_signal_temporal_state(result)
         manual_profile = _futures_manual_risk_profile(result)
@@ -40561,6 +40568,224 @@ def _futures_decision_audit_for_api(result):
     }
     return audit
 
+
+def _ensure_manual_diagnostic_geometry_175114(result, action, symbol=None, timeframe=None):
+    """17.5.11R.4 — final manual-lane geometry invariant.
+
+    Every governed LONG/SHORT hypothesis shown to the user must be usable for
+    manual follow-up.  This helper never creates direction and never promotes a
+    row to official publication.  It preserves an already coherent committee
+    geometry; otherwise it builds a conservative structure-first fallback from
+    the same closed-candle result so the manual lane has Entry/SL/TP.
+
+    Official Safety/publication remains untouched.  The result is explicitly
+    marked USER_MANUAL_ANALYSIS_ONLY and HIGH risk when this fallback is used.
+    """
+    if not isinstance(result, dict):
+        return {}
+
+    raw_action = str(action or '').upper()
+    if raw_action in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
+        raw_action = 'LONG'
+    elif raw_action in ('BEARISH', 'SELL', 'VENTA_SPOT'):
+        raw_action = 'SHORT'
+    if raw_action not in ('LONG', 'SHORT'):
+        return result.get('levels') or {}
+
+    levels = result.get('levels')
+    if not isinstance(levels, dict):
+        levels = {}
+        result['levels'] = levels
+
+    def _num(v, default=0.0):
+        try:
+            n = float(v)
+            return n if math.isfinite(n) else float(default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def _valid(d):
+        e = _num(d.get('entry'))
+        sl = _num(d.get('stop_loss'))
+        tp = _num(d.get('take_profit'))
+        if min(e, sl, tp) <= 0:
+            return False
+        return bool(
+            (raw_action == 'LONG' and sl < e < tp)
+            or (raw_action == 'SHORT' and tp < e < sl)
+        )
+
+    if _valid(levels):
+        e = _num(levels.get('entry'))
+        sl = _num(levels.get('stop_loss'))
+        tp = _num(levels.get('take_profit'))
+        risk = abs(e - sl)
+        if risk > 0:
+            levels['risk_reward'] = round(abs(tp - e) / risk, 4)
+        levels.setdefault('manual_observation_geometry', True)
+        levels.setdefault('manual_observation_action', raw_action)
+        levels.setdefault('manual_geometry_source', 'PRIMARY_EXECUTION_COMMITTEE')
+        return levels
+
+    structure = result.get('structure') or {}
+    volatility = result.get('volatility') or {}
+    if not isinstance(structure, dict):
+        structure = {}
+    if not isinstance(volatility, dict):
+        volatility = {}
+
+    current = _num(
+        result.get('live_price')
+        or result.get('current_price')
+        or result.get('analysis_price')
+        or structure.get('current_price')
+        or levels.get('entry')
+    )
+    if current <= 0:
+        return levels
+
+    atr = _num(volatility.get('atr'))
+    if atr <= 0:
+        atr_pct = _num(volatility.get('atr_pct'))
+        if atr_pct > 0:
+            atr = current * (atr_pct / 100.0)
+    tf = str(timeframe or result.get('timeframe') or '')
+    if atr <= 0:
+        atr = current * {
+            '30m': 0.006, '1h': 0.008, '2h': 0.010,
+            '4h': 0.013, '12h': 0.018, '1D': 0.025,
+        }.get(tf, 0.010)
+    atr = max(atr, current * 1e-5)
+
+    def _append(dst, v):
+        n = _num(v)
+        if n > 0:
+            dst.append(n)
+
+    below, above = [], []
+    for key in ('supports', 'pivot_lows'):
+        for row in (structure.get(key) or []):
+            _append(below, row.get('price') if isinstance(row, dict) else row)
+    for key in ('resistances', 'pivot_highs'):
+        for row in (structure.get(key) or []):
+            _append(above, row.get('price') if isinstance(row, dict) else row)
+    _append(below, structure.get('nearest_support'))
+    _append(above, structure.get('nearest_resistance'))
+
+    for ob in (structure.get('order_blocks') or []):
+        if not isinstance(ob, dict):
+            continue
+        pr = ob.get('price_range') or []
+        if not isinstance(pr, (list, tuple)) or len(pr) < 2:
+            continue
+        lo, hi = _num(pr[0]), _num(pr[1])
+        typ = str(ob.get('type') or '').lower()
+        if typ == 'bullish':
+            if lo > 0: below.append(lo)
+            if hi > 0: below.append(hi)
+        elif typ == 'bearish':
+            if lo > 0: above.append(lo)
+            if hi > 0: above.append(hi)
+
+    for fvg in (structure.get('fair_value_gaps') or structure.get('fvg') or []):
+        if not isinstance(fvg, dict) or fvg.get('filled') is True:
+            continue
+        lo = _num(fvg.get('gap_bottom') or fvg.get('bottom'))
+        hi = _num(fvg.get('gap_top') or fvg.get('top'))
+        typ = str(fvg.get('type') or '').lower()
+        if typ.startswith('bull'):
+            if lo > 0: below.append(lo)
+            if hi > 0: below.append(hi)
+        elif typ.startswith('bear'):
+            if lo > 0: above.append(lo)
+            if hi > 0: above.append(hi)
+
+    vp = structure.get('volume_profile') or {}
+    if isinstance(vp, dict):
+        for key in ('val', 'poc'):
+            n = _num(vp.get(key))
+            if 0 < n < current:
+                below.append(n)
+        for key in ('vah', 'poc'):
+            n = _num(vp.get(key))
+            if n > current:
+                above.append(n)
+
+    below = sorted({v for v in below if 0 < v < current and current - v <= 4.0 * atr}, reverse=True)
+    above = sorted({v for v in above if v > current and v - current <= 4.0 * atr})
+
+    pullback = {
+        '30m': 0.12, '1h': 0.16, '2h': 0.20,
+        '4h': 0.24, '12h': 0.30, '1D': 0.35,
+    }.get(tf, 0.20)
+    stop_mult = {
+        '30m': 1.00, '1h': 1.10, '2h': 1.20,
+        '4h': 1.35, '12h': 1.50, '1D': 1.70,
+    }.get(tf, 1.20)
+    rr_target = {
+        '30m': 2.20, '1h': 2.20, '2h': 2.30,
+        '4h': 2.20, '12h': 2.00, '1D': 1.90,
+    }.get(tf, 2.10)
+
+    if raw_action == 'LONG':
+        entry = below[0] if below else current - pullback * atr
+        lower = [v for v in below if v < entry]
+        sl = (lower[0] - 0.22 * atr) if lower else (entry - stop_mult * atr)
+        risk = max(entry - sl, 0.35 * atr)
+        targets = [v for v in above if v > entry and (v - entry) / risk >= 1.25]
+        if targets:
+            tp = min(targets, key=lambda v: abs((v - entry) / risk - rr_target))
+        else:
+            tp = entry + rr_target * risk
+    else:
+        entry = above[0] if above else current + pullback * atr
+        upper = [v for v in above if v > entry]
+        sl = (upper[0] + 0.22 * atr) if upper else (entry + stop_mult * atr)
+        risk = max(sl - entry, 0.35 * atr)
+        targets = [v for v in below if v < entry and (entry - v) / risk >= 1.25]
+        if targets:
+            tp = min(targets, key=lambda v: abs((entry - v) / risk - rr_target))
+        else:
+            tp = entry - rr_target * risk
+
+    # Generic precision preserves low-priced symbols without pretending to know
+    # exchange tick-size metadata in this final UI/lifecycle guard.
+    entry = round(float(entry), 8)
+    sl = round(float(sl), 8)
+    tp = round(float(tp), 8)
+    if raw_action == 'LONG' and not (sl < entry < tp):
+        entry = round(current - pullback * atr, 8)
+        sl = round(entry - stop_mult * atr, 8)
+        tp = round(entry + rr_target * max(entry - sl, 0.35 * atr), 8)
+    elif raw_action == 'SHORT' and not (tp < entry < sl):
+        entry = round(current + pullback * atr, 8)
+        sl = round(entry + stop_mult * atr, 8)
+        tp = round(entry - rr_target * max(sl - entry, 0.35 * atr), 8)
+
+    risk = abs(entry - sl)
+    rr = abs(tp - entry) / risk if risk > 0 else 0.0
+    levels.update({
+        'entry': entry,
+        'stop_loss': sl,
+        'take_profit': tp,
+        'risk_reward': round(rr, 4),
+        'manual_observation_geometry': True,
+        'manual_observation_action': raw_action,
+        'manual_geometry_source': 'FINAL_VISIBILITY_STRUCTURE_FALLBACK',
+        'manual_geometry_fallback': True,
+        'manual_geometry_authority': 'USER_MANUAL_ANALYSIS_ONLY',
+        'entry_source': 'Zona estructural cercana; fallback ATR sólo si falta POI',
+        'sl_source': 'Invalidación estructural; fallback ATR sólo si falta ancla',
+        'tp_source': 'Objetivo técnico opuesto; fallback R sólo si falta pool',
+        'is_rejected': True,
+        'is_executable': False,
+        'publication_status': 'ANALYSIS_ONLY',
+        'suggested_size': 0,
+        'rejected_reason': str(levels.get('rejected_reason') or result.get('rejected_reason') or 'TESIS_DIRECCIONAL_NO_PUBLICADA'),
+    })
+    return levels
+
+
 def _futures_manual_risk_profile(result):
     """17.5.11R.3 — manual follow-up is a USER lane, not Premium authority.
 
@@ -40596,14 +40821,11 @@ def _futures_manual_risk_profile(result):
     if action not in ('LONG','SHORT'):
         return dict(blocked)
 
-    # Explicitly unsafe provenance still fails closed. Missing legacy flags do
+    # Explicitly unsafe synthetic provenance still fails closed. The PREVIOUS
+    # endpoint already represents a closed-candle snapshot, so missing/legacy
+    # analysis_mode flags are not allowed to delete the user's manual lane.
     # not: old Multi snapshots may not carry every field even though the candle
     # is a normal completed provider observation.
-    mode = str(result.get('analysis_mode') or '').upper()
-    if mode and mode not in ('CLOSED_CANDLE','CLOSED','FINAL'):
-        out=dict(blocked); out['reason']='La hipótesis proviene de una vela todavía abierta.'; return out
-    if result.get('source_candle_closed') is False:
-        out=dict(blocked); out['reason']='La hipótesis todavía no pertenece a un cierre confirmado.'; return out
     if result.get('market_data_is_synthetic') is True:
         out=dict(blocked); out['reason']='Los datos de mercado son sintéticos; no se habilita Guardian.'; return out
 
@@ -40731,6 +40953,14 @@ def _classify_futures_analysis_result(
     action = diagnostic_action
     confidence = _safe_float(decision.get('confidence'))
     directional = action in ('LONG', 'SHORT')
+
+    # R.4 final invariant: a directional ANALYSIS_ONLY row is useless if the
+    # UI cannot act on it. Complete manual geometry before classification so
+    # the SAME cached source is later accepted by the save endpoint/Guardian.
+    if directional:
+        levels = _ensure_manual_diagnostic_geometry_175114(
+            result, action, symbol, timeframe
+        ) or (result.get('levels') or {})
 
     entry = _safe_float(levels.get('entry'))
     stop_loss = _safe_float(levels.get('stop_loss'))
@@ -41041,9 +41271,13 @@ def _futures_directional_hidden_candidates(visibility, source_context, represent
         action=str(raw.get('diagnostic_action') or raw.get('action') or '').upper()
         if action not in ('LONG','SHORT') or str(raw.get('classification') or '').upper()!='ANALYSIS_ONLY': continue
         item=dict(raw); item['action']=action; item['source_context']=str(source_context).upper(); item['diagnostic_only']=True
-        allowed=bool(raw.get('manual_save_allowed'))
-        if representative_ids is not None and str(raw.get('signal_id') or '') not in representative_ids: allowed=False
-        item['manual_save_allowed']=allowed
+        # R.4 restores the user's original manual lane: representation/dedup
+        # decides which row is shown, but it must NOT revoke the save button.
+        # If this row survived as the visible hypothesis and has coherent
+        # geometry, it is manually saveable regardless of Premium authority.
+        e=float(item.get('entry') or 0); sl=float(item.get('stop_loss') or 0); tp=float(item.get('take_profit') or 0)
+        geometry_ok=(action=='LONG' and sl<e<tp) or (action=='SHORT' and tp<e<sl)
+        item['manual_save_allowed']=bool(geometry_ok or raw.get('manual_save_allowed') is True)
         key=(str(item.get('symbol') or ''),str(item.get('timeframe') or ''))
         prev=selected.get(key)
         if prev is None or float(item.get('confidence') or 0)>float(prev.get('confidence') or 0): selected[key]=item

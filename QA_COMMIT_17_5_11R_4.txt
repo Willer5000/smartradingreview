@@ -1,0 +1,35 @@
+COMMIT 17.5.11R.4 — QA FINAL
+
+Base: repositorio completo 17.5.11R.3 + cambios R.4.
+
+Sintaxis:
+- Python py_compile: PASS
+- Node --check futures.js: PASS
+- Node --check market_maker_frontend.js: PASS
+
+Suites heredadas y nuevas:
+- Runtime / Geometry: 19/19 PASS
+- Multi Scheduler: 8/8 PASS
+- Structure Regression: 23/23 PASS
+- Frontend base: 11/11 PASS
+- R.1 backtest/routing: 18/18 PASS
+- R.2 manual/Multi/Greeks: 11/11 PASS
+- R.3 guaranteed geometry/Multi/Greeks: 17/17 PASS
+- R.4 final manual-lane tests: 13/13 PASS
+
+TOTAL PRINCIPAL: 120/120 PASS
+
+Checks R.4 específicos:
+- LONG sin geometría recibe Entry/SL/TP coherentes: PASS
+- SHORT sin geometría recibe Entry/SL/TP coherentes: PASS
+- Fallback manual sigue ANALYSIS_ONLY: PASS
+- No se lee decision_audit antes de su creación: PASS
+- Representative-ID ya no revoca guardado manual: PASS
+- Botón depende de geometría, no de Premium/Safety: PASS
+- Filas stale/incompletas se ocultan: PASS
+- Endpoint de guardado reconstruye/verifica geometría: PASS
+- D/G/T puede obtener precio ligero cuando no hay chain/context: PASS
+- D/G/T dibuja Black-Scholes local: PASS
+- Cache bust R.4: PASS
+
+Limitación de entorno: no se levantó un servidor Gunicorn real en este contenedor; el deploy Render sigue siendo la integración final.

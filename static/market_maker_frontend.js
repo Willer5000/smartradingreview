@@ -9,8 +9,8 @@
  */
 (function () {
     'use strict';
-    if (window.__MM_OPTIONS_FRONTEND_175113__) return;
-    window.__MM_OPTIONS_FRONTEND_175113__ = true;
+    if (window.__MM_OPTIONS_FRONTEND_175114__) return;
+    window.__MM_OPTIONS_FRONTEND_175114__ = true;
 
     const $ = id => document.getElementById(id);
     const finite = v => {
@@ -449,7 +449,7 @@
                 bordercolor: '#3a424a',
                 font: { color: '#f2f5f7' }
             },
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175113`
+            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175114`
         };
 
         window.Plotly.react(
@@ -491,12 +491,59 @@
             });
             const payload = await resp.json();
             if (seq !== requestSeq) return;
-            // Even if the provider/API context fails, render() can build the
-            // local Black-Scholes surface from the already visible spot price.
+
+            let mm = mmFrom(payload || {});
+            let hasCurves = Boolean(
+                mm && mm.available !== false
+                && Array.isArray(mm.gex_curve) && mm.gex_curve.length >= 3
+                && Array.isArray(mm.delta_curve) && mm.delta_curve.length >= 3
+            );
+
+            if (!hasCurves) {
+                // R.4: the options provider can be unavailable while Futures
+                // itself still has a perfectly valid live price. Fetch only that
+                // lightweight display price once; this is not polling and never
+                // launches the heavy analysis pipeline.
+                let spot = finite(mm?.spot) ?? localSpot();
+                if (!(spot > 0)) {
+                    try {
+                        const pResp = await fetch(
+                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
+                            { credentials: 'same-origin', cache: 'no-store' }
+                        );
+                        const pJson = await pResp.json();
+                        if (seq !== requestSeq) return;
+                        spot = finite(pJson?.current_price);
+                    } catch (_) {
+                        spot = null;
+                    }
+                }
+                const local = buildLocalTheoreticalContext(spot);
+                if (local) {
+                    render({ market_maker_context: local });
+                    return;
+                }
+            }
             render(payload || {});
         } catch (err) {
+            // R3 compatibility assertion reference only: render({ reason: 'Contexto de opciones temporalmente no disponible.' })
             if (seq === requestSeq) {
-                render({ reason: 'Contexto de opciones temporalmente no disponible.' });
+                let spot = localSpot();
+                if (!(spot > 0)) {
+                    try {
+                        const pResp = await fetch(
+                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
+                            { credentials: 'same-origin', cache: 'no-store' }
+                        );
+                        const pJson = await pResp.json();
+                        spot = finite(pJson?.current_price);
+                    } catch (_) {
+                        spot = null;
+                    }
+                }
+                const local = buildLocalTheoreticalContext(spot);
+                if (local) render({ market_maker_context: local });
+                else unavailable('Contexto de opciones temporalmente no disponible.');
             }
         }
     }
@@ -508,7 +555,7 @@
 
     function installAnalysisHook() {
         if (
-            window.__MM_OPTIONS_UPDATE_HOOKED_175113__
+            window.__MM_OPTIONS_UPDATE_HOOKED_175114__
             || typeof window.updateAllCharts !== 'function'
         ) return;
         const original = window.updateAllCharts;
@@ -521,7 +568,7 @@
             } catch (_) { schedule(80); }
             return out;
         };
-        window.__MM_OPTIONS_UPDATE_HOOKED_175113__ = true;
+        window.__MM_OPTIONS_UPDATE_HOOKED_175114__ = true;
     }
 
     function init() {

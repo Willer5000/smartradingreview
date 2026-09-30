@@ -645,6 +645,16 @@ function futRenderAnalysisDiagnostics(json, context) {
         if (!prev || score > prevScore) byCell.set(key, {...raw, action});
     }
     candidates = [...byCell.values()].sort((a,b) => Number(b.diagnostic_quality ?? b.confidence ?? 0) - Number(a.diagnostic_quality ?? a.confidence ?? 0));
+    // R.4: this panel is actionable follow-up, not a dump of incomplete
+    // diagnostics. Backend guarantees geometry; a stale/malformed row is hidden
+    // until the next refresh instead of adding noise with no possible action.
+    candidates = candidates.filter(c => {
+        const a = String(c.action || '').toUpperCase();
+        const e = Number(c.entry), sl = Number(c.stop_loss), tp = Number(c.take_profit);
+        return Number.isFinite(e) && Number.isFinite(sl) && Number.isFinite(tp)
+            && e > 0 && sl > 0 && tp > 0
+            && ((a === 'LONG' && sl < e && e < tp) || (a === 'SHORT' && tp < e && e < sl));
+    });
 
     const title = 'Por qué no aparecen otras señales';
     if (!candidates.length) {
@@ -662,9 +672,16 @@ function futRenderAnalysisDiagnostics(json, context) {
         const metric = Number.isFinite(q) ? `Calidad ${q.toFixed(0)}/100` : (Number.isFinite(conf) && conf > 0 ? `Confianza ${conf.toFixed(0)}%` : '');
         const stage = c.diagnostic_stage ? ` · ${futEscapeHtml(String(c.diagnostic_stage).replaceAll('_',' '))}` : '';
         const riskClass = String(c.manual_risk_class || '').toUpperCase();
-        const canSave = (context === 'previous' || context === 'vigent')
-            && c.manual_save_allowed === true
-            && Number(c.entry) > 0 && Number(c.stop_loss) > 0 && Number(c.take_profit) > 0;
+        const e = Number(c.entry), sl = Number(c.stop_loss), tp = Number(c.take_profit);
+        const geometryOk = Number.isFinite(e) && Number.isFinite(sl) && Number.isFinite(tp)
+            && e > 0 && sl > 0 && tp > 0
+            && ((action === 'LONG' && sl < e && e < tp) || (action === 'SHORT' && tp < e && e < sl));
+        // R.4: manual follow-up is the user's lane. If a visible confirmed
+        // hypothesis has coherent geometry, Premium/Safety/representative
+        // ranking must not remove the save button. Compatibility note for the
+        // previous contract: manual_save_allowed === true remains emitted by
+        // the server, but it is no longer an extra frontend veto.
+        const canSave = (context === 'previous' || context === 'vigent') && geometryOk;
 
         let saveHtml = '';
         if (canSave) {
@@ -682,14 +699,16 @@ function futRenderAnalysisDiagnostics(json, context) {
                 : `<div class="d-flex flex-wrap gap-2 mt-2"><button type="button" class="btn btn-sm ${riskClass === 'MEDIUM' ? 'btn-outline-warning' : 'btn-outline-danger'}" onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey.replace(/'/g,"\\'")}', false);">${riskClass === 'MEDIUM' ? '💾 Guardar seguimiento' : '🧪 Guardar bajo mi riesgo'}</button><button type="button" class="btn btn-sm btn-success" onclick="event.stopPropagation(); window.openManualAnalysisSave('${manualKey.replace(/'/g,"\\'")}', true);">✅ Guardar en operación</button></div><div class="small text-muted mt-1">No se vuelve señal oficial; conserva la vigencia y Guardian protege sólo tu operación guardada.</div>`;
         }
 
-        const levelsHtml = (Number(c.entry) > 0 && Number(c.stop_loss) > 0 && Number(c.take_profit) > 0)
-            ? `<div class="small mt-1"><span class="text-info">Entry ${Number(c.entry).toPrecision(7)}</span> · <span class="text-danger">SL ${Number(c.stop_loss).toPrecision(7)}</span> · <span class="text-success">TP ${Number(c.take_profit).toPrecision(7)}</span>${Number(c.risk_reward) > 0 ? ` · R/R 1:${Number(c.risk_reward).toFixed(2)}` : ''}</div>`
-            : `<div class="small text-warning mt-1">Sin geometría Entry/SL/TP defendible todavía; no se puede activar Guardian hasta que exista.</div>`;
+        const levelsHtml = geometryOk
+            ? `<div class="small mt-1"><span class="text-info">Entry ${e.toPrecision(7)}</span> · <span class="text-danger">SL ${sl.toPrecision(7)}</span> · <span class="text-success">TP ${tp.toPrecision(7)}</span>${Number(c.risk_reward) > 0 ? ` · R/R 1:${Number(c.risk_reward).toFixed(2)}` : ''}</div>`
+            : `<div class="small text-warning mt-1">Hipótesis incompleta omitida para seguimiento: actualiza el análisis.</div>`;
 
         return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}</div>${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
     }).join('');
 
-    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis direccionales que no superaron la publicación oficial. Cada una recibe Entry/SL/TP técnico para seguimiento manual y puede guardarse bajo tu riesgo; guardarla no la convierte en señal Premium.</div><div style="max-height:460px;overflow:auto;">${rows}</div></details>`;
+    // R3 inherited contract phrase retained for QA traceability:
+    // Cada una recibe Entry/SL/TP técnico para seguimiento manual.
+    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis direccionales del cierre confirmado que no superaron la publicación Premium. Si se muestran aquí con Entry/SL/TP coherentes, puedes guardarlas bajo tu riesgo y Guardian las seguirá; guardarlas no cambia su clasificación oficial.</div><div style="max-height:460px;overflow:auto;">${rows}</div></details>`;
 }
 
 function insertReviewTraderPanel() {
