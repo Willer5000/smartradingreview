@@ -36347,6 +36347,25 @@ def _multiasset_directional_diagnostics_17511(analyses):
     return rows[:24]
 
 # ============================================================================
+# COMMIT 18 — REASON-FIRST RESPONSIBILITY CONTRACT (READ-ONLY)
+# ============================================================================
+@app.route('/api/system/reason-first-contract', methods=['GET'])
+def api_reason_first_contract_18():
+    try:
+        from reason_first_contract_18 import build_reason_first_contract, audit_contract
+        return jsonify({
+            'success': True,
+            'audit': audit_contract(),
+            'contract': build_reason_first_contract({
+                'market': str(request.args.get('market') or 'futures'),
+                'is_multiasset': str(request.args.get('market') or '').lower() in ('multiasset','multi_asset','multi-asset'),
+            }),
+        })
+    except Exception as exc:
+        return jsonify({'success':False,'error':str(exc)[:180]}),500
+
+
+# ============================================================================
 # COMMIT 12 — MULTI-ACTIVO API
 # ============================================================================
 @app.route('/api/multiasset/universe', methods=['GET'])
@@ -36379,6 +36398,46 @@ def api_multiasset_opportunities():
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
+@app.route('/api/multiasset/display', methods=['GET'])
+def api_multiasset_display_18():
+    """Commit 18 lightweight selected-cell display lane.
+
+    One symbol + one timeframe only. It reuses the 60-second/4-cell LRU light
+    snapshot and NEVER starts the heavy committee/Research/AI pipeline. The
+    frontend calls this immediately on selector change so a busy heavy worker
+    cannot leave stale BTC identity on a CL/other Multi-Asset view.
+    """
+    try:
+        symbol=str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-')
+        timeframe=str(request.args.get('timeframe') or '4h')
+        from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
+        if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
+            return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
+        data=_multiasset_light_chart_snapshot_175112(symbol,timeframe) or {}
+        # Identity is authoritative even when the provider is temporarily
+        # unavailable; stale analysis from another cell must never be reused.
+        data=dict(data)
+        data.update({'symbol':symbol,'timeframe':timeframe,'market':'multiasset','is_multiasset':True})
+        if not data.get('df'):
+            return jsonify({
+                'success':True,'available':False,'market':'multiasset','symbol':symbol,
+                'timeframe':timeframe,'data':data,'display_lane':True,
+                'retry_after_ms':5000,'response_contract_version':'18.0'
+            }),200
+        return jsonify({
+            'success':True,'available':True,'market':'multiasset','symbol':symbol,
+            'timeframe':timeframe,'data':data,'display_lane':True,
+            'response_contract_version':'18.0'
+        }),200
+    except Exception as exc:
+        return jsonify({
+            'success':True,'available':False,'display_lane':True,
+            'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
+            'timeframe':str(request.args.get('timeframe') or '4h'),
+            'error':str(exc)[:180],'response_contract_version':'18.0'
+        }),200
+
+
 @app.route('/api/multiasset/analyze', methods=['POST'])
 def api_multiasset_analyze():
     """17.5.11 non-blocking UI contract. Heavy analysis never lives in HTTP."""
@@ -36391,7 +36450,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'17.5.11R.3'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.0'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Schedule the governed heavy job first.  The lightweight selected-cell
@@ -36411,7 +36470,7 @@ def api_multiasset_analyze():
             )})
             # Never permit stale cached identity to override the selector.
             partial['symbol']=symbol; partial['timeframe']=timeframe; partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'17.5.11R.3'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'18.0'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -40619,13 +40678,87 @@ def _ensure_manual_diagnostic_geometry_175114(result, action, symbol=None, timef
         e = _num(levels.get('entry'))
         sl = _num(levels.get('stop_loss'))
         tp = _num(levels.get('take_profit'))
-        risk = abs(e - sl)
-        if risk > 0:
-            levels['risk_reward'] = round(abs(tp - e) / risk, 4)
-        levels.setdefault('manual_observation_geometry', True)
-        levels.setdefault('manual_observation_action', raw_action)
-        levels.setdefault('manual_geometry_source', 'PRIMARY_EXECUTION_COMMITTEE')
-        return levels
+        structure_now = result.get('structure') or {}
+        volatility_now = result.get('volatility') or {}
+        atr_now = _num(volatility_now.get('atr'))
+        if atr_now <= 0:
+            atr_pct_now = _num(volatility_now.get('atr_pct'))
+            current_now = _num(result.get('current_price') or result.get('live_price') or e)
+            if atr_pct_now > 0 and current_now > 0:
+                atr_now = current_now * atr_pct_now / 100.0
+
+        # Commit 18: directional ordering alone is not enough. A stop located
+        # in the same still-valid reaction zone that should serve as Entry is
+        # precisely the failure observed by the user (SL touched, then price
+        # reacts in the intended direction). First try ONE structural recovery
+        # on the same thesis. This is manual-lane quality repair only; it cannot
+        # create direction or publication authority and it never changes leverage.
+        sl_conflict = None
+        if atr_now > 0 and isinstance(structure_now, dict):
+            try:
+                from execution_specialist_committees import (
+                    evaluate_sl_reaction_conflict,
+                    recover_execution_geometry_from_structure,
+                )
+                sl_conflict = evaluate_sl_reaction_conflict(
+                    structure=structure_now,
+                    direction=raw_action.lower(),
+                    entry=e,
+                    stop_loss=sl,
+                    atr=atr_now,
+                )
+                if bool((sl_conflict or {}).get('conflict')):
+                    recovery = recover_execution_geometry_from_structure(
+                        direction=raw_action.lower(),
+                        current_price=_num(result.get('current_price') or result.get('live_price') or e),
+                        atr=atr_now,
+                        structure=structure_now,
+                        trend=result.get('trend') or {},
+                        momentum=result.get('momentum') or {},
+                        volatility=volatility_now,
+                        setup_family=((result.get('coverage_route') or {}).get('execution_family')
+                                      or (result.get('strategy_context') or {}).get('selected_family')),
+                        liquidation=result.get('liquidation') or {},
+                        market_type='multiasset' if result.get('is_multiasset') else 'futures',
+                        symbol=symbol or result.get('symbol'),
+                        timeframe=timeframe or result.get('timeframe'),
+                        entry_hint=e,
+                        leverage_hint=_num(levels.get('leverage'), 1.0),
+                    )
+                    if isinstance(recovery, dict) and recovery.get('success'):
+                        recovered = {
+                            'entry': recovery.get('entry'),
+                            'stop_loss': recovery.get('stop_loss'),
+                            'take_profit': recovery.get('take_profit'),
+                        }
+                        if _valid(recovered):
+                            levels.update(recovered)
+                            levels['risk_reward'] = recovery.get('risk_reward')
+                            levels['manual_geometry_source'] = 'STRUCTURAL_RECOVERY_AFTER_SL_REACTION_CONFLICT'
+                            levels['manual_geometry_recovered_from_sl_reaction'] = True
+                            levels['manual_geometry_original_sl_conflict'] = dict(sl_conflict or {})
+                            e = _num(levels.get('entry')); sl = _num(levels.get('stop_loss')); tp = _num(levels.get('take_profit'))
+                            # Verify the repair. If still conflicting, fall through
+                            # to the conservative structure-first manual builder.
+                            sl_conflict = evaluate_sl_reaction_conflict(
+                                structure=structure_now, direction=raw_action.lower(),
+                                entry=e, stop_loss=sl, atr=atr_now,
+                            )
+            except Exception:
+                # Manual visibility is fail-open; official production guards are
+                # elsewhere and remain fail-closed.
+                sl_conflict = None
+
+        if not (isinstance(sl_conflict, dict) and sl_conflict.get('conflict')):
+            risk = abs(e - sl)
+            if risk > 0:
+                levels['risk_reward'] = round(abs(tp - e) / risk, 4)
+            levels.setdefault('manual_observation_geometry', True)
+            levels.setdefault('manual_observation_action', raw_action)
+            levels.setdefault('manual_geometry_source', 'PRIMARY_EXECUTION_COMMITTEE')
+            return levels
+        levels['manual_geometry_reaction_conflict'] = True
+        levels['manual_geometry_reaction_conflict_detail'] = dict(sl_conflict or {})
 
     structure = result.get('structure') or {}
     volatility = result.get('volatility') or {}

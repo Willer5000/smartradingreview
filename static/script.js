@@ -1732,6 +1732,128 @@ function doChangePass() {
 // ====== FIN FUNCIONES TGP ======
 
 
+// ============================================================================
+// COMMIT 18 — MULTI-ASSET DISPLAY LANE + STRICT IDENTITY
+// ============================================================================
+// The selected market chart is deliberately independent from the governed
+// heavy analysis. One GET renders the selected cell; it never starts Strategy,
+// committees, Research or AI. This prevents a busy shared worker from leaving
+// stale BTC/1D identity while CL/4h (or another Multi cell) is selected.
+window.__MULTI_DISPLAY_18__ = window.__MULTI_DISPLAY_18__ || {
+    seq: 0,
+    inflightKey: '',
+    inflight: null,
+};
+
+function _commit18DisplayName(symbol) {
+    const raw = String(symbol || '').trim();
+    return window.PAGE_CONFIG?.symbols?.[raw] || raw.replace('-', '/');
+}
+
+function _commit18TimeframeName(timeframe) {
+    const raw = String(timeframe || '').trim();
+    return window.PAGE_CONFIG?.timeframes?.[raw]
+        || (typeof window.getIntervalName === 'function' ? window.getIntervalName(raw) : raw);
+}
+
+window.commit18MultiIdentityReset = function(symbol, timeframe) {
+    if (window.IS_MULTI_ASSET_PAGE !== true) return;
+    const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
+    const tf = String(timeframe || window.PAGE_CONFIG?.defaultTimeframe || '4h');
+    const display = _commit18DisplayName(sym);
+    const tfName = _commit18TimeframeName(tf);
+
+    window.currentSymbol = sym;
+    window.currentInterval = tf;
+
+    // Never preserve a rich analysis from another cell as the visible source.
+    const current = window.currentAnalysis;
+    const currentSymbol = String(current?.symbol || '').toUpperCase().replace('/', '-');
+    const currentTf = String(current?.timeframe || '');
+    if (current && (currentSymbol !== sym.toUpperCase().replace('/', '-') || currentTf !== tf)) {
+        window.currentAnalysis = {
+            success: true,
+            symbol: sym,
+            timeframe: tf,
+            market: 'multiasset',
+            is_multiasset: true,
+            ui_identity_placeholder: true,
+        };
+    }
+
+    const chartTitle = document.getElementById('chart-title');
+    if (chartTitle) {
+        chartTitle.innerHTML = `${display} ${tfName} - <span id="live-price" class="live-price">--</span>`;
+    }
+    const formationTf = document.getElementById('formation-timeframe');
+    if (formationTf) formationTf.textContent = `${display} ${tfName}`;
+    const patternTf = document.getElementById('pattern-4-timeframe');
+    if (patternTf) patternTf.textContent = tfName;
+    const opTf = document.getElementById('op-timeframe');
+    if (opTf) opTf.textContent = tfName;
+    const recSymbol = document.getElementById('rec-symbol');
+    if (recSymbol) recSymbol.textContent = display;
+    const opLive = document.getElementById('op-live-price');
+    if (opLive) opLive.textContent = '---';
+};
+
+window.loadMultiDisplayLane = async function(symbol, timeframe) {
+    if (window.IS_MULTI_ASSET_PAGE !== true) return null;
+    const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
+    const tf = String(timeframe || window.PAGE_CONFIG?.defaultTimeframe || '4h');
+    const key = `${sym}|${tf}`;
+    const state = window.__MULTI_DISPLAY_18__;
+    window.commit18MultiIdentityReset(sym, tf);
+
+    if (state.inflight && state.inflightKey === key) return state.inflight;
+    const seq = ++state.seq;
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 10000);
+    const task = (async () => {
+        try {
+            const response = await fetch(
+                `/api/multiasset/display?symbol=${encodeURIComponent(sym)}&timeframe=${encodeURIComponent(tf)}`,
+                {method:'GET', credentials:'same-origin', cache:'no-store', signal:controller.signal}
+            );
+            const payload = await response.json();
+            if (seq !== state.seq) return null;
+            const data = payload?.data || {};
+            const gotSymbol = String(data.symbol || payload?.symbol || '').toUpperCase().replace('/', '-');
+            const gotTf = String(data.timeframe || payload?.timeframe || '');
+            if (gotSymbol !== sym.toUpperCase().replace('/', '-') || gotTf !== tf) {
+                throw new Error('MULTI_DISPLAY_IDENTITY_MISMATCH');
+            }
+            if (payload?.available !== false && data?.df) {
+                window.currentDisplayAnalysis = data;
+                const price = Number(data.current_price ?? data.live_price);
+                const live = document.getElementById('live-price');
+                if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
+                const opLive = document.getElementById('op-live-price');
+                if (opLive && Number.isFinite(price) && price > 0) opLive.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
+                try { window.updateAllCharts?.(data); } catch (_) {}
+                try { window.updateCandleChart?.(data); } catch (_) {}
+                try { window.updatePattern4Chart?.(data); } catch (_) {}
+                try { window.updateFormation40Chart?.(data); } catch (_) {}
+                try { window.updateRecentPatternsList?.(data); } catch (_) {}
+                return data;
+            }
+            return null;
+        } catch (error) {
+            if (error?.name !== 'AbortError') console.debug('Multi Display Lane:', error?.message || error);
+            return null;
+        } finally {
+            window.clearTimeout(timer);
+            if (state.inflightKey === key) {
+                state.inflight = null;
+                state.inflightKey = '';
+            }
+        }
+    })();
+    state.inflightKey = key;
+    state.inflight = task;
+    return task;
+};
+
 // ============ INICIALIZACIÓN ============
 document.addEventListener('DOMContentLoaded', function() {
     console.log('DOM cargado, inicializando sistema...');
@@ -1764,6 +1886,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         ? '1h'
                         : '1D'
                 );
+            if (window.IS_MULTI_ASSET_PAGE === true) window.commit18MultiIdentityReset?.(currentSymbol, currentInterval);
             runCompleteAnalysis();
         });
     }
@@ -1772,6 +1895,7 @@ document.addEventListener('DOMContentLoaded', function() {
         intervalSelect.addEventListener('change', function() {
             currentInterval = this.value;
             currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            if (window.IS_MULTI_ASSET_PAGE === true) window.commit18MultiIdentityReset?.(currentSymbol, currentInterval);
             runCompleteAnalysis();
         });
     }
@@ -2757,6 +2881,12 @@ window.runCompleteAnalysis = function() {
     const symbol = document.getElementById('symbol-select')?.value || cfg.defaultSymbol;
     const interval = document.getElementById('interval-select')?.value || cfg.defaultTimeframe;
 
+    if (window.IS_MULTI_ASSET_PAGE === true) {
+        window.commit18MultiIdentityReset?.(symbol, interval);
+        // Fire-and-render: heavy analysis remains independent and may return 202.
+        window.loadMultiDisplayLane?.(symbol, interval);
+    }
+
     // RC9.7.10 — changing pair/TF invalidates every prior live overlay.
     // This is generic for Futures and Spot, including PAXG-USDT / PAXG-BTC.
     if (typeof window.resetLiveVisualContext === 'function') {
@@ -2978,8 +3108,16 @@ window.runCompleteAnalysis = function() {
                 const maxBusyRetries = isMulti ? 10 : 8;
 
                 if (data.partial && data.data) {
-                    window.currentAnalysis = data.data;
-                    if (data.data?.decision) {
+                    const expectedSymbol = String(symbol || '').toUpperCase().replace('/', '-');
+                    const gotSymbol = String(data.data?.symbol || '').toUpperCase().replace('/', '-');
+                    const gotTf = String(data.data?.timeframe || '');
+                    const identityOk = !isMulti || (gotSymbol === expectedSymbol && gotTf === interval);
+                    if (!identityOk) {
+                        console.warn('Multi partial descartado por identidad stale', {expectedSymbol, interval, gotSymbol, gotTf});
+                    } else {
+                        window.currentAnalysis = data.data;
+                    }
+                    if (identityOk && data.data?.decision) {
                         try {
                             updateInstantRecommendation(data.data);
                         } catch (partialErr) {
@@ -2989,7 +3127,7 @@ window.runCompleteAnalysis = function() {
                     // 17.5.11R.2 — Multi can draw the selected market candles
                     // even while the shared heavy engine is finishing another
                     // task. This UI-only chart snapshot never creates a signal.
-                    if (isMulti && data.data?.df) {
+                    if (identityOk && isMulti && data.data?.df) {
                         try { window.updateAllCharts?.(data.data); } catch (_) {}
                         try { window.updateCandleChart?.(data.data); } catch (_) {}
                         try { window.updatePattern4Chart?.(data.data); } catch (_) {}
@@ -12515,3 +12653,60 @@ window.prioritizeSpotSignalLanes = function prioritizeSpotSignalLanes() {
 
 // ============ CIERRE DEL DOMContentLoaded ============
 });
+
+
+// ============================================================================
+// COMMIT 18 — INLINED RUNTIME RESILIENCE (formerly runtime_resilience_175104.js)
+// ============================================================================
+(function () {
+    'use strict';
+    if (window.__RUNTIME_RESILIENCE_18__) return;
+    window.__RUNTIME_RESILIENCE_18__ = true;
+    window.__RUNTIME_RESILIENCE_175104__ = true; // compatibility marker
+
+    if (typeof window._futFetchBounded === 'function') {
+        window._futFetchBounded = async function (url, options = {}, timeoutMs = 25000) {
+            const method = String(options.method || 'GET').toUpperCase();
+            const controller = new AbortController();
+            const externalSignal = options.signal;
+            const relayAbort = () => controller.abort();
+            if (externalSignal) {
+                if (externalSignal.aborted) controller.abort();
+                else externalSignal.addEventListener('abort', relayAbort, {once: true});
+            }
+            const effectiveTimeout = Math.max(4000, Number(timeoutMs || 25000));
+            const timer = window.setTimeout(() => controller.abort(), effectiveTimeout);
+            try {
+                return await fetch(url, {...options, method, signal: controller.signal});
+            } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    const bounded = new Error(`La consulta excedió ${Math.round(effectiveTimeout / 1000)} segundos; se conserva la vista y puedes reintentar.`);
+                    bounded.name = 'BoundedReadTimeout';
+                    throw bounded;
+                }
+                throw error;
+            } finally {
+                window.clearTimeout(timer);
+                if (externalSignal) externalSignal.removeEventListener?.('abort', relayAbort);
+            }
+        };
+    }
+
+    if (typeof window.loadFuturesRiskProfile === 'function') {
+        const originalRiskLoad = window.loadFuturesRiskProfile;
+        let inFlight = null;
+        let lastSuccessAt = 0;
+        window.loadFuturesRiskProfile = function (options = {}) {
+            const silent = Boolean(options && options.silent);
+            if (silent && Date.now() - lastSuccessAt < 120000) return Promise.resolve(true);
+            if (inFlight) return inFlight;
+            inFlight = Promise.resolve(originalRiskLoad.call(this, options))
+                .then(result => {
+                    if (result !== false) lastSuccessAt = Date.now();
+                    return result;
+                })
+                .finally(() => { inFlight = null; });
+            return inFlight;
+        };
+    }
+})();

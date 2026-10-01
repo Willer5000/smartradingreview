@@ -1,0 +1,23 @@
+COMMIT 18 MAIN — QA
+Base: Commit 17.5.11R4
+
+PASS — Python py_compile: app.py, reason_first_contract_18.py
+PASS — Node syntax: static/script.js
+PASS — no majority-vote production gate in explicit contract
+PASS — Learning Scientist has no production authority
+PASS — Macro/news cannot create direction
+PASS — Greeks/GEX cannot create direction
+PASS — correlated indicators grouped into 9 bounded evidence families
+PASS — positive exact Research route recognized without publication bypass
+PASS — GET /api/multiasset/display exists
+PASS — display endpoint does not start heavy analysis
+PASS — strict Multi identity reset + response identity check
+PASS — separate runtime_resilience_175104.js request removed
+PASS — resilience logic inlined into script.js
+PASS — SL reaction-zone manual regression: SHORT Entry 100 / SL 105 inside bearish OB 104-106 is rebuilt to Entry 104 / SL 106.44 / TP 98.632 in fixture
+PASS — leverage in same regression remains 23x; Commit18 does not alter it
+PASS — existing execution-specialist guard returns SL_INSIDE_STRONG_REACTION_ZONE
+PASS — leverage committee context remains CONTEXT_FOR_EXISTING_LEVERAGE_POLICY and does_not_force_low_leverage=True
+
+Leverage source policy itself is NOT part of the Commit18 replacement set.
+No claim of future profitability is made.
