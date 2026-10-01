@@ -30926,7 +30926,7 @@ _MEMORY_JOB_START_LIMIT_MB = min(
 )
 _MEMORY_ANALYSIS_CACHE_KEEP = max(1, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '2') or 2))
 _LOW_MEMORY_MODE = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
-_FREE_RUNTIME_MAX_THREADS = max(8, int(os.environ.get('FREE_RUNTIME_MAX_THREADS', '18') or 18))
+_FREE_RUNTIME_MAX_THREADS = max(6, int(os.environ.get('FREE_RUNTIME_MAX_THREADS', '10') or 10))
 _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = max(0.0, float(os.environ.get('FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS', '1') or 1))
 _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS', '10') or 10))
 
@@ -30934,10 +30934,13 @@ _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FRE
 # In low-memory mode, clamp them in code so an old env cannot silently restore
 # unsafe 325/395 MB thresholds before a 512 MB cgroup kill.
 if _LOW_MEMORY_MODE:
-    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 250.0)
-    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 340.0)
-    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 240.0)
-    _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 2)
+    # Commit 18.1.1: preserve ~200 MB headroom for pandas/numpy/Plotly
+    # transient allocations on Render Free (512 MB cgroup). The previous
+    # 250/340/240 thresholds reacted too late to sudden analysis spikes.
+    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 220.0)
+    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 300.0)
+    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 200.0)
+    _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
 
 def _process_rss_mb():
@@ -31026,6 +31029,25 @@ def _shed_recreatable_memory(reason='memory-pressure', *, aggressive=False):
                 released['spot_raw'] = int(clear_spot() or 0)
         except Exception:
             pass
+
+    # Commit 18.1.1: chart payloads are recreatable. Under memory pressure they
+    # must not compete with the trading engine for the same 512 MB process.
+    try:
+        light_cache = globals().get('_MULTI_UI_LIGHT_CACHE')
+        if isinstance(light_cache, dict) and light_cache.get('lock') is not None:
+            with light_cache['lock']:
+                released['multi_ui_light'] = len(light_cache.get('items') or {})
+                (light_cache.get('items') or {}).clear()
+    except Exception:
+        pass
+    try:
+        fut_ui = globals().get('_FUTURES_UI_CACHE')
+        if isinstance(fut_ui, dict) and fut_ui.get('lock') is not None:
+            with fut_ui['lock']:
+                released['futures_ui_payloads'] = len(fut_ui.get('items') or {})
+                (fut_ui.get('items') or {}).clear()
+    except Exception:
+        pass
 
     _trim_process_heap()
     print(
@@ -36244,17 +36266,17 @@ def _multi_technical_sentiment_175113(df, timeframe):
 _MULTI_UI_LIGHT_CACHE = {'lock': threading.RLock(), 'items': {}}
 
 def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
-    """Commit 18.1 selected-cell display snapshot, independent from heavy slot.
+    """Commit 18.1.1 memory-safe selected-cell display lane.
 
-    Primary source is the normal Multi/Futures real-candle loader.  Some newer
-    synthetic contracts can return fewer than the >=100 candles required by the
-    heavy Futures engine; that is valid for a display chart but intentionally
-    insufficient for production signal authority.  In that case ONLY the UI
-    lane falls back to the existing Multi router fetch, which uses explicit
-    from/to bounds and >=30 CLOSED real candles.  No synthetic prices, DB write,
-    LLM call, Strategy/committee run or signal publication is introduced here.
+    IMPORTANT: this endpoint is presentation only. It fetches/caches REAL OHLCV
+    for one selected Multi cell and returns the candles plus a tiny technical
+    sentiment proxy. It deliberately does NOT run Trend/Momentum/Structure/
+    LiquidationHeatmap server-side because the browser can render the standard
+    charts from OHLCV and the governed heavy analysis will later supply the rich
+    layers. This prevents the display GET and the heavy POST from allocating two
+    analysis working sets concurrently on a 512 MB Render instance.
     """
-    key=(str(symbol),str(timeframe)); now=time.time(); ttl=60.0
+    key=(str(symbol),str(timeframe)); now=time.time(); ttl=45.0
     with _MULTI_UI_LIGHT_CACHE['lock']:
         item=(_MULTI_UI_LIGHT_CACHE.get('items') or {}).get(key)
         if isinstance(item,dict) and now-float(item.get('ts') or 0) <= ttl:
@@ -36277,9 +36299,6 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
         primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
         df=None
 
-    # Commit 18.1: display is NOT allowed to depend on the heavy engine's
-    # minimum-sample requirement.  Reuse the already-governed router OHLCV
-    # fetch as a real-data display fallback for the one selected cell only.
     if df is None or getattr(df,'empty',True):
         try:
             from multiasset_system import _router_fetch
@@ -36294,81 +36313,44 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
                 primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
 
     if df is None or getattr(df,'empty',True):
-        err=primary_error
-        try:
-            err=err or str((getattr(engine,'_futures_data_errors',{}) or {}).get((symbol,timeframe)) or '')[:160]
-        except Exception:
-            pass
         return {
             'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
             'market':'multiasset','is_multiasset':True,
-            'display_available':False,'display_error':err or 'REAL_OHLCV_TEMPORARILY_UNAVAILABLE',
+            'display_available':False,
+            'display_error':primary_error or 'REAL_OHLCV_TEMPORARILY_UNAVAILABLE',
             'display_source':source,
         }
 
     try:
-        df=df.copy()
-        if 'time' not in df.columns and 'timestamp' in df.columns:
-            df=df.rename(columns={'timestamp':'time'})
-        if 'time' not in df.columns:
-            raise ValueError('DISPLAY_OHLCV_WITHOUT_TIME')
-        df['time']=pd.to_datetime(df['time'],errors='coerce',utc=True).dt.tz_convert(None)
+        work=df[['time','open','high','low','close','volume']].copy() if 'time' in df.columns else df[['timestamp','open','high','low','close','volume']].rename(columns={'timestamp':'time'}).copy()
+        work['time']=pd.to_datetime(work['time'],errors='coerce',utc=True).dt.tz_convert(None)
         for col in ('open','high','low','close','volume'):
-            if col not in df.columns:
-                raise ValueError(f'DISPLAY_OHLCV_MISSING_{col.upper()}')
-            df[col]=pd.to_numeric(df[col],errors='coerce')
-        df=df.dropna(subset=['time','open','high','low','close','volume']).sort_values('time').reset_index(drop=True)
-        if len(df)<30:
-            raise ValueError(f'DISPLAY_OHLCV_TOO_SHORT:{len(df)}')
-        if len(df)>180:
-            df=df.tail(180).reset_index(drop=True)
+            work[col]=pd.to_numeric(work[col],errors='coerce')
+        work=work.dropna().sort_values('time').tail(120).reset_index(drop=True)
+        if len(work)<30:
+            raise ValueError(f'DISPLAY_OHLCV_TOO_SHORT:{len(work)}')
 
         data={
             'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
             'market':'multiasset','is_multiasset':True,
-            'current_price':float(df['close'].iloc[-1]),
-            'live_price':float(df['close'].iloc[-1]),
+            'current_price':float(work['close'].iloc[-1]),
+            'live_price':float(work['close'].iloc[-1]),
             'df':{
-                'time':[str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
-                'open':[float(x) for x in df['open'].tolist()],
-                'high':[float(x) for x in df['high'].tolist()],
-                'low':[float(x) for x in df['low'].tolist()],
-                'close':[float(x) for x in df['close'].tolist()],
-                'volume':[float(x) for x in df['volume'].tolist()],
+                'time':[str(t) for t in work['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
+                'open':[float(x) for x in work['open'].tolist()],
+                'high':[float(x) for x in work['high'].tolist()],
+                'low':[float(x) for x in work['low'].tolist()],
+                'close':[float(x) for x in work['close'].tolist()],
+                'volume':[float(x) for x in work['volume'].tolist()],
             },
-            'display_available':True,
-            'display_source':source,
-            'display_candles':int(len(df)),
+            'display_available':True,'display_source':source,
+            'display_candles':int(len(work)),
             'ui_partial_chart_only':True,
-            'ui_partial_layers':'PRICE_STRUCTURE_LIQUIDITY_SENTIMENT',
+            'ui_partial_layers':'OHLCV_BROWSER_RENDER_ONLY',
+            'runtime_memory_profile':'MULTI_DISPLAY_MINIMAL',
         }
-        # CPU-only selected-cell layers.  They reuse the exact same candles.
-        # Failure of one optional panel must never blank the central chart.
-        try: data['trend']=engine.analyze_trend_layer(df)
-        except Exception: pass
-        try: data['momentum']=engine.analyze_momentum_layer(df)
-        except Exception: pass
-        try: data['volatility']=engine.analyze_volatility_layer(df,symbol=symbol,timeframe=timeframe)
-        except Exception: pass
-        try: data['volume']=engine.analyze_volume_layer(df,timeframe)
-        except Exception: pass
         try:
-            _st=engine.analyze_price_structure_layer(df,timeframe,symbol) or {}
-            if isinstance(_st,dict):
-                _st=dict(_st); _st.pop('df',None)
-                data['structure']=_st
-        except Exception: pass
-        try:
-            _hm=LiquidationHeatmap(timeframe=timeframe,symbol=symbol)
-            _hm.load_price_history(df)
-            _i=len(df)-1
-            _hm.update_heatmap(df,_i,float(df['high'].iloc[_i]),float(df['low'].iloc[_i]),float(df['close'].iloc[_i]),float(df['volume'].iloc[_i]))
-            data['liquidation']=_hm.get_heatmap_data(_i,float(df['close'].iloc[_i]))
-            if isinstance(data.get('liquidation'),dict):
-                data['liquidation']['ui_source']='SELECTED_CELL_LOCAL_MODEL'
-        except Exception: pass
-        try:
-            data['sentiment']=_multi_technical_sentiment_175113(df,timeframe)
+            data['sentiment']=_multi_technical_sentiment_175113(work,timeframe)
         except Exception:
             pass
         try:
@@ -36376,13 +36358,16 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
             meta=(MULTIASSET_SYMBOLS or {}).get(str(symbol)) or {}
             data['display_name']=meta.get('name') or str(symbol)
             data['asset_class']=meta.get('asset_class')
-        except Exception: pass
+        except Exception:
+            pass
 
         with _MULTI_UI_LIGHT_CACHE['lock']:
+            # Keep exactly the current selected cell. Browser has its own short
+            # cache, so retaining four rich server payloads only wastes RSS.
+            _MULTI_UI_LIGHT_CACHE['items'].clear()
             _MULTI_UI_LIGHT_CACHE['items'][key]={'ts':now,'data':data}
-            if len(_MULTI_UI_LIGHT_CACHE['items'])>4:
-                oldest=sorted(_MULTI_UI_LIGHT_CACHE['items'].items(),key=lambda kv:float((kv[1] or {}).get('ts') or 0))
-                for old_key,_ in oldest[:-4]: _MULTI_UI_LIGHT_CACHE['items'].pop(old_key,None)
+        del work
+        _trim_process_heap()
         return data
     except Exception as exc:
         return {
@@ -36500,19 +36485,19 @@ def api_multiasset_display_18():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'18.1'
+                'retry_after_ms':5000,'response_contract_version':'18.1.1'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'18.1'
+            'response_contract_version':'18.1.1'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'18.1'
+            'error':str(exc)[:180],'response_contract_version':'18.1.1'
         }),200
 
 
@@ -36528,27 +36513,21 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.1'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.1.1'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
-        # Schedule the governed heavy job first.  The lightweight selected-cell
-        # chart below is UI-only and must never become a prerequisite for the
-        # real analysis job.  This ordering also fails open if a provider cannot
-        # serve the light snapshot: Multi still remains queued instead of stuck.
+        # Commit 18.1.1: the browser owns the separate lightweight display GET.
+        # Never recompute that snapshot inside this POST after spawning the heavy
+        # analysis thread; doing both simultaneously was a reproducible 512 MB
+        # peak-risk path. This endpoint schedules only the governed heavy job.
         recent_error=_get_futures_ui_recent_error(symbol,timeframe)
         state=_start_futures_ui_analysis_async(symbol,timeframe,'multiasset')
-        light=_multiasset_light_chart_snapshot_175112(symbol,timeframe)
         partial={}
-        if compact: partial.update(compact)
-        if light:
-            partial.update({k:v for k,v in light.items() if k in (
-                'success','symbol','timeframe','market','is_multiasset','current_price','live_price',
-                'df','display_name','asset_class','ui_partial_chart_only','ui_partial_layers',
-                'trend','momentum','volatility','volume','structure','liquidation','sentiment'
-            )})
-            # Never permit stale cached identity to override the selector.
-            partial['symbol']=symbol; partial['timeframe']=timeframe; partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'18.1'}
+        if compact:
+            partial.update(compact)
+            partial['symbol']=symbol; partial['timeframe']=timeframe
+            partial['market']='multiasset'; partial['is_multiasset']=True
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'18.1.1'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -37614,7 +37593,7 @@ def _compact_fast_futures_ui_result(result, timeframe):
 _FUTURES_UI_CACHE_TTL_SECONDS = max(30, int(os.environ.get(
     'FUTURES_UI_CACHE_TTL_SECONDS', '90'
 ) or 90))
-_FUTURES_UI_CACHE_MAX_ITEMS = 2
+_FUTURES_UI_CACHE_MAX_ITEMS = 1
 _FUTURES_UI_CACHE = {
     'items': {},
     'running': set(),

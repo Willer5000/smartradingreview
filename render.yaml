@@ -22,23 +22,23 @@ services:
       - key: BLIS_NUM_THREADS
         value: "1"
       - key: FREE_RUNTIME_MAX_THREADS
-        value: "18"
+        value: "10"
       - key: FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS
         value: "1"
       - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
         value: "10"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "250"
+        value: "220"
       - key: MEMORY_HARD_LIMIT_MB
-        value: "340"
+        value: "300"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
-        value: "2"
+        value: "1"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
         value: "8"
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
         value: "20"
       - key: MEMORY_JOB_START_LIMIT_MB
-        value: "240"
+        value: "200"
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: FREE_PLAN_LOCKDOWN

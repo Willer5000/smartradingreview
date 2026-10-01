@@ -1,0 +1,18 @@
+COMMIT 18.1.1 — QA MEMORY STABILITY
+
+PASS Python py_compile: app.py
+PASS Node syntax: static/script.js
+PASS Multi Display no ejecuta analyze_trend_layer
+PASS Multi Display no ejecuta LiquidationHeatmap
+PASS POST /api/multiasset/analyze no reconstruye light snapshot
+PASS server Multi Display cache bounded to current cell
+PASS rich UI cache bounded to 1 item
+PASS memory pressure shed clears recreatable Multi/Futures UI payloads
+PASS LOW_MEMORY_MODE clamp soft=220 MB
+PASS LOW_MEMORY_MODE clamp hard=300 MB
+PASS heavy job start clamp <=200 MB
+PASS default/free thread budget reduced 18 -> 10
+PASS render.yaml carries the same memory/thread values
+PASS no Strategy/Entry/SL/TP/leverage/Guardian/Research file changed
+
+Limitation: static QA cannot reproduce Render's exact cgroup/RSS peak. Verify the deployed RSS graph after the change.
