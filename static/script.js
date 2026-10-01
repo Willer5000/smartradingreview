@@ -1,7 +1,7 @@
 /* static/script.js - Frontend interactivo del sistema experto */
 /* VERSIÓN DEFINITIVA - TODOS LOS GRÁFICOS CORREGIDOS */
 console.log(
-    '✅ SmartTrading CORE JS 20260906-FIX2 cargado'
+    '✅ SmartTrading CORE JS 20261001-COMMIT18-1-MULTI cargado'
 );
 
 let currentAnalysis = null;
@@ -1743,6 +1743,9 @@ window.__MULTI_DISPLAY_18__ = window.__MULTI_DISPLAY_18__ || {
     seq: 0,
     inflightKey: '',
     inflight: null,
+    cache: {},
+    cacheTtlMs: 45000,
+    lastFailureAt: {},
 };
 
 function _commit18DisplayName(symbol) {
@@ -1766,7 +1769,6 @@ window.commit18MultiIdentityReset = function(symbol, timeframe) {
     window.currentSymbol = sym;
     window.currentInterval = tf;
 
-    // Never preserve a rich analysis from another cell as the visible source.
     const current = window.currentAnalysis;
     const currentSymbol = String(current?.symbol || '').toUpperCase().replace('/', '-');
     const currentTf = String(current?.timeframe || '');
@@ -1782,9 +1784,7 @@ window.commit18MultiIdentityReset = function(symbol, timeframe) {
     }
 
     const chartTitle = document.getElementById('chart-title');
-    if (chartTitle) {
-        chartTitle.innerHTML = `${display} ${tfName} - <span id="live-price" class="live-price">--</span>`;
-    }
+    if (chartTitle) chartTitle.innerHTML = `${display} ${tfName} - <span id="live-price" class="live-price">--</span>`;
     const formationTf = document.getElementById('formation-timeframe');
     if (formationTf) formationTf.textContent = `${display} ${tfName}`;
     const patternTf = document.getElementById('pattern-4-timeframe');
@@ -1797,6 +1797,27 @@ window.commit18MultiIdentityReset = function(symbol, timeframe) {
     if (opLive) opLive.textContent = '---';
 };
 
+function _commit181RenderMultiDisplay(data) {
+    if (!data?.df) return null;
+    window.currentDisplayAnalysis = data;
+    // updateAllCharts owns currentAnalysis and the full indicator workspace.
+    // Calling the candle renderer twice wastes CPU on Render Free.
+    try { window.updateAllCharts?.(data); } catch (error) {
+        console.debug('Multi display chart render:', error?.message || error);
+        try { window.updateCandleChart?.(data); } catch (_) {}
+    }
+    try { window.updatePattern4Chart?.(data); } catch (_) {}
+    try { window.updateFormation40Chart?.(data); } catch (_) {}
+    try { window.updateRecentPatternsList?.(data); } catch (_) {}
+
+    const price = Number(data.current_price ?? data.live_price);
+    const live = document.getElementById('live-price');
+    if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
+    const opLive = document.getElementById('op-live-price');
+    if (opLive && Number.isFinite(price) && price > 0) opLive.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
+    return data;
+}
+
 window.loadMultiDisplayLane = async function(symbol, timeframe) {
     if (window.IS_MULTI_ASSET_PAGE !== true) return null;
     const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
@@ -1805,7 +1826,18 @@ window.loadMultiDisplayLane = async function(symbol, timeframe) {
     const state = window.__MULTI_DISPLAY_18__;
     window.commit18MultiIdentityReset(sym, tf);
 
+    // Client-side TTL: runCompleteAnalysis may retry the heavy POST every few
+    // seconds. The chart must NOT re-download the same large JSON each retry.
+    const cached = state.cache?.[key];
+    if (cached && (Date.now() - Number(cached.ts || 0)) < Number(state.cacheTtlMs || 45000) && cached.data?.df) {
+        return _commit181RenderMultiDisplay(cached.data);
+    }
     if (state.inflight && state.inflightKey === key) return state.inflight;
+
+    // If the provider just failed, do not create a fast request storm.
+    const failedAt = Number(state.lastFailureAt?.[key] || 0);
+    if (failedAt && Date.now() - failedAt < 8000) return null;
+
     const seq = ++state.seq;
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 10000);
@@ -1824,21 +1856,27 @@ window.loadMultiDisplayLane = async function(symbol, timeframe) {
                 throw new Error('MULTI_DISPLAY_IDENTITY_MISMATCH');
             }
             if (payload?.available !== false && data?.df) {
-                window.currentDisplayAnalysis = data;
-                const price = Number(data.current_price ?? data.live_price);
-                const live = document.getElementById('live-price');
-                if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
-                const opLive = document.getElementById('op-live-price');
-                if (opLive && Number.isFinite(price) && price > 0) opLive.textContent = `$${price.toLocaleString(undefined,{maximumFractionDigits:8})}`;
-                try { window.updateAllCharts?.(data); } catch (_) {}
-                try { window.updateCandleChart?.(data); } catch (_) {}
-                try { window.updatePattern4Chart?.(data); } catch (_) {}
-                try { window.updateFormation40Chart?.(data); } catch (_) {}
-                try { window.updateRecentPatternsList?.(data); } catch (_) {}
-                return data;
+                state.cache[key] = {ts: Date.now(), data};
+                // Keep at most 4 selected cells in browser memory, same as server.
+                const keys = Object.keys(state.cache);
+                if (keys.length > 4) {
+                    keys.sort((a,b) => Number(state.cache[a]?.ts || 0) - Number(state.cache[b]?.ts || 0));
+                    keys.slice(0, keys.length - 4).forEach(k => delete state.cache[k]);
+                }
+                delete state.lastFailureAt[key];
+                return _commit181RenderMultiDisplay(data);
             }
+            state.lastFailureAt[key] = Date.now();
+            const chart = document.getElementById('candle-chart');
+            if (chart && !chart.querySelector('.js-multi-display-unavailable')) {
+                chart.innerHTML = `<div class="js-multi-display-unavailable text-center py-5 text-muted">
+                    Datos reales de ${_commit18DisplayName(sym)} ${_commit18TimeframeName(tf)} temporalmente no disponibles. El sistema reintentará sin usar datos sintéticos.
+                </div>`;
+            }
+            console.debug('Multi display unavailable:', payload?.data?.display_error || payload?.error || 'NO_OHLCV');
             return null;
         } catch (error) {
+            state.lastFailureAt[key] = Date.now();
             if (error?.name !== 'AbortError') console.debug('Multi Display Lane:', error?.message || error);
             return null;
         } finally {

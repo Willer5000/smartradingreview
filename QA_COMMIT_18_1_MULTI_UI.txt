@@ -1,0 +1,23 @@
+COMMIT 18.1 — MULTI-ASSET UI QA
+Base: Commit 18 Main 0617268f64ca7cf8ae9040ba00ab509bec57d52e
+
+PASS — app.py compila con py_compile.
+PASS — static/script.js pasa node --check.
+PASS — multiasset-ui: reconocido como interactive owner por compatibilidad.
+PASS — scheduler Multi usa owner canónico multi-ui:<symbol>:<tf>.
+PASS — se elimina el auto-bloqueo lógico: Multi UI no es tratado como background después de marcar UI priority.
+PASS — Display Lane mantiene fuente OHLCV real normal como primera opción.
+PASS — fallback Display usa multiasset_system._router_fetch con velas reales cerradas.
+PASS — fallback Display no usa _generate_fallback_data ni datos sintéticos.
+PASS — Display Lane expone display_error en vez de fallo silencioso.
+PASS — cache servidor Display TTL 60 s y LRU máximo 4 celdas.
+PASS — cache navegador TTL 45 s y máximo 4 celdas.
+PASS — backoff de 8 s tras fallo de proveedor; evita request storm.
+PASS — identidad symbol/timeframe validada antes de renderizar.
+PASS — render central no duplica deliberadamente updateAllCharts + candle en ruta normal.
+PASS — cache-bust 18.1 aplicado.
+PASS — sólo se reemplazan app.py, static/script.js y templates/index.html.
+PASS — no se modifican leverage_policy.py, execution_specialist_committees.py, default_strategy_bank.py ni Research.
+
+LIMITACIÓN DE QA:
+No se levantó el servicio completo de Render/KuCoin en el contenedor local. La validación final de integración requiere deploy. Los logs del usuario sí demuestran la causa original del self-priority bug.

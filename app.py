@@ -31140,7 +31140,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
     global _HEAVY_ANALYSIS_OWNER
 
     owner = str(owner or 'heavy-analysis')
-    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:', 'multi-ui:'))
+    interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:', 'multi-ui:', 'multiasset-ui:'))
 
     # RC9.7.14 FREE-runtime: never let background jobs pile up waiting for the
     # only heavy slot. On a 512 MB worker a queue of waiting threads can make
@@ -36244,17 +36244,85 @@ def _multi_technical_sentiment_175113(df, timeframe):
 _MULTI_UI_LIGHT_CACHE = {'lock': threading.RLock(), 'items': {}}
 
 def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
+    """Commit 18.1 selected-cell display snapshot, independent from heavy slot.
+
+    Primary source is the normal Multi/Futures real-candle loader.  Some newer
+    synthetic contracts can return fewer than the >=100 candles required by the
+    heavy Futures engine; that is valid for a display chart but intentionally
+    insufficient for production signal authority.  In that case ONLY the UI
+    lane falls back to the existing Multi router fetch, which uses explicit
+    from/to bounds and >=30 CLOSED real candles.  No synthetic prices, DB write,
+    LLM call, Strategy/committee run or signal publication is introduced here.
+    """
     key=(str(symbol),str(timeframe)); now=time.time(); ttl=60.0
     with _MULTI_UI_LIGHT_CACHE['lock']:
         item=(_MULTI_UI_LIGHT_CACHE.get('items') or {}).get(key)
         if isinstance(item,dict) and now-float(item.get('ts') or 0) <= ttl:
             return dict(item.get('data') or {})
+
     engine=_get_multiasset_system()
-    if engine is None: return {}
+    if engine is None:
+        return {
+            'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
+            'market':'multiasset','is_multiasset':True,
+            'display_available':False,'display_error':'MULTIASSET_ENGINE_UNAVAILABLE',
+        }
+
+    df=None
+    source='MULTI_HEAVY_OHLCV_CACHE_OR_REST'
+    primary_error=None
     try:
         df=engine.get_kucoin_data(symbol,timeframe)
-        if df is None or getattr(df,'empty',True): return {}
-        if len(df)>180: df=df.tail(180)
+    except Exception as exc:
+        primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
+        df=None
+
+    # Commit 18.1: display is NOT allowed to depend on the heavy engine's
+    # minimum-sample requirement.  Reuse the already-governed router OHLCV
+    # fetch as a real-data display fallback for the one selected cell only.
+    if df is None or getattr(df,'empty',True):
+        try:
+            from multiasset_system import _router_fetch
+            router_df=_router_fetch(str(symbol),str(timeframe))
+            if router_df is not None and not getattr(router_df,'empty',True):
+                df=router_df.copy()
+                if 'time' not in df.columns and 'timestamp' in df.columns:
+                    df=df.rename(columns={'timestamp':'time'})
+                source='MULTI_ROUTER_CLOSED_OHLCV_FALLBACK'
+        except Exception as exc:
+            if not primary_error:
+                primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
+
+    if df is None or getattr(df,'empty',True):
+        err=primary_error
+        try:
+            err=err or str((getattr(engine,'_futures_data_errors',{}) or {}).get((symbol,timeframe)) or '')[:160]
+        except Exception:
+            pass
+        return {
+            'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
+            'market':'multiasset','is_multiasset':True,
+            'display_available':False,'display_error':err or 'REAL_OHLCV_TEMPORARILY_UNAVAILABLE',
+            'display_source':source,
+        }
+
+    try:
+        df=df.copy()
+        if 'time' not in df.columns and 'timestamp' in df.columns:
+            df=df.rename(columns={'timestamp':'time'})
+        if 'time' not in df.columns:
+            raise ValueError('DISPLAY_OHLCV_WITHOUT_TIME')
+        df['time']=pd.to_datetime(df['time'],errors='coerce',utc=True).dt.tz_convert(None)
+        for col in ('open','high','low','close','volume'):
+            if col not in df.columns:
+                raise ValueError(f'DISPLAY_OHLCV_MISSING_{col.upper()}')
+            df[col]=pd.to_numeric(df[col],errors='coerce')
+        df=df.dropna(subset=['time','open','high','low','close','volume']).sort_values('time').reset_index(drop=True)
+        if len(df)<30:
+            raise ValueError(f'DISPLAY_OHLCV_TOO_SHORT:{len(df)}')
+        if len(df)>180:
+            df=df.tail(180).reset_index(drop=True)
+
         data={
             'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
             'market':'multiasset','is_multiasset':True,
@@ -36268,11 +36336,14 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
                 'close':[float(x) for x in df['close'].tolist()],
                 'volume':[float(x) for x in df['volume'].tolist()],
             },
+            'display_available':True,
+            'display_source':source,
+            'display_candles':int(len(df)),
             'ui_partial_chart_only':True,
             'ui_partial_layers':'PRICE_STRUCTURE_LIQUIDITY_SENTIMENT',
         }
-        # Selected-cell CPU-only layers. They reuse the SAME candles already
-        # downloaded for the light chart: no extra network, DB or LLM call.
+        # CPU-only selected-cell layers.  They reuse the exact same candles.
+        # Failure of one optional panel must never blank the central chart.
         try: data['trend']=engine.analyze_trend_layer(df)
         except Exception: pass
         try: data['momentum']=engine.analyze_momentum_layer(df)
@@ -36306,14 +36377,21 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
             data['display_name']=meta.get('name') or str(symbol)
             data['asset_class']=meta.get('asset_class')
         except Exception: pass
+
         with _MULTI_UI_LIGHT_CACHE['lock']:
             _MULTI_UI_LIGHT_CACHE['items'][key]={'ts':now,'data':data}
             if len(_MULTI_UI_LIGHT_CACHE['items'])>4:
                 oldest=sorted(_MULTI_UI_LIGHT_CACHE['items'].items(),key=lambda kv:float((kv[1] or {}).get('ts') or 0))
                 for old_key,_ in oldest[:-4]: _MULTI_UI_LIGHT_CACHE['items'].pop(old_key,None)
         return data
-    except Exception:
-        return {}
+    except Exception as exc:
+        return {
+            'success':True,'symbol':str(symbol),'timeframe':str(timeframe),
+            'market':'multiasset','is_multiasset':True,
+            'display_available':False,
+            'display_error':f'{type(exc).__name__}:{str(exc)[:160]}',
+            'display_source':source,
+        }
 
 # 17.5.11 — cache-only Multi-Asset diagnostic lane. No market/DB/LLM call.
 def _multiasset_directional_diagnostics_17511(analyses):
@@ -36422,19 +36500,19 @@ def api_multiasset_display_18():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'18.0'
+                'retry_after_ms':5000,'response_contract_version':'18.1'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'18.0'
+            'response_contract_version':'18.1'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'18.0'
+            'error':str(exc)[:180],'response_contract_version':'18.1'
         }),200
 
 
@@ -36450,7 +36528,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.0'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.1'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Schedule the governed heavy job first.  The lightweight selected-cell
@@ -36470,7 +36548,7 @@ def api_multiasset_analyze():
             )})
             # Never permit stale cached identity to override the selector.
             partial['symbol']=symbol; partial['timeframe']=timeframe; partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'18.0'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':5000,'response_contract_version':'18.1'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -38037,7 +38115,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
         running.add(key); _FUTURES_UI_CACHE['errors'].pop(key,None)
 
     def _do_ui_analysis():
-        owner=f'{market}-ui:{symbol}:{timeframe}'
+        owner=(f'multi-ui:{symbol}:{timeframe}' if market=='multiasset' else f'{market}-ui:{symbol}:{timeframe}')
         heavy_acquired=False
         try:
             heavy_acquired=_acquire_heavy_analysis(owner,timeout=18)
