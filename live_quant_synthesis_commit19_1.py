@@ -169,6 +169,16 @@ def _market_features(capas: Mapping[str, Any], workers: Iterable[Mapping[str, An
     retest = any(x in struct_blob for x in ("RETEST", "PULLBACK", "RETROCESO")) or poi
     squeeze = bool(volatility.get("squeeze_on") or int(_f(volatility.get("squeeze_length"))) > 0)
 
+    multi_macro = dict(capas.get("multiasset_macro") or {})
+    multi_bank = dict(capas.get("multiasset_strategy_bank") or {})
+    macro_generic = dict(capas.get("macro_context") or {})
+    market_segment = _u(capas.get("market_segment"))
+    macro_risk = _u(
+        (multi_macro.get("risk_level") if market_segment == "MULTIASSET" else None)
+        or macro_generic.get("risk_level") or macro_generic.get("risk")
+    )
+    preferred_patterns = [_u(x) for x in list(multi_bank.get("preferred_for_context") or [])]
+
     return {
         "trend_direction": _direction(trend.get("direction")),
         "momentum_direction": _direction(momentum.get("direction")),
@@ -176,8 +186,12 @@ def _market_features(capas: Mapping[str, Any], workers: Iterable[Mapping[str, An
         "mtf_direction": _direction(mtf.get("dominant_direction")),
         "mtf_alignment": _u(mtf.get("alignment")),
         "mtf_conflict": bool(mtf.get("conflict")),
-        "macro_risk": _u((capas.get("macro_context") or {}).get("risk_level") or (capas.get("macro_context") or {}).get("risk")),
-        "regime": _u((op.get("context") or {}).get("regime") or (capas.get("market_regime") or {}).get("regime")),
+        "macro_risk": macro_risk,
+        "multiasset_macro_gate": _u(multi_macro.get("gate")),
+        "market_segment": market_segment,
+        "asset_class": _u(capas.get("asset_class")),
+        "preferred_patterns": preferred_patterns,
+        "regime": _u((op.get("context") or {}).get("regime") or multi_bank.get("regime") or (capas.get("market_regime") or {}).get("regime")),
         "volatility_state": _u((op.get("context") or {}).get("volatility") or volatility.get("ftm_state") or volatility.get("state")),
         "adx": adx, "rsi": rsi, "macd_hist": macd, "volume_ratio": ratio,
         "sweep": sweep, "mss": mss, "displacement": displacement, "poi": poi,
@@ -329,6 +343,8 @@ def synthesize_live_candidate(*, capas: Mapping[str, Any], vote_record: Mapping[
         return {"use": False, "reason": "HARD_MTF_CONFLICT", "version": VERSION}
     if market in {"FUTURES", "MULTIASSET"} and f.get("macro_risk") == "CRITICAL":
         return {"use": False, "reason": "CRITICAL_MACRO_RISK", "version": VERSION}
+    if market == "MULTIASSET" and f.get("multiasset_macro_gate") == "WAIT_EVENT":
+        return {"use": False, "reason": "MULTIASSET_IMMINENT_EVENT_WAIT", "version": VERSION}
 
     # Direction comes from independent DESKS, not headcount. SETUP + EXECUTION
     # are mandatory; CONTEXT can be supplied either by the context desk or by
@@ -365,8 +381,9 @@ def synthesize_live_candidate(*, capas: Mapping[str, Any], vote_record: Mapping[
             continue
         desk_strength = (setup + execution + min(1.0, context + 0.15)) / 3.0
         family_bonus = min(0.12, 0.025 * len(fams))
+        multi_context_bonus = 0.025 if (market == "MULTIASSET" and pattern in set(f.get("preferred_patterns") or [])) else 0.0
         control_penalty = min(0.12, max(0.0, control_opp - control_same) * 0.16)
-        score = 0.47 * desk_strength + 0.38 * pattern_score + family_bonus - control_penalty
+        score = 0.47 * desk_strength + 0.38 * pattern_score + family_bonus + multi_context_bonus - control_penalty
         candidate_rows.append({
             "direction": direction, "score": score, "setup": setup, "execution": execution,
             "context": context, "control_penalty": control_penalty, "families": fams,

@@ -101,13 +101,13 @@ def main():
     _check('memory_hard_guard_300mb', 'MEMORY_HARD_LIMIT_MB' in render and 'value: "300"' in render, checks)
     _check('options_provider_budget_12mb_day', 'OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB' in render and 'value: "12"' in render, checks)
     _check('multi_deep_limit_2', 'MULTIASSET_DEEP_LIMIT' in render and 'value: "2"' in render, checks)
-    _check('new_entrypoint_commit19_2', 'commit19_2_main_entrypoint:app' in proc and 'commit19_2_main_entrypoint:app' in render, checks)
+    _check('new_entrypoint_commit19_2', (('commit19_2_main_entrypoint:app' in proc and 'commit19_2_main_entrypoint:app' in render) or ('commit19_2_1_main_entrypoint:app' in proc and 'commit19_2_1_main_entrypoint:app' in render)), checks)
 
     # 10) Manual diagnostics show the exact Premium blocker instead of only a
     # generic explanation, so remaining analysis-only rows are auditable.
     _check('manual_lane_surfaces_exact_gate_reason', 'Motivo exacto:' in app and "_publication_gate.get('reasons')" in app, checks)
     _check('multi_lane_surfaces_exact_gate_reason', "_multi_gate.get('reasons')" in app and "_multi_gate_reasons" in app, checks)
-    _check('theoretical_greeks_marks_oi_metrics_na', "observed ? price(mm.zero_gamma_level) : 'N/A'" in js and "observed ? price(mm.gamma_wall) : 'N/A'" in js, checks)
+    _check('theoretical_greeks_marks_oi_metrics_na', "Call Wall (por OI)" in js and "Gamma Wall (por OI)" in js and "text('mm-call-wall', 'Requiere OI')" in js and "text('mm-gamma-wall', 'Requiere OI')" in js, checks)
 
     failed=[k for k,v in checks.items() if not v]
     print(f'\nSUMMARY {len(checks)-len(failed)}/{len(checks)} PASS')

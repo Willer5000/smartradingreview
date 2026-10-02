@@ -505,6 +505,37 @@ class MultiAssetAnalysis(FuturesAnalysis):
     def _market_data_source(self): return 'KUCOIN_FUTURES_PERPETUAL_REST'
     def _get_contract_risk_spec(self,symbol): return _contract_spec(symbol)
 
+    def _market_pre_analysis_context(self, symbol, timeframe, **layers):
+        """Commit 19.2.1: expose asset semantics before thesis formation.
+
+        This hook performs no new market-data request except the already cached
+        macro snapshot used by Multi.  It does not create direction or alter
+        Entry/SL/TP/Safety.  It lets the same nine specialists know whether they
+        are analysing an index, energy, metal or China contract *before* they
+        form their work products.
+        """
+        meta=MULTIASSET_SYMBOLS.get(str(symbol).upper().replace('/','-')) or {}
+        trend=dict(layers.get('trend') or {})
+        volatility=dict(layers.get('volatility') or {})
+        pseudo={
+            'trend': trend,
+            'volatility': volatility,
+            'atr_pct': _safe_float(volatility.get('atr_pct') or volatility.get('atr_percent')),
+            'levels': {'atr_pct': _safe_float(volatility.get('atr_pct') or volatility.get('atr_percent'))},
+        }
+        macro=_macro_context_for_asset(meta)
+        strategy=_strategy_context(meta,timeframe,pseudo)
+        return {
+            'market_segment':'MULTIASSET',
+            'is_multiasset':True,
+            'asset_class':meta.get('asset_class'),
+            'display_name':meta.get('name',symbol),
+            'multiasset_macro':macro,
+            'multiasset_strategy_bank':strategy,
+            'multiasset_session':strategy.get('session'),
+            'multiasset_pre_analysis_context':True,
+        }
+
     def _analyze_futures_microstructure(self, symbol: str, action: str) -> Dict:
         # Deliberately lightweight: Multi-Asset does not download orderbook +
         # trades + OI + funding on every candidate. Price/volume structure and

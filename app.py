@@ -17184,8 +17184,8 @@ class TradingExpertSystem:
                             and ((direction == 'long' and _s < _e < _t and _e <= current_price)
                                  or (direction == 'short' and _t < _e < _s and _e >= current_price))
                             and _rr_floor <= _rr <= _rr_ceiling
-                            and _qualities[0] >= 62.0
-                            and _qualities[1] >= 55.0
+                            and _qualities[0] >= (68.0 if is_futures else 62.0)
+                            and _qualities[1] >= (65.0 if is_futures else 55.0)
                             and _qualities[2] >= 60.0
                             and _qualities[3] >= 60.0
                         ):
@@ -18042,25 +18042,54 @@ class TradingExpertSystem:
                     f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
                 )
 
-            # 17.5.11R: a detected reaction collision can be reconstructed ONLY
-            # through an execution route that has positive chronological IS+OOS
-            # evidence. The 30m LIQUIDITY_SWEEP_MSS_POI challenger is the only
-            # current route meeting both expectancy and TP-vs-SL efficiency.
-            # A successful generic
-            # committee recovery at 2h/4h/Multi remains diagnostic and cannot
-            # silently replace a bad SL with an unvalidated live geometry.
+            # Commit 19.2.1 — reaction recovery is governed by the quality of
+            # the repaired geometry, not by an unrelated historical whitelist.
+            # Exact audited Champions keep their parity contract; native LIVE
+            # Quant Synthesis and Multi-Asset may repair an SL collision only if
+            # the recovered Entry/SL/TP already passes the unchanged technical
+            # gates (Entry>=65, SL>=60, TP>=60, geometry>=68, timing/setup/RR)
+            # AND the reaction collision is actually cleared.
             if is_futures and sl_reaction_guard.get('conflict'):
                 _reaction_recovery = _attempt_structural_recovery_17_5_9('SL_REACTION_CONFLICT', entry)
-                _validated_recovery = False
+                _obs_recovery = execution_observations if isinstance(execution_observations, dict) else {}
+                _op_recovery = dict((_obs_recovery or {}).get('operational_intelligence') or {})
+                _champion_recovery = dict(_op_recovery.get('commit19_champion') or {})
+                _synth_recovery = dict(_op_recovery.get('live_quant_synthesis') or {})
+                _is_exact_live_champion = bool(
+                    _champion_recovery.get('matched')
+                    and _champion_recovery.get('eligible_for_execution_routing')
+                    and str(_champion_recovery.get('authority') or '').upper() == 'LIVE_CHAMPION_COMMIT19'
+                )
+                _native_live_recovery = bool(
+                    execution_market_type == 'multiasset'
+                    or (
+                        _synth_recovery.get('authority') == 'LIVE_QUANT_SYNTHESIS_COMMIT19_1'
+                        and _synth_recovery.get('eligible_for_execution_routing')
+                    )
+                )
+                _recovery_authorized = False
                 if isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
-                    _entry_committee_17511r = _reaction_recovery.get('entry_committee') or {}
-                    _entry_scores_17511r = _entry_committee_17511r.get('scores') or {}
-                    try:
-                        _validated_recovery = float(_entry_scores_17511r.get('validated_liquidity_route') or 0.0) >= 60.0
-                    except Exception:
-                        _validated_recovery = False
+                    if _is_exact_live_champion:
+                        # Preserve the audited Champion contract: the legacy
+                        # validated-liquidity marker remains required for a
+                        # geometry mutation in an exact Champion cell.
+                        _entry_committee_17511r = _reaction_recovery.get('entry_committee') or {}
+                        _entry_scores_17511r = _entry_committee_17511r.get('scores') or {}
+                        try:
+                            _recovery_authorized = float(_entry_scores_17511r.get('validated_liquidity_route') or 0.0) >= 60.0
+                        except Exception:
+                            _recovery_authorized = False
+                    elif _native_live_recovery:
+                        try:
+                            _gq=float(_reaction_recovery.get('geometry_quality') or 0)
+                            _eq=float(_reaction_recovery.get('entry_quality') or 0)
+                            _sq=float(_reaction_recovery.get('sl_quality') or 0)
+                            _tq=float(_reaction_recovery.get('tp_quality') or 0)
+                            _recovery_authorized=bool(_gq>=68.0 and _eq>=65.0 and _sq>=60.0 and _tq>=60.0)
+                        except Exception:
+                            _recovery_authorized=False
 
-                if _validated_recovery:
+                if _recovery_authorized:
                     entry=float(_reaction_recovery['entry']); sl_price=float(_reaction_recovery['stop_loss']); tp_price=float(_reaction_recovery['take_profit'])
                     entry_quality.update(_refined_entry_metadata(entry))
                     entry_source='Zona técnica recuperada · '+str((_reaction_recovery.get('entry_committee') or {}).get('source') or entry_source)
@@ -18070,10 +18099,31 @@ class TradingExpertSystem:
                         sl_reaction_guard=evaluate_sl_reaction_conflict(structure=structure,direction=direction,entry=entry,stop_loss=sl_price,atr=atr)
                     except Exception:
                         sl_reaction_guard={'conflict':True,'reason':'SL_REACTION_GUARD_ERROR'}
+                    # A quality score never substitutes the semantic reaction
+                    # guard.  If the new stop still collides, it remains blocked.
+                    if sl_reaction_guard.get('conflict'):
+                        _recovery_authorized=False
+                    else:
+                        # Safety and the 19.2 runtime must consume quality scores
+                        # belonging to the repaired prices, never the rejected
+                        # pre-recovery geometry.
+                        entry_score=float(_reaction_recovery.get('entry_quality') or entry_score or 0)
+                        sl_score=float(_reaction_recovery.get('sl_quality') or sl_score or 0)
+                        tp_score=float(_reaction_recovery.get('tp_quality') or tp_score or 0)
+                        entry_quality['entry_quality_score']=round(entry_score,2)
+                        entry_quality['quality_source']='REACTION_RECOVERY_COMMIT19_2_1'
+                        execution_refinement['applied']=True
+                        execution_refinement['entry_quality']=round(entry_score,2)
+                        execution_refinement['sl_quality']=round(sl_score,2)
+                        execution_refinement['tp_quality']=round(tp_score,2)
+                        execution_refinement['geometry_quality']=round(float(_reaction_recovery.get('geometry_quality') or 0),2)
                     reward=abs(tp_price-entry); risk=abs(entry-sl_price); rr=reward/risk if risk>0 else 0
+                    execution_refinement['reaction_recovery_authority']=(
+                        'CHAMPION_PARITY' if _is_exact_live_champion else 'LIVE_NATIVE_QUALITY_CONTRACT'
+                    )
                 elif isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
                     execution_refinement['reaction_recovery_shadow'] = {
-                        'status': 'BACKTEST_AUTHORITY_MISSING',
+                        'status': 'QUALITY_OR_PARITY_AUTHORITY_NOT_MET',
                         'timeframe': str(timeframe),
                         'market_type': str(execution_market_type),
                         'geometry_quality': _reaction_recovery.get('geometry_quality'),
@@ -21098,6 +21148,26 @@ class TradingExpertSystem:
                 'ratio_analysis': paxg_btc_analysis,
                 'macro_context': macro_context_snapshot
             }
+
+            # Commit 19.2.1 — market semantics must exist BEFORE Operational
+            # Intelligence and the nine specialists reason.  Earlier Multi-Asset
+            # releases appended asset class / strategy bank / macro only in the
+            # post-analysis hook, after the decision had already been made as if
+            # CL, SPY, gold and China were generic crypto futures.
+            try:
+                _pre_market_hook = getattr(self, '_market_pre_analysis_context', None)
+                if callable(_pre_market_hook):
+                    _pre_market = _pre_market_hook(
+                        symbol=symbol, timeframe=timeframe,
+                        trend=trend, momentum=momentum, volatility=volatility,
+                        volume=volume, structure=structure,
+                        market_regime=market_regime,
+                        macro_context=macro_context_snapshot,
+                    ) or {}
+                    if isinstance(_pre_market, dict):
+                        capas.update(_pre_market)
+            except Exception as _pre_market_error:
+                capas['market_pre_context_error'] = type(_pre_market_error).__name__
 
             # ==========================================================
             # RC9.2 — THESIS-FIRST OPERATIONAL INTELLIGENCE
@@ -35269,6 +35339,73 @@ _MULTI_PENDING_QUEUE = []
 _MULTI_PENDING_KEYS = set()
 _MULTI_PENDING_EXPIRED = 0
 _MULTI_PENDING_RESOURCE_DEFERRALS = 0
+# Commit 19.2.1 — the public Multi signal lanes are cache-backed. Gunicorn
+# max-request recycling previously erased that cache and could leave all three
+# UI sections at zero until another narrow close window happened.  Keep a tiny
+# process-local snapshot on ephemeral disk; no Supabase/network egress is used.
+_MULTI_LOCAL_SNAPSHOT_PATH = os.environ.get(
+    'MULTIASSET_LOCAL_SNAPSHOT_PATH',
+    '/tmp/smartradingreview_multi_cache_19_2_1.json'
+)
+_MULTI_LOCAL_SNAPSHOT_LOADED = False
+
+def _multiasset_restore_local_snapshot_once():
+    global _MULTI_LOCAL_SNAPSHOT_LOADED
+    if _MULTI_LOCAL_SNAPSHOT_LOADED:
+        return 0
+    _MULTI_LOCAL_SNAPSHOT_LOADED = True
+    try:
+        if not os.path.exists(_MULTI_LOCAL_SNAPSHOT_PATH):
+            return 0
+        if os.path.getsize(_MULTI_LOCAL_SNAPSHOT_PATH) > 2 * 1024 * 1024:
+            return 0
+        with open(_MULTI_LOCAL_SNAPSHOT_PATH, 'r', encoding='utf-8') as fh:
+            payload=json.load(fh) or {}
+        rows=list(payload.get('rows') or [])[:24]
+        restored=0
+        now=time.time()
+        with _MULTI_ASSET_CACHE['lock']:
+            for row in rows:
+                if not isinstance(row,dict):
+                    continue
+                symbol=str(row.get('symbol') or '').upper().replace('/','-')
+                tf=str(row.get('timeframe') or '')
+                result=row.get('result') or {}
+                if not symbol or not tf or not isinstance(result,dict):
+                    continue
+                stored_at=float((result or {}).get('_multi_cache_stored_at') or row.get('stored_at') or 0)
+                # Snapshot exists to survive worker recycle, not resurrect old
+                # market states after many hours/day changes.
+                if stored_at <= 0 or now-stored_at > 8*3600:
+                    continue
+                _MULTI_ASSET_CACHE['analysis'][(symbol,tf)]=result
+                restored+=1
+            if restored:
+                _MULTI_ASSET_CACHE['updated_at']=now
+        return restored
+    except Exception:
+        return 0
+
+def _multiasset_save_local_snapshot():
+    try:
+        with _MULTI_ASSET_CACHE['lock']:
+            items=list((_MULTI_ASSET_CACHE.get('analysis') or {}).items())[-24:]
+        now=time.time()
+        rows=[]
+        for (symbol,tf),result in items:
+            stored_at=float((result or {}).get('_multi_cache_stored_at') or now) if isinstance(result,dict) else now
+            rows.append({'symbol':symbol,'timeframe':tf,'stored_at':stored_at,'result':result})
+        tmp=_MULTI_LOCAL_SNAPSHOT_PATH+'.tmp'
+        with open(tmp,'w',encoding='utf-8') as fh:
+            json.dump({'version':'19.2.1','rows':rows},fh,ensure_ascii=False,separators=(',',':'),default=str)
+        if os.path.getsize(tmp) <= 2*1024*1024:
+            os.replace(tmp,_MULTI_LOCAL_SNAPSHOT_PATH)
+        else:
+            try: os.remove(tmp)
+            except OSError: pass
+        return True
+    except Exception:
+        return False
 
 def _get_multiasset_system():
     try:
@@ -35297,12 +35434,14 @@ def _multiasset_cache_result(symbol, timeframe, result):
         for key in ('display_name','asset_class','multiasset_macro','multiasset_specialist','multiasset_strategy_bank'):
             if key in result:
                 compact[key] = result.get(key)
+        compact['_multi_cache_stored_at']=time.time()
         _MULTI_ASSET_CACHE['analysis'][(str(symbol), str(timeframe))] = compact
         _MULTI_ASSET_CACHE['updated_at'] = time.time()
         if len(_MULTI_ASSET_CACHE['analysis']) > 24:
             keys = list(_MULTI_ASSET_CACHE['analysis'].keys())
             for old in keys[:-24]:
                 _MULTI_ASSET_CACHE['analysis'].pop(old, None)
+    _multiasset_save_local_snapshot()
     return True
 
 def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
@@ -36019,10 +36158,73 @@ def _multiasset_bucket(symbol, tf, now):
     return f"{symbol}|{tf}|{now.strftime('%Y-%m-%d')}|{now.hour // divisor}"
 
 
+def _multiasset_source_bucket(symbol, tf, source_timestamp):
+    raw=str(source_timestamp or '').strip()
+    return f"{str(symbol)}|{str(tf)}|SRC|{raw}" if raw else ''
+
+
+def _multiasset_parse_source_close(source_timestamp, tf, fallback_now):
+    try:
+        raw=str(source_timestamp or '').replace('Z','+00:00')
+        dt=datetime.fromisoformat(raw)
+        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
+        # Router timestamp is candle open; convert it to represented close.
+        seconds={'1h':3600,'4h':4*3600,'1D':24*3600}.get(str(tf),3600)
+        return dt.astimezone(timezone.utc)+timedelta(seconds=seconds)
+    except Exception:
+        return fallback_now.astimezone(timezone.utc)
+
+
+def _multiasset_cached_source_matches(symbol, tf, source_timestamp):
+    with _MULTI_ASSET_CACHE['lock']:
+        row=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((str(symbol),str(tf))) or {})
+    if not row: return False
+    candidates=(row.get('source_candle_timestamp'),row.get('source_candle_close_timestamp'),row.get('scheduler_source_candle_timestamp'))
+    target=str(source_timestamp or '')
+    return bool(target and any(str(x or '')==target for x in candidates))
+
+
+def _multiasset_enqueue_router_rows(rows, tf, now, limit=1):
+    """Queue latest CLOSED source candles, independent of wall-clock grace windows."""
+    chosen=[]
+    for row in list(rows or []):
+        if not isinstance(row,dict): continue
+        symbol=str(row.get('symbol') or '')
+        source=row.get('source_candle_timestamp')
+        bucket=_multiasset_source_bucket(symbol,tf,source)
+        if not symbol or not bucket or _multiasset_cached_source_matches(symbol,tf,source):
+            continue
+        chosen.append(row)
+        if len(chosen)>=max(1,int(limit or 1)): break
+    now_ts=time.time()
+    with _MULTI_AUTO_LOCK:
+        for row in chosen:
+            symbol=str(row.get('symbol') or '')
+            source=row.get('source_candle_timestamp')
+            bucket=_multiasset_source_bucket(symbol,tf,source)
+            if bucket in _MULTI_AUTO_DONE or bucket in _MULTI_PENDING_KEYS:
+                continue
+            close_dt=_multiasset_parse_source_close(source,tf,now)
+            expires_at=close_dt.timestamp()+_multiasset_queue_ttl_seconds(tf)
+            if expires_at <= now_ts:
+                continue
+            _MULTI_PENDING_QUEUE.append({
+                'bucket':bucket,'symbol':symbol,'timeframe':str(tf),
+                'enqueued_at':now_ts,'source_candle_timestamp':source,
+                'source_close_at':close_dt.timestamp(),'expires_at':expires_at,
+                'router_score':float(row.get('router_score') or 0),
+            })
+            _MULTI_PENDING_KEYS.add(bucket)
+    return len(chosen)
+
+
 def _multiasset_queue_ttl_seconds(tf):
     # Mirrors the confirmation anti-backfill windows; no historical candidate is
     # promoted after its opportunity window has gone stale.
-    return {'1h':45*60, '4h':2*60*60, '1D':6*60*60}.get(str(tf), 60*60)
+    # Queue freshness is a scheduling concept, not a publication-quality
+    # relaxation.  Keep only the latest closed candle, but give catch-up enough
+    # time to survive deploy/worker recycling outside the old 10–15 minute window.
+    return {'1h':55*60, '4h':3*60*60+30*60, '1D':12*60*60}.get(str(tf), 60*60)
 
 
 def _multiasset_enqueue_due(due, now):
@@ -36130,32 +36332,38 @@ def _multiasset_resource_backpressure(now, now_mono):
 
 def _multiasset_background_tick():
     global _MULTI_PENDING_RESOURCE_DEFERRALS
-    """17.5.10.1 fair coverage scheduler, still Free-runtime bounded.
+    """Commit 19.2.1 closed-candle coverage scheduler.
 
-    All seven assets may enter the queue. Router score orders work; it no longer
-    decides whether a cell deserves deep analysis. One heavy cell maximum per
-    tick, one shared heavy slot, RAM/network backpressure, no new thread/LLM.
+    Root-cause fix:
+    * work is keyed to the latest CLOSED candle, not a narrow wall-clock window;
+    * router score prioritizes candidates but never decides signal quality;
+    * 4h and 1h share the existing 12/day heavy-analysis ceiling in a paced
+      6+6 cadence; 1D keeps the existing small context allowance;
+    * one heavy job maximum per tick and the 48 MB/day observed network guard
+      remain authoritative;
+    * a compact local snapshot survives Gunicorn worker recycling.
     """
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
+        _multiasset_restore_local_snapshot_once()
         now=datetime.now(timezone.utc); now_mono=time.monotonic()
         with _MULTI_AUTO_LOCK:
             today=now.strftime('%Y-%m-%d')
             if _MULTI_AUTO_DAILY.get('day') != today:
                 _MULTI_AUTO_DAILY.update({'day':today,'count':0,'context_count':0,'fast_count':0})
                 _MULTI_AUTO_DONE.clear(); _MULTI_DEEP_RETRY.clear(); _MULTI_CLOSE_REFRESHED.clear()
-        plan=_multiasset_close_plan(now)
 
-        # 4h principal lane: cheap scanner remains cached, but ALL seven rows are
-        # eligible for the fair queue in router-score order.
-        force_4h=plan['4h']['due'] and not _multiasset_close_refresh_done(plan['4h']['key'])
+        # 4H principal lane. Scanner itself is cheap and cached. One best latest
+        # closed cell per 4h source candle => <=6 deep jobs/day.
         with _MULTI_ROUTER_STATE_LOCK:
             cached_rows=list(_MULTI_ROUTER_STATE.get('rows') or [])
             next_scan=float(_MULTI_ROUTER_STATE.get('next_scan_at') or 0.0)
-        if force_4h:
+        cycle4=f"4h|{now.strftime('%Y-%m-%d')}|{now.hour//4}"
+        force4=not _multiasset_close_refresh_done(cycle4)
+        if force4:
             rows_4h=_multiasset_scan('4h',force=True)
-            if rows_4h: _multiasset_mark_close_refresh(plan['4h']['key'])
+            if rows_4h: _multiasset_mark_close_refresh(cycle4)
         elif cached_rows and now_mono < next_scan:
             rows_4h=cached_rows
         else:
@@ -36165,83 +36373,81 @@ def _multiasset_background_tick():
             interval=900 if top_score >= 72.0 else 1800
             with _MULTI_ROUTER_STATE_LOCK:
                 _MULTI_ROUTER_STATE.update({'rows':list(rows_4h),'last_scan_at':now_mono,'next_scan_at':now_mono+interval,'interval_seconds':interval})
+            _multiasset_enqueue_router_rows(rows_4h,'4h',now,limit=1)
 
-        due=[]
-        # Rare 1D context first, then principal 4h, then 1h Fast Lane. Within
-        # each lane scan_opportunities is already sorted by router score.
-        if plan['1D']['due']:
-            force=not _multiasset_close_refresh_done(plan['1D']['key'])
-            rows_1d=_multiasset_scan('1D',force=force)
-            if rows_1d: _multiasset_mark_close_refresh(plan['1D']['key'])
-            due.extend((r['symbol'],'1D') for r in rows_1d)
-        if plan['1h']['due']:
-            force=not _multiasset_close_refresh_done(plan['1h']['key'])
-            rows_1h=_multiasset_scan('1h',force=force)
-            if rows_1h: _multiasset_mark_close_refresh(plan['1h']['key'])
-            # Fast qualified cells get queue priority because their opportunity
-            # window is shortest; this changes scheduling, never signal gates.
-            due.extend((r['symbol'],'1h') for r in rows_1h if float((r or {}).get('router_score') or 0) >= _MULTI_FAST_LANE_MIN_SCORE)
-        if plan['4h']['due']:
-            due.extend((r['symbol'],'4h') for r in rows_4h)
+        # 1H frequency lane: one highest-priority latest closed cell per 4-hour
+        # scheduler cycle. This removes the old router_score>=82 eligibility
+        # cliff without increasing the 12/day heavy-analysis budget.
+        cycle1=f"1h-cadence|{now.strftime('%Y-%m-%d')}|{now.hour//4}"
+        if not _multiasset_close_refresh_done(cycle1):
+            rows_1h=_multiasset_scan('1h',force=True)
+            if rows_1h:
+                _multiasset_mark_close_refresh(cycle1)
+                _multiasset_enqueue_router_rows(rows_1h,'1h',now,limit=1)
 
-        due=list(dict.fromkeys(due))
-        _multiasset_enqueue_due(due, now)
+        # 1D context: at most two latest cells/day, same pre-existing extra cap.
+        cycle1d=f"1D|{now.strftime('%Y-%m-%d')}"
+        if not _multiasset_close_refresh_done(cycle1d):
+            rows_1d=_multiasset_scan('1D',force=True)
+            if rows_1d:
+                _multiasset_mark_close_refresh(cycle1d)
+                _multiasset_enqueue_router_rows(rows_1d,'1D',now,limit=_MULTI_DAILY_CONTEXT_EXTRA_MAX)
+
         _multiasset_prune_pending(time.time())
-
         pressure=(globals().get('_multiasset_resource_backpressure') or (lambda *_: {'blocked':False,'reason':'UNAVAILABLE'}))(now, now_mono)
         if pressure.get('blocked'):
             with _MULTI_AUTO_LOCK:
                 _MULTI_PENDING_RESOURCE_DEFERRALS += 1
-                if '_MULTI_RESOURCE_DAY' in globals(): _MULTI_RESOURCE_DAY['last_reason'] = pressure.get('reason')
+                if '_MULTI_RESOURCE_DAY' in globals(): _MULTI_RESOURCE_DAY['last_reason']=pressure.get('reason')
             return
 
         with _MULTI_AUTO_LOCK:
             pending=[dict(x) for x in _MULTI_PENDING_QUEUE]
+        # Expiring first, then higher router score. This preserves freshness and
+        # avoids the same asset monopolising the queue after a delayed worker.
+        pending.sort(key=lambda x:(float(x.get('expires_at') or 0),-float(x.get('router_score') or 0)))
         for item in pending:
-            symbol=str(item.get('symbol') or '')
-            tf=str(item.get('timeframe') or '')
-            bucket=str(item.get('bucket') or '')
-            if not bucket or not _multiasset_retry_ready(bucket,now_mono):
-                continue
+            symbol=str(item.get('symbol') or ''); tf=str(item.get('timeframe') or ''); bucket=str(item.get('bucket') or '')
+            if not bucket or not _multiasset_retry_ready(bucket,now_mono): continue
             try:
                 from multiasset_system import MULTIASSET_AUTO_DEEP_DAILY_MAX
                 daily_max=int(MULTIASSET_AUTO_DEEP_DAILY_MAX)
             except Exception:
                 daily_max=12
             with _MULTI_AUTO_LOCK:
-                used=int(_MULTI_AUTO_DAILY.get('count') or 0)
-                context_used=int(_MULTI_AUTO_DAILY.get('context_count') or 0)
-            if tf == '1D':
-                if context_used >= int(_MULTI_DAILY_CONTEXT_EXTRA_MAX):
-                    _MULTI_PENDING_RESOURCE_DEFERRALS += 1
-                    continue
-            elif used >= daily_max:
-                _MULTI_PENDING_RESOURCE_DEFERRALS += 1
-                continue
+                used=int(_MULTI_AUTO_DAILY.get('count') or 0); context_used=int(_MULTI_AUTO_DAILY.get('context_count') or 0)
+            if tf=='1D':
+                if context_used>=int(_MULTI_DAILY_CONTEXT_EXTRA_MAX):
+                    _MULTI_PENDING_RESOURCE_DEFERRALS += 1; continue
+            elif used>=daily_max:
+                _MULTI_PENDING_RESOURCE_DEFERRALS += 1; continue
+
             result=_multiasset_run_analysis(symbol,tf,owner=f'multi-background:{symbol}:{tf}')
-            if result.get('busy'):
-                return
+            if result.get('busy'): return
             if not result.get('success',False):
-                _multiasset_record_retry(bucket,result.get('error'))
-                return
+                _multiasset_record_retry(bucket,result.get('error')); return
+            # Stamp scheduler source so cache coverage is deterministic even if
+            # provider/result timestamp naming changes between engine layers.
+            source=item.get('source_candle_timestamp')
+            if source and isinstance(result,dict):
+                result['scheduler_source_candle_timestamp']=source
+                result.setdefault('source_candle_timestamp',source)
+                _multiasset_cache_result(symbol,tf,result)
             with _MULTI_AUTO_LOCK:
                 _MULTI_AUTO_DONE.add(bucket); _MULTI_DEEP_RETRY.pop(bucket,None)
                 if '_MULTI_RESOURCE_DAY' in globals():
                     _MULTI_RESOURCE_DAY['last_deep_at']=time.monotonic(); _MULTI_RESOURCE_DAY['last_reason']='OK'
-                if tf=='1D':
-                    _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
+                if tf=='1D': _MULTI_AUTO_DAILY['context_count']=int(_MULTI_AUTO_DAILY.get('context_count') or 0)+1
                 else:
                     _MULTI_AUTO_DAILY['count']=int(_MULTI_AUTO_DAILY.get('count') or 0)+1
-                    if tf=='1h':
-                        _MULTI_AUTO_DAILY['fast_count']=int(_MULTI_AUTO_DAILY.get('fast_count') or 0)+1
+                    if tf=='1h': _MULTI_AUTO_DAILY['fast_count']=int(_MULTI_AUTO_DAILY.get('fast_count') or 0)+1
                 if len(_MULTI_AUTO_DONE)>160:
                     for old in list(_MULTI_AUTO_DONE)[:60]: _MULTI_AUTO_DONE.discard(old)
             _multiasset_pop_completed_pending(bucket)
-            if _multiasset_is_executable(result):
-                _multiasset_compact_telegram(result)
+            if _multiasset_is_executable(result): _multiasset_compact_telegram(result)
             return
     except Exception as exc:
-        print(f"⚠️ Multi-Activo background tick: {str(exc)[:160]}")
+        print(f"⚠️ Multi-Activo background tick 19.2.1: {str(exc)[:160]}")
 
 
 def _get_review_trader():
@@ -36486,6 +36692,7 @@ def api_multiasset_universe():
 @app.route('/api/multiasset/opportunities', methods=['GET'])
 def api_multiasset_opportunities():
     try:
+        _multiasset_restore_local_snapshot_once()
         from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
         tf=str(request.args.get('timeframe') or '4h')
         rows=scan_opportunities(tf, force=False)
@@ -36587,6 +36794,7 @@ api_multiasset_analyze._st17511_integrated_nonblocking_multi_ui = True
 @app.route('/api/multiasset/signals/previous', methods=['GET'])
 def api_multiasset_signals_previous():
     try:
+        _multiasset_restore_local_snapshot_once()
         min_conf=float(request.args.get('min_confidence',55) or 55)
         with _MULTI_ASSET_CACHE['lock']:
             analyses=dict(_MULTI_ASSET_CACHE['analysis'])
@@ -36611,6 +36819,7 @@ def api_multiasset_signals_active():
     # confirmations remain visible only while their original technical window
     # is still open; saved/entered positions continue in Guardian.
     try:
+        _multiasset_restore_local_snapshot_once()
         min_conf=float(request.args.get('min_confidence',55) or 55)
         with _MULTI_ASSET_CACHE['lock']:
             analyses=dict(_MULTI_ASSET_CACHE.get('analysis') or {})
@@ -36683,6 +36892,7 @@ def api_futures_market_maker_context():
                 pass
     elif market == 'multiasset':
         try:
+            _multiasset_restore_local_snapshot_once()
             with _MULTI_ASSET_CACHE['lock']:
                 _multi = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
             result = dict(_multi.get((symbol, timeframe)) or {})

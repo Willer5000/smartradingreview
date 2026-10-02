@@ -558,6 +558,17 @@ def theoretical_gamma_shape(
             "theta_per_day": round(atm_put["theta_per_day"], 6),
         },
     }
+    # Commit 19.2.1 — theoretical Greeks are real Black-Scholes sensitivities
+    # even when observed option OI is unavailable.  What remains unavailable is
+    # dealer positioning (walls, zero-gamma, delta-neutral by OI, signed GEX).
+    # Keeping those concepts separate prevents a synthetic options surface from
+    # pretending to know market-maker inventory.
+    theoretical_atm_gamma = float(atm_call["gamma"] + atm_put["gamma"])
+    theoretical_atm_delta_net = float(atm_call["delta"] + atm_put["delta"])
+    theoretical_atm_vega = float(atm_call["vega"] + atm_put["vega"])
+    theoretical_atm_theta = float(atm_call["theta_per_day"] + atm_put["theta_per_day"])
+    theoretical_gamma_peak_level = float(max(gex_curve, key=lambda row: row[1])[0]) if gex_curve else s
+    theoretical_delta_neutral_level = float(min(delta_curve, key=lambda row: abs(row[1]))[0]) if delta_curve else s
     return {
         "version": VERSION, "available": True,
         "authority": "SHADOW_THEORETICAL_ONLY",
@@ -572,8 +583,16 @@ def theoretical_gamma_shape(
         "gamma_wall": None, "call_wall": None, "put_wall": None,
         "zero_gamma_level": None, "delta_neutral_level": None,
         "representative_atm_greeks": representative,
-        "aggregate_vega_per_iv_point": None,
-        "aggregate_theta_per_day": None,
+        "theoretical_greeks_available": True,
+        "oi_dependent_levels_available": False,
+        "theoretical_atm_gamma": round(theoretical_atm_gamma, 10),
+        "theoretical_atm_delta_net": round(theoretical_atm_delta_net, 6),
+        "theoretical_atm_vega_per_iv_point": round(theoretical_atm_vega, 6),
+        "theoretical_atm_theta_per_day": round(theoretical_atm_theta, 6),
+        "theoretical_gamma_peak_level": round(theoretical_gamma_peak_level, 10),
+        "theoretical_delta_neutral_level": round(theoretical_delta_neutral_level, 10),
+        "aggregate_vega_per_iv_point": round(theoretical_atm_vega, 6),
+        "aggregate_theta_per_day": round(theoretical_atm_theta, 6),
         "heuristic_signed_delta_dollars": None,
         "heuristic_signed_gamma_exposure": None,
         "zero_dte_gamma_share": 0.0,

@@ -75,9 +75,10 @@
         if (!row || typeof row !== 'object') return '--';
         const d = finite(row.delta);
         const g = finite(row.gamma);
+        const v = finite(row.vega);
         const t = finite(row.theta_per_day);
-        if (d === null && g === null && t === null) return '--';
-        return `Δ ${d === null ? '--' : d.toFixed(3)} · Γ ${g === null ? '--' : g.toExponential(2)} · Θ ${t === null ? '--' : t.toFixed(3)}`;
+        if (d === null && g === null && v === null && t === null) return '--';
+        return `Δ ${d === null ? '--' : d.toFixed(3)} · Γ ${g === null ? '--' : g.toExponential(2)} · V ${v === null ? '--' : v.toFixed(3)} · Θ ${t === null ? '--' : t.toFixed(3)}`;
     }
 
     function normalPdf(x) {
@@ -198,14 +199,17 @@
             const commonTheta = -(px * normalPdf(d1) * vol) / (2 * sqrtT) / 365;
             const callTheta = commonTheta;
             const putTheta = commonTheta;
+            const vega = px * normalPdf(d1) * sqrtT / 100.0;
             gex.push([px, (gamma + gamma) * px * px * 0.01]);
             delta.push([px, callDelta + putDelta]);
             theta.push([px, callTheta + putTheta]);
             if (i === 20) {
-                atmCall = {delta: callDelta, gamma, theta_per_day: callTheta};
-                atmPut = {delta: putDelta, gamma, theta_per_day: putTheta};
+                atmCall = {delta: callDelta, gamma, vega, theta_per_day: callTheta};
+                atmPut = {delta: putDelta, gamma, vega, theta_per_day: putTheta};
             }
         }
+        const gammaPeak = gex.reduce((best, row) => (!best || row[1] > best[1]) ? row : best, null);
+        const deltaNeutral = delta.reduce((best, row) => (!best || Math.abs(row[1]) < Math.abs(best[1])) ? row : best, null);
         return {
             available: true,
             authority: 'SHADOW_THEORETICAL_UI_LOCAL',
@@ -222,14 +226,28 @@
             put_wall: null,
             heuristic_signed_delta_dollars: null,
             heuristic_signed_gamma_exposure: null,
-            aggregate_vega_per_iv_point: null,
-            aggregate_theta_per_day: null,
+            theoretical_greeks_available: true,
+            oi_dependent_levels_available: false,
+            theoretical_atm_delta_net: (atmCall?.delta ?? 0) + (atmPut?.delta ?? 0),
+            theoretical_atm_gamma: (atmCall?.gamma ?? 0) + (atmPut?.gamma ?? 0),
+            theoretical_atm_vega_per_iv_point: (atmCall?.vega ?? 0) + (atmPut?.vega ?? 0),
+            theoretical_atm_theta_per_day: (atmCall?.theta_per_day ?? 0) + (atmPut?.theta_per_day ?? 0),
+            theoretical_gamma_peak_level: gammaPeak?.[0] ?? s,
+            theoretical_delta_neutral_level: deltaNeutral?.[0] ?? s,
+            aggregate_vega_per_iv_point: (atmCall?.vega ?? 0) + (atmPut?.vega ?? 0),
+            aggregate_theta_per_day: (atmCall?.theta_per_day ?? 0) + (atmPut?.theta_per_day ?? 0),
             representative_atm_greeks: {call: atmCall, put: atmPut},
             gex_curve: gex,
             delta_curve: delta,
             theta_curve: theta,
             local_ui_fallback: true,
         };
+    }
+
+    function metricLabel(id, value) {
+        const el = $(id);
+        const label = el?.parentElement?.querySelector('small.text-muted');
+        if (label && value) label.textContent = value;
     }
 
     function styleHeader(observed) {
@@ -330,16 +348,46 @@
 
         text('mm-option-source', observed ? 'Cadena observada' : 'Black-Scholes teórico');
         text('mm-gamma-regime', regime(mm.gamma_regime));
-        text('mm-zero-dte-share', observed ? pct01(mm.zero_dte_gamma_share) : 'N/A');
-        text('mm-zero-gamma', observed ? price(mm.zero_gamma_level) : 'N/A');
-        text('mm-delta-neutral', observed ? price(mm.delta_neutral_level) : 'N/A');
-        text('mm-call-wall', observed ? price(mm.call_wall) : 'N/A');
-        text('mm-gamma-wall', observed ? price(mm.gamma_wall) : 'N/A');
-        text('mm-put-wall', observed ? price(mm.put_wall) : 'N/A');
-        text('mm-delta-dollar', observed ? compact(mm.heuristic_signed_delta_dollars) : 'N/A');
-        text('mm-gex-total', observed ? compact(mm.heuristic_signed_gamma_exposure) : 'N/A');
-        text('mm-vega', compact(mm.aggregate_vega_per_iv_point));
-        text('mm-theta', compact(mm.aggregate_theta_per_day));
+        if (observed) {
+            metricLabel('mm-zero-dte-share', 'Gamma ≤24h');
+            metricLabel('mm-zero-gamma', 'Nivel Zero-Gamma');
+            metricLabel('mm-delta-neutral', 'Delta-Neutral aprox.');
+            metricLabel('mm-delta-dollar', 'Delta $ (heur.)');
+            metricLabel('mm-gex-total', 'Gamma Exposure');
+            metricLabel('mm-call-wall', 'Call Wall');
+            metricLabel('mm-gamma-wall', 'Gamma Wall');
+            metricLabel('mm-put-wall', 'Put Wall');
+            text('mm-zero-dte-share', pct01(mm.zero_dte_gamma_share));
+            text('mm-zero-gamma', price(mm.zero_gamma_level));
+            text('mm-delta-neutral', price(mm.delta_neutral_level));
+            text('mm-call-wall', price(mm.call_wall));
+            text('mm-gamma-wall', price(mm.gamma_wall));
+            text('mm-put-wall', price(mm.put_wall));
+            text('mm-delta-dollar', compact(mm.heuristic_signed_delta_dollars));
+            text('mm-gex-total', compact(mm.heuristic_signed_gamma_exposure));
+        } else {
+            // Theoretical mode exposes actual Black-Scholes sensitivities for
+            // every supported Spot/Futures/Multi asset, while explicitly not
+            // fabricating OI-derived dealer walls.
+            metricLabel('mm-zero-dte-share', 'Gamma ATM teórica');
+            metricLabel('mm-zero-gamma', 'Pico Gamma teórico');
+            metricLabel('mm-delta-neutral', 'Delta-Neutral teórico');
+            metricLabel('mm-delta-dollar', 'Delta neta ATM teórica');
+            metricLabel('mm-gex-total', 'Gamma ATM Call+Put');
+            metricLabel('mm-call-wall', 'Call Wall (por OI)');
+            metricLabel('mm-gamma-wall', 'Gamma Wall (por OI)');
+            metricLabel('mm-put-wall', 'Put Wall (por OI)');
+            text('mm-zero-dte-share', compact(mm.theoretical_atm_gamma));
+            text('mm-zero-gamma', price(mm.theoretical_gamma_peak_level));
+            text('mm-delta-neutral', price(mm.theoretical_delta_neutral_level));
+            text('mm-call-wall', 'Requiere OI');
+            text('mm-gamma-wall', 'Requiere OI');
+            text('mm-put-wall', 'Requiere OI');
+            text('mm-delta-dollar', compact(mm.theoretical_atm_delta_net));
+            text('mm-gex-total', compact(mm.theoretical_atm_gamma));
+        }
+        text('mm-vega', compact(mm.aggregate_vega_per_iv_point ?? mm.theoretical_atm_vega_per_iv_point));
+        text('mm-theta', compact(mm.aggregate_theta_per_day ?? mm.theoretical_atm_theta_per_day));
 
         const atm = mm.representative_atm_greeks || {};
         text('mm-atm-call', greekSummary(atm.call));

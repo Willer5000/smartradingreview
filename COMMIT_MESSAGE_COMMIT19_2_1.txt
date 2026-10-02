@@ -1,0 +1,7 @@
+Commit 19.2.1 — Root Cause Quality Recovery
+
+- pre-decision Multi asset-class context for the nine specialists
+- closed-candle catch-up scheduler + bounded local snapshot
+- native structural recovery governed by actual quality, Champions preserved
+- all-market theoretical Delta/Gamma/Vega/Theta without fake OI walls
+- preserve Premium gates, 1 worker/2 threads, RAM and bandwidth budgets
