@@ -257,7 +257,7 @@
         if (id === 'order-flow' && window.IS_FUTURES_PAGE) return true;
         if (ALWAYS.has(id)) return true;
         if (state.hidden.has(id) && !state.pinned.has(id) && !state.manual.has(id)) return false;
-        if (id === 'market-maker-options' && window.IS_FUTURES_PAGE) return true;
+        if (id === 'market-maker-options') return true;
         return state.pinned.has(id) || state.manual.has(id) || autoEvidence.includes(id);
     }
 

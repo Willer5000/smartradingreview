@@ -1,0 +1,19 @@
+PASS: registry has 6 exact audited routes
+PASS: only 3 routes are profitable in train+selection+OOS and receive routing authority
+PASS: three routes remain shadow-only after train/OOS audit
+PASS: ADA 2H stays shadow because IS/train was not profitable
+PASS: wrong regime cannot activate ETH trend route
+PASS: alpha-decay/recycle blocks validated route
+PASS: positive ADA 4H squeeze is still shadow-only
+PASS: validated route is not vetoed merely by LOW volatility when research spec was ANY
+PASS: unknown cell remains research gap, no family is fabricated
+PASS: RSI_TREND maps to momentum-continuation geometry
+PASS: RSI Maverick reversal maps to mean-reversion geometry
+PASS: Bollinger squeeze maps to compression/expansion geometry
+PASS: Supertrend pullback maps to pullback geometry
+PASS: operational routing prefers exact validated local family over group prior
+PASS: contingency aligns setup family only when route action matches live action
+PASS: 30m backtested liquidity entry route from 17.5.11R is preserved
+PASS: validated exact route may softly align preferred RR without changing technical floor
+PASS: backtest prior remains non-authoritative in execution consensus
+R1 QA: 18/18 PASS

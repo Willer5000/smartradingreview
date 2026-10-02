@@ -9,6 +9,7 @@ Futures analysis.
 """
 from __future__ import annotations
 
+import json
 import os
 import threading
 import time
@@ -20,11 +21,11 @@ try:
 except Exception:  # pragma: no cover
     requests = None
 
-VERSION = "COMMIT17_5_11R_OPTIONS_CONTEXT_QA_V3"
+VERSION = "COMMIT19_1_OPTIONS_BANDWIDTH_GUARD_V1"
 DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
 CACHE_TTL = max(
     900,
-    min(7200, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "3600") or 3600)),
+    min(21600, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "7200") or 7200)),
 )
 ENABLED = str(os.getenv("OPTIONS_MM_CONTEXT_ENABLED", "1")).strip().lower() not in {
     "0", "false", "no", "off"
@@ -37,11 +38,41 @@ MAX_NORMALIZED_ROWS = max(
     80,
     min(320, int(os.getenv("OPTIONS_MM_MAX_CHAIN_ROWS", "220") or 220)),
 )
-MAX_RESPONSE_BYTES = max(262144, min(4194304, int(os.getenv("OPTIONS_MM_MAX_RESPONSE_BYTES", "1572864") or 1572864)))
+MAX_RESPONSE_BYTES = max(262144, min(2097152, int(os.getenv("OPTIONS_MM_MAX_RESPONSE_BYTES", "1572864") or 1572864)))
+# Added provider egress is bounded independently from the main service budget.
+# 12 MB/day ~= 360 MB/month worst-case additional service-initiated traffic.
+DAILY_PROVIDER_BUDGET_BYTES = max(2 * 1024 * 1024, min(32 * 1024 * 1024, int(float(os.getenv("OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB", "12") or 12) * 1024 * 1024)))
 
 _LOCK = threading.Lock()
 _CACHE: Dict[str, Dict[str, Any]] = {}
 _INFLIGHT = set()
+_DAILY_NETWORK = {"day": None, "bytes": 0}
+
+
+def _network_budget_state(now: Optional[datetime] = None) -> Dict[str, Any]:
+    now = now or datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+    with _LOCK:
+        if _DAILY_NETWORK.get("day") != day:
+            _DAILY_NETWORK["day"] = day
+            _DAILY_NETWORK["bytes"] = 0
+        return {
+            "day": day,
+            "bytes": int(_DAILY_NETWORK.get("bytes") or 0),
+            "budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
+        }
+
+
+def _record_network_bytes(count: int, now: Optional[datetime] = None) -> None:
+    if count <= 0:
+        return
+    now = now or datetime.now(timezone.utc)
+    day = now.strftime("%Y-%m-%d")
+    with _LOCK:
+        if _DAILY_NETWORK.get("day") != day:
+            _DAILY_NETWORK["day"] = day
+            _DAILY_NETWORK["bytes"] = 0
+        _DAILY_NETWORK["bytes"] = int(_DAILY_NETWORK.get("bytes") or 0) + int(count)
 
 
 def _currency_for_symbol(symbol: Any) -> Optional[str]:
@@ -183,21 +214,48 @@ def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
             }
         _INFLIGHT.add(currency)
 
+    budget = _network_budget_state()
+    if int(budget.get("bytes") or 0) >= int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES):
+        with _LOCK:
+            _INFLIGHT.discard(currency)
+        return {
+            "available": False, "currency": currency, "rows": [],
+            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+            "observed": False, "direct_underlying_match": True,
+            "reason": "DAILY_PROVIDER_BUDGET_REACHED", "cache_hit": False,
+            "provider_bytes_today": int(budget.get("bytes") or 0),
+            "provider_daily_budget_bytes": int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES),
+        }
+
     resp = None
+    received = 0
     try:
         resp = requests.get(
             DERIBIT_URL, params={"currency": currency, "kind": "option"},
-            timeout=_TIMEOUT, headers={"User-Agent": "SmartradingReview/17.5.11R"},
+            timeout=_TIMEOUT, headers={"User-Agent": "SmartradingReview/19.1"},
+            stream=True,
         )
         content_length = 0
         try:
             content_length = int((getattr(resp, "headers", {}) or {}).get("Content-Length") or 0)
         except Exception:
             content_length = 0
-        if content_length > MAX_RESPONSE_BYTES:
-            raise ValueError("OPTION_RESPONSE_TOO_LARGE")
+        remaining_daily = max(0, int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES) - int(budget.get("bytes") or 0))
+        if content_length > MAX_RESPONSE_BYTES or (content_length and content_length > remaining_daily):
+            raise ValueError("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET")
         resp.raise_for_status()
-        payload = resp.json() if hasattr(resp, "json") else {}
+        chunks = []
+        for chunk in resp.iter_content(chunk_size=65536):
+            if not chunk:
+                continue
+            received += len(chunk)
+            if received > MAX_RESPONSE_BYTES or received > remaining_daily:
+                raise ValueError("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET")
+            chunks.append(chunk)
+        payload = json.loads(b"".join(chunks).decode("utf-8")) if chunks else {}
+        _record_network_bytes(received)
+        _recorded_bytes = received
+        received = 0
         rows = _normalize_summary_rows((payload or {}).get("result") or [])
         value = {
             "available": bool(rows), "currency": currency, "rows": rows,
@@ -206,14 +264,23 @@ def get_crypto_option_chain(symbol: Any) -> Dict[str, Any]:
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "cache_ttl_seconds": CACHE_TTL, "rows_used": len(rows),
             "cache_hit": False,
+            "provider_bytes_last_fetch": int(locals().get("_recorded_bytes", 0) or received),
+            "provider_bytes_today": int(_network_budget_state().get("bytes") or 0),
+            "provider_daily_budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
         }
     except Exception as exc:
+        if received > 0:
+            _record_network_bytes(received)
+        _reason = str(exc)
         value = {
             "available": False, "currency": currency, "rows": [],
             "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
             "observed": False, "direct_underlying_match": True,
-            "reason": type(exc).__name__ if str(exc) != "OPTION_RESPONSE_TOO_LARGE" else "OPTION_RESPONSE_TOO_LARGE",
+            "reason": ("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET" if _reason == "OPTION_RESPONSE_TOO_LARGE_OR_BUDGET" else type(exc).__name__),
             "cache_hit": False,
+            "provider_bytes_last_fetch": int(received),
+            "provider_bytes_today": int(_network_budget_state().get("bytes") or 0),
+            "provider_daily_budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
         }
     finally:
         try:

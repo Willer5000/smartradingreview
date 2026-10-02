@@ -1,0 +1,1373 @@
+--- /mnt/data/c19_1_greeks/c19_1build/app.py	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/app.py	2026-10-01 23:54:40.716135807 +0000
+@@ -17742,7 +17742,7 @@
+                         # crypto Futures may use a cached Deribit public summary.
+                         # This happens only after a directional execution candidate
+                         # exists, so bandwidth is bounded and failures are fail-open.
+-                        if execution_market_type == 'futures' and not _option_chain:
++                        if execution_market_type in {'futures', 'spot'} and not _option_chain:
+                             try:
+                                 from options_market_context import get_crypto_option_chain
+                                 _chain_snapshot = get_crypto_option_chain(symbol) or {}
+@@ -17761,6 +17761,14 @@
+                             option_chain=_option_chain if isinstance(_option_chain, (list, tuple)) else [],
+                             realized_or_implied_volatility=_mm_vol,
+                         ) or {}
++                        # Commit 19.1 FINAL: keep curves out of the hot analysis
++                        # object. Committees need only compact observed reaction
++                        # levels; the frontend requests chart curves on demand.
++                        try:
++                            from greeks_execution_context_19_1 import compact_execution_market_maker_context
++                            _market_maker_context = compact_execution_market_maker_context(_market_maker_context)
++                        except Exception:
++                            pass
+                     except Exception:
+                         _market_maker_context = {'authority': 'UNAVAILABLE_FAIL_OPEN', 'production_score_adjustment': 0.0}
+ 
+@@ -35481,7 +35489,7 @@
+     if not isinstance(chain, (list, tuple)):
+         chain = []
+     symbol = str(out.get('symbol') or '').upper().replace('/', '-')
+-    if not chain and str(market or '').lower() == 'futures' and symbol.startswith(('BTC-', 'ETH-')):
++    if not chain and str(market or '').lower() in {'futures', 'spot'} and symbol.startswith(('BTC-', 'ETH-')):
+         try:
+             from options_market_context import get_crypto_option_chain
+             snap = get_crypto_option_chain(symbol) or {}
+@@ -36596,85 +36604,111 @@
+     except Exception as exc:
+         return jsonify({'success':False,'error':str(exc)[:180],'signals':[]}),500
+ 
++@app.route('/api/market-maker-context', methods=['GET'])
+ @app.route('/api/futures/market-maker-context', methods=['GET'])
+ def api_futures_market_maker_context():
+-    """Lightweight Greeks/GEX endpoint; never launches a full market analysis."""
+-    user=_require_auth()
+-    if not isinstance(user,str):
++    """Commit 19.1 FINAL — lightweight Greeks/GEX context for every page.
++
++    Resource contract:
++    * NO full analysis is launched;
++    * observed provider requests are permitted only for direct BTC/ETH option
++      underlyings on Spot/Futures and are protected by the provider TTL + daily
++      byte budget in options_market_context.py;
++    * all other Futures/Spot/Multi-Asset symbols use a local/theoretical chart
++      in the browser (or a cached theoretical server context if one already
++      exists), so no new external request is created for those assets.
++    """
++    user = _require_auth()
++    if not isinstance(user, str):
+         return user
+-    symbol=str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/','-')
+-    timeframe=str(request.args.get('timeframe') or '1h')
+-    result={}
+-    try:
+-        with _futures_analysis_cache['lock']:
+-            _cache_data=dict(_futures_analysis_cache.get('data') or {})
+-        _analyses=dict(_cache_data.get('analysis') or {})
+-        result=dict(_analyses.get((symbol,timeframe)) or {})
+-    except Exception:
+-        result={}
+-    # Rich UI cache is often newer than the compact 30-cell runtime snapshot.
+-    if not result:
++
++    legacy_futures = str(getattr(request, 'path', '') or '').startswith('/api/futures/')
++    market = str(request.args.get('market') or ('futures' if legacy_futures else 'spot')).strip().lower()
++    if market not in {'spot', 'futures', 'multiasset'}:
++        market = 'spot'
++    symbol = str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/', '-')
++    timeframe = str(request.args.get('timeframe') or ('1h' if market != 'spot' else '1D'))
++
++    result = {}
++    if market == 'futures':
+         try:
+-            _ui_mm = _get_futures_ui_cached(symbol,timeframe)
+-            if isinstance(_ui_mm,dict): result=dict(_ui_mm)
++            with _futures_analysis_cache['lock']:
++                _cache_data = dict(_futures_analysis_cache.get('data') or {})
++            _analyses = dict(_cache_data.get('analysis') or {})
++            result = dict(_analyses.get((symbol, timeframe)) or {})
+         except Exception:
+-            pass
+-    levels=dict(result.get('levels') or {}) if isinstance(result,dict) else {}
+-    mm=dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result,dict) else {}
++            result = {}
++        if not result:
++            try:
++                _ui_mm = _get_futures_ui_cached(symbol, timeframe)
++                if isinstance(_ui_mm, dict):
++                    result = dict(_ui_mm)
++            except Exception:
++                pass
++    elif market == 'multiasset':
++        try:
++            with _MULTI_ASSET_CACHE['lock']:
++                _multi = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
++            result = dict(_multi.get((symbol, timeframe)) or {})
++        except Exception:
++            result = {}
+ 
+-    # A user opening this indicator may request one lawful provider snapshot.
+-    # options_market_context itself caches BTC/ETH for one hour. No polling and
+-    # no full Futures analysis are triggered here.
++    levels = dict(result.get('levels') or {}) if isinstance(result, dict) else {}
++    mm = dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result, dict) else {}
++
++    direct_observed = market in {'spot', 'futures'} and symbol.startswith(('BTC-', 'ETH-'))
+     try:
+-        if symbol.startswith(('BTC-','ETH-')) and not bool(mm.get('observed_option_chain')):
++        if direct_observed and not bool(mm.get('observed_option_chain')):
+             from options_market_context import get_crypto_option_chain
+-            snap=get_crypto_option_chain(symbol) or {}
+-            rows=snap.get('rows') or []
+-            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
++            snap = get_crypto_option_chain(symbol) or {}
++            rows = snap.get('rows') or []
++            spot = float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+             if spot <= 0 and rows:
+-                spot=float((rows[0] or {}).get('underlying_price') or 0)
+-            if spot <= 0:
+-                try:
+-                    market=_get_futures_system(); df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
+-                    if df is not None and not getattr(df,'empty',True): spot=float(df['close'].iloc[-1])
+-                except Exception: spot=0.0
++                spot = float((rows[0] or {}).get('underlying_price') or 0)
++            # Do not perform an extra market-data HTTP call solely for this
++            # panel. If provider rows do not include an underlying price, the
++            # browser falls back to its already-visible market price.
+             if spot > 0:
+                 from market_maker_math import build_market_maker_context
+-                mm=build_market_maker_context(
++                mm = build_market_maker_context(
+                     spot=spot,
+                     option_chain=rows,
+-                    realized_or_implied_volatility=_estimate_mm_volatility(result or {'levels':{'entry':spot}}),
++                    realized_or_implied_volatility=_estimate_mm_volatility(result or {'levels': {'entry': spot}}),
+                     as_of=(result.get('source_candle_close_timestamp') if result else None),
+                 ) or {}
+-        elif not mm:
+-            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+-            if spot <= 0:
+-                # UI-only lightweight fallback: the chart must not disappear
+-                # just because the rich Futures analysis cache was evicted.
+-                try:
+-                    market=_get_futures_system()
+-                    df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
+-                    if df is not None and not getattr(df,'empty',True):
+-                        spot=float(df['close'].iloc[-1])
+-                except Exception:
+-                    spot=0.0
++                if isinstance(mm, dict):
++                    mm['provider_budget'] = {
++                        'cache_hit': bool(snap.get('cache_hit')),
++                        'bytes_today': int(snap.get('provider_bytes_today') or 0),
++                        'daily_budget_bytes': int(snap.get('provider_daily_budget_bytes') or 0),
++                    }
++        elif not mm and result:
++            spot = float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0)
+             if spot > 0:
+                 from market_maker_math import build_market_maker_context
+-                _mm_seed = result if result else {'current_price':spot,'levels':{'entry':spot}}
+-                mm=build_market_maker_context(
+-                    spot=spot, option_chain=[],
+-                    realized_or_implied_volatility=_estimate_mm_volatility(_mm_seed),
+-                    as_of=(result.get('source_candle_close_timestamp') if result else None),
++                mm = build_market_maker_context(
++                    spot=spot,
++                    option_chain=[],
++                    realized_or_implied_volatility=_estimate_mm_volatility(result),
++                    as_of=result.get('source_candle_close_timestamp'),
+                 ) or {}
+     except Exception as exc:
+         if not mm:
+-            mm={'available':False,'authority':'NO_AUTHORITY','reason':type(exc).__name__}
++            mm = {'available': False, 'authority': 'NO_AUTHORITY', 'reason': type(exc).__name__}
++
+     return jsonify({
+-        'success':True,'symbol':symbol,'timeframe':timeframe,
+-        'cache_only_market_analysis':True,
+-        'market_maker_context':mm,
+-        'note':'No inicia análisis Futures; BTC/ETH puede usar una cadena pública cacheada por solicitud del usuario.'
+-    }),200
++        'success': True,
++        'market': market,
++        'symbol': symbol,
++        'timeframe': timeframe,
++        'cache_only_market_analysis': True,
++        'direct_observed_provider_eligible': bool(direct_observed),
++        'market_maker_context': mm,
++        'note': (
++            'Cadena pública directa sólo para subyacentes compatibles y bajo presupuesto; '
++            'resto de activos usa superficie teórica local sin autoridad de Entry/SL/TP.'
++        ),
++    }), 200
+ 
+ 
+ @app.route('/api/diagnostics/pipeline-integrity', methods=['GET'])
+--- /mnt/data/c19_1_greeks/c19_1build/market_maker_math.py	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/market_maker_math.py	2026-10-01 23:52:37.889610907 +0000
+@@ -17,7 +17,7 @@
+ from math import erf, exp, log, pi, sqrt
+ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
+ 
+-VERSION = "COMMIT17_5_11R_MM_MATH_QA_V3"
++VERSION = "COMMIT19_1_GREEKS_EXECUTION_QA_V1"
+ 
+ 
+ def _f(value: Any, default: float = 0.0) -> float:
+@@ -252,8 +252,8 @@
+         flags.append("HIGH_NEAR_EXPIRY_GAMMA_SHARE")
+ 
+     return {
+-        "version": "17.5.10.2_GREEKS_SHADOW_CONTEXT_V1",
+-        "authority": "SHADOW_CONTEXT_ONLY",
++        "version": "COMMIT19_1_GREEKS_REACTION_CONTEXT_V1",
++        "authority": ("OBSERVED_CONFLUENCE_RANKER_ONLY" if observed else "SHADOW_THEORETICAL_ONLY"),
+         "observed_chain": bool(observed),
+         "context_quality_score": round(quality, 2),
+         "gamma_regime": gamma_regime,
+@@ -266,19 +266,23 @@
+         "local_gex_shape": shape,
+         "flags": flags,
+         "consumers": [
+-            "EXECUTION_CONTEXT_SHADOW",
+-            "ENTRY_LOCATION_SHADOW",
+-            "TP_LOCATION_SHADOW",
++            "EXECUTION_CONTEXT",
++            "ENTRY_LOCATION_CONFLUENCE",
++            "SL_REACTION_COLLISION",
++            "TP_BARRIER_CONFLUENCE",
+             "RISK_CONTEXT_SHADOW",
+             "REVIEWTRADER_POINT_IN_TIME_LEARNING",
+         ],
+         "can_create_direction": False,
+-        "can_modify_entry": False,
+-        "can_modify_sl": False,
+-        "can_modify_tp": False,
++        # Observed chains may rank ALREADY-EXISTING technical candidates only.
++        # They never manufacture a price and theoretical surfaces retain zero authority.
++        "can_modify_entry": bool(observed),
++        "can_modify_sl": bool(observed),
++        "can_modify_tp": bool(observed),
++        "can_create_standalone_execution_level": False,
+         "can_raise_leverage": False,
+         "can_bypass_safety": False,
+-        "requires_point_in_time_oos_before_live_authority": True,
++        "requires_point_in_time_oos_before_direction_authority": True,
+         "as_of": as_of.isoformat(),
+     }
+ 
+@@ -441,6 +445,13 @@
+         "available": True,
+         "authority": "CONTEXT_ONLY_NOT_DIRECTION",
+         "observed_option_chain": True,
++        "execution_reaction_map_authority": "OBSERVED_CONFLUENCE_RANKER_ONLY",
++        "context_quality_score": specialist_shadow.get("context_quality_score"),
++        "can_refine_entry": True,
++        "can_refine_sl": True,
++        "can_refine_tp": True,
++        "can_create_standalone_execution_level": False,
++        "can_raise_leverage": False,
+         "dealer_position_sign": "HEURISTIC_CALL_PLUS_PUT_MINUS_NOT_OBSERVED",
+         "delta_exposure_semantics": "OPTION_DELTA_OI_NET_NOT_DEALER_INVENTORY",
+         "confidence": confidence,
+@@ -527,15 +538,45 @@
+         "context_quality_score": 0.0,
+         "requires_observed_chain_for_learning": True,
+     })
++    atm_call = black_scholes_greeks(
++        spot=s, strike=s, t_years=t, volatility=vol, option_type="CALL"
++    )
++    atm_put = black_scholes_greeks(
++        spot=s, strike=s, t_years=t, volatility=vol, option_type="PUT"
++    )
++    representative = {
++        "call": {
++            "strike": round(s, 10), "expiry_hours": round(t * 365.0 * 24.0, 4),
++            "iv": round(vol, 6), "delta": round(atm_call["delta"], 6),
++            "gamma": round(atm_call["gamma"], 10), "vega": round(atm_call["vega"], 6),
++            "theta_per_day": round(atm_call["theta_per_day"], 6),
++        },
++        "put": {
++            "strike": round(s, 10), "expiry_hours": round(t * 365.0 * 24.0, 4),
++            "iv": round(vol, 6), "delta": round(atm_put["delta"], 6),
++            "gamma": round(atm_put["gamma"], 10), "vega": round(atm_put["vega"], 6),
++            "theta_per_day": round(atm_put["theta_per_day"], 6),
++        },
++    }
+     return {
+         "version": VERSION, "available": True,
+         "authority": "SHADOW_THEORETICAL_ONLY",
+         "observed_option_chain": False,
++        "execution_reaction_map_authority": "NO_LIVE_EXECUTION_AUTHORITY",
++        "context_quality_score": 0.0,
++        "can_refine_entry": False, "can_refine_sl": False, "can_refine_tp": False,
++        "can_create_standalone_execution_level": False, "can_raise_leverage": False,
+         "dealer_position_sign": "NOT_AVAILABLE_THEORETICAL_SHAPE_ONLY",
+         "confidence": "THEORETICAL", "contracts_used": 0, "spot": round(s,10),
+         "gamma_regime": "THEORETICAL_SHAPE",
+         "gamma_wall": None, "call_wall": None, "put_wall": None,
+         "zero_gamma_level": None, "delta_neutral_level": None,
++        "representative_atm_greeks": representative,
++        "aggregate_vega_per_iv_point": None,
++        "aggregate_theta_per_day": None,
++        "heuristic_signed_delta_dollars": None,
++        "heuristic_signed_gamma_exposure": None,
++        "zero_dte_gamma_share": 0.0,
+         "gex_curve": gex_curve, "delta_curve": delta_curve, "theta_curve": theta_curve,
+         "specialist_shadow_context": shadow, "production_score_adjustment": 0.0,
+         "can_create_direction": False, "can_bypass_safety": False,
+--- /mnt/data/c19_1_greeks/c19_1build/options_market_context.py	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/options_market_context.py	2026-10-01 23:53:23.936496987 +0000
+@@ -9,6 +9,7 @@
+ """
+ from __future__ import annotations
+ 
++import json
+ import os
+ import threading
+ import time
+@@ -20,11 +21,11 @@
+ except Exception:  # pragma: no cover
+     requests = None
+ 
+-VERSION = "COMMIT17_5_11R_OPTIONS_CONTEXT_QA_V3"
++VERSION = "COMMIT19_1_OPTIONS_BANDWIDTH_GUARD_V1"
+ DERIBIT_URL = "https://www.deribit.com/api/v2/public/get_book_summary_by_currency"
+ CACHE_TTL = max(
+     900,
+-    min(7200, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "3600") or 3600)),
++    min(21600, int(os.getenv("OPTIONS_MM_CACHE_TTL_SECONDS", "7200") or 7200)),
+ )
+ ENABLED = str(os.getenv("OPTIONS_MM_CONTEXT_ENABLED", "1")).strip().lower() not in {
+     "0", "false", "no", "off"
+@@ -37,11 +38,41 @@
+     80,
+     min(320, int(os.getenv("OPTIONS_MM_MAX_CHAIN_ROWS", "220") or 220)),
+ )
+-MAX_RESPONSE_BYTES = max(262144, min(4194304, int(os.getenv("OPTIONS_MM_MAX_RESPONSE_BYTES", "1572864") or 1572864)))
++MAX_RESPONSE_BYTES = max(262144, min(2097152, int(os.getenv("OPTIONS_MM_MAX_RESPONSE_BYTES", "1572864") or 1572864)))
++# Added provider egress is bounded independently from the main service budget.
++# 12 MB/day ~= 360 MB/month worst-case additional service-initiated traffic.
++DAILY_PROVIDER_BUDGET_BYTES = max(2 * 1024 * 1024, min(32 * 1024 * 1024, int(float(os.getenv("OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB", "12") or 12) * 1024 * 1024)))
+ 
+ _LOCK = threading.Lock()
+ _CACHE: Dict[str, Dict[str, Any]] = {}
+ _INFLIGHT = set()
++_DAILY_NETWORK = {"day": None, "bytes": 0}
++
++
++def _network_budget_state(now: Optional[datetime] = None) -> Dict[str, Any]:
++    now = now or datetime.now(timezone.utc)
++    day = now.strftime("%Y-%m-%d")
++    with _LOCK:
++        if _DAILY_NETWORK.get("day") != day:
++            _DAILY_NETWORK["day"] = day
++            _DAILY_NETWORK["bytes"] = 0
++        return {
++            "day": day,
++            "bytes": int(_DAILY_NETWORK.get("bytes") or 0),
++            "budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
++        }
++
++
++def _record_network_bytes(count: int, now: Optional[datetime] = None) -> None:
++    if count <= 0:
++        return
++    now = now or datetime.now(timezone.utc)
++    day = now.strftime("%Y-%m-%d")
++    with _LOCK:
++        if _DAILY_NETWORK.get("day") != day:
++            _DAILY_NETWORK["day"] = day
++            _DAILY_NETWORK["bytes"] = 0
++        _DAILY_NETWORK["bytes"] = int(_DAILY_NETWORK.get("bytes") or 0) + int(count)
+ 
+ 
+ def _currency_for_symbol(symbol: Any) -> Optional[str]:
+@@ -183,21 +214,48 @@
+             }
+         _INFLIGHT.add(currency)
+ 
++    budget = _network_budget_state()
++    if int(budget.get("bytes") or 0) >= int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES):
++        with _LOCK:
++            _INFLIGHT.discard(currency)
++        return {
++            "available": False, "currency": currency, "rows": [],
++            "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
++            "observed": False, "direct_underlying_match": True,
++            "reason": "DAILY_PROVIDER_BUDGET_REACHED", "cache_hit": False,
++            "provider_bytes_today": int(budget.get("bytes") or 0),
++            "provider_daily_budget_bytes": int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES),
++        }
++
+     resp = None
++    received = 0
+     try:
+         resp = requests.get(
+             DERIBIT_URL, params={"currency": currency, "kind": "option"},
+-            timeout=_TIMEOUT, headers={"User-Agent": "SmartradingReview/17.5.11R"},
++            timeout=_TIMEOUT, headers={"User-Agent": "SmartradingReview/19.1"},
++            stream=True,
+         )
+         content_length = 0
+         try:
+             content_length = int((getattr(resp, "headers", {}) or {}).get("Content-Length") or 0)
+         except Exception:
+             content_length = 0
+-        if content_length > MAX_RESPONSE_BYTES:
+-            raise ValueError("OPTION_RESPONSE_TOO_LARGE")
++        remaining_daily = max(0, int(budget.get("budget_bytes") or DAILY_PROVIDER_BUDGET_BYTES) - int(budget.get("bytes") or 0))
++        if content_length > MAX_RESPONSE_BYTES or (content_length and content_length > remaining_daily):
++            raise ValueError("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET")
+         resp.raise_for_status()
+-        payload = resp.json() if hasattr(resp, "json") else {}
++        chunks = []
++        for chunk in resp.iter_content(chunk_size=65536):
++            if not chunk:
++                continue
++            received += len(chunk)
++            if received > MAX_RESPONSE_BYTES or received > remaining_daily:
++                raise ValueError("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET")
++            chunks.append(chunk)
++        payload = json.loads(b"".join(chunks).decode("utf-8")) if chunks else {}
++        _record_network_bytes(received)
++        _recorded_bytes = received
++        received = 0
+         rows = _normalize_summary_rows((payload or {}).get("result") or [])
+         value = {
+             "available": bool(rows), "currency": currency, "rows": rows,
+@@ -206,14 +264,23 @@
+             "fetched_at": datetime.now(timezone.utc).isoformat(),
+             "cache_ttl_seconds": CACHE_TTL, "rows_used": len(rows),
+             "cache_hit": False,
++            "provider_bytes_last_fetch": int(locals().get("_recorded_bytes", 0) or received),
++            "provider_bytes_today": int(_network_budget_state().get("bytes") or 0),
++            "provider_daily_budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
+         }
+     except Exception as exc:
++        if received > 0:
++            _record_network_bytes(received)
++        _reason = str(exc)
+         value = {
+             "available": False, "currency": currency, "rows": [],
+             "source": "DERIBIT_PUBLIC_BOOK_SUMMARY", "version": VERSION,
+             "observed": False, "direct_underlying_match": True,
+-            "reason": type(exc).__name__ if str(exc) != "OPTION_RESPONSE_TOO_LARGE" else "OPTION_RESPONSE_TOO_LARGE",
++            "reason": ("OPTION_RESPONSE_TOO_LARGE_OR_BUDGET" if _reason == "OPTION_RESPONSE_TOO_LARGE_OR_BUDGET" else type(exc).__name__),
+             "cache_hit": False,
++            "provider_bytes_last_fetch": int(received),
++            "provider_bytes_today": int(_network_budget_state().get("bytes") or 0),
++            "provider_daily_budget_bytes": int(DAILY_PROVIDER_BUDGET_BYTES),
+         }
+     finally:
+         try:
+--- /mnt/data/c19_1_greeks/c19_1build/execution_specialist_committees.py	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/execution_specialist_committees.py	2026-10-01 23:53:50.056017050 +0000
+@@ -20,7 +20,7 @@
+ from statistics import median
+ from typing import Any, Dict, Iterable, List, Optional, Tuple
+ 
+-VERSION = "COMMIT17_5_11R_1_CONTEXT_ALIGNED_EXECUTION_V1"
++VERSION = "COMMIT19_1_GREEKS_CONTEXT_ALIGNED_EXECUTION_V1"
+ 
+ try:
+     from preliminary_backtest_prior import (
+@@ -166,12 +166,13 @@
+         "sentiment_value": round(sentiment_value, 2),
+         "sentiment_bias": str(sentiment.get("sentiment_bias") or "neutral"),
+         "market_regime": str(market_regime.get("regime") or market_regime.get("state") or "UNKNOWN"),
+-        # 17.5.10: Black-Scholes/Greeks/GEX context is carried into the
+-        # execution desk, but has zero production score authority until a
+-        # point-in-time options replay validates it.  Workers can reason about
+-        # gamma walls/delta-neutral levels without turning them into votes.
++        # Commit 19.1 FINAL: observed option-chain reaction levels are a
++        # bounded execution tie-breaker only. Theoretical surfaces remain
++        # context-only. Neither mode can create direction, bypass Safety, or
++        # manufacture a standalone Entry/SL/TP level.
+         "market_maker_context": market_maker_context,
+         "market_maker_authority": str(market_maker_context.get("authority") or "UNAVAILABLE"),
++        "greeks_execution_authority": str(market_maker_context.get("execution_reaction_map_authority") or "NO_LIVE_EXECUTION_AUTHORITY"),
+     }
+ 
+ 
+@@ -769,6 +770,21 @@
+         "context": context_score, "backtest_prior": _clip(backtest_score),
+     }
+ 
++    # Commit 19.1 FINAL — observed Greeks/option levels can only strengthen an
++    # existing technical Entry candidate. The helper abstains for theoretical
++    # surfaces and for the baseline-only candidate, preventing options from
++    # becoming an unbacktested standalone signal/price generator.
++    try:
++        from greeks_execution_context_19_1 import score_entry_confluence
++        _greeks = score_entry_confluence(
++            candidate=candidate, context=context, current_price=current_price, atr=atr
++        ) or {}
++        if _greeks.get("score") is not None:
++            scores["options_reaction"] = _clip(_f(_greeks.get("score")))
++            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
++    except Exception:
++        pass
++
+     # COMMIT 17.5.11R — validated execution route (ranker only).
+     # Historical execution-forensics were split chronologically 70/30 before
+     # promotion. LIQUIDITY_SWEEP_MSS_POI passed the stricter hit-efficiency +
+@@ -903,9 +919,20 @@
+     except Exception:
+         backtest_score = 50.0
+ 
+-    return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
+-            "liquidity":liquidity,"risk":risk,"strategy":strategy,
+-            "backtest_prior":_clip(backtest_score)}
++    scores = {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
++              "liquidity":liquidity,"risk":risk,"strategy":strategy,
++              "backtest_prior":_clip(backtest_score)}
++    try:
++        from greeks_execution_context_19_1 import score_sl_collision
++        _greeks = score_sl_collision(
++            candidate=candidate, context=context, entry=entry, direction=direction, atr=atr
++        ) or {}
++        if _greeks.get("score") is not None:
++            scores["options_collision"] = _clip(_f(_greeks.get("score")))
++            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
++    except Exception:
++        pass
++    return scores
+ 
+ 
+ def _path_barrier_score(tp: float, entry: float, direction: str, structure: Dict[str, Any], atr: float, liquidation=None) -> float:
+@@ -1006,10 +1033,21 @@
+     except Exception:
+         backtest_score = 50.0
+ 
+-    return {"target":target,"path":path,"touch_probability":touch,
+-            "continuation":continuation,"economics":economics,
+-            "strategy":strategy,"context":context_score,
+-            "backtest_prior":_clip(backtest_score)}
++    scores = {"target":target,"path":path,"touch_probability":touch,
++              "continuation":continuation,"economics":economics,
++              "strategy":strategy,"context":context_score,
++              "backtest_prior":_clip(backtest_score)}
++    try:
++        from greeks_execution_context_19_1 import score_tp_barrier
++        _greeks = score_tp_barrier(
++            candidate=candidate, context=context, entry=entry, direction=direction, atr=atr
++        ) or {}
++        if _greeks.get("score") is not None:
++            scores["options_barrier"] = _clip(_f(_greeks.get("score")))
++            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
++    except Exception:
++        pass
++    return scores
+ 
+ 
+ def _weights_for(role: str, market_type: str) -> Dict[str, float]:
+@@ -1018,18 +1056,19 @@
+         # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
+         base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
+                 "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.0,
+-                "validated_liquidity_route":0.90}
++                "validated_liquidity_route":0.90,"options_reaction":0.40}
+         if market in {"futures","multiasset"}:
+             base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
+         return base
+     if role == "sl":
+         base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
+-                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0}
++                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0,
++                "options_collision":0.45}
+         if market == "spot": base["risk"] = 1.0
+         return base
+     return {"target":1.20,"path":1.25,"touch_probability":1.25,
+             "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7,
+-            "backtest_prior":0.0}
++            "backtest_prior":0.0,"options_barrier":0.45}
+ 
+ 
+ def _harmonic(values: Iterable[float]) -> Optional[float]:
+--- /mnt/data/c19_1_greeks/c19_1build/static/market_maker_frontend.js	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/static/market_maker_frontend.js	2026-10-01 23:55:38.453479895 +0000
+@@ -1,4 +1,4 @@
+-/* Commit 17.5.11 — Delta / Gamma / Theta trader-facing panel.
++/* Commit 19.1 FINAL — Delta / Gamma / Theta · Spot/Futures/Multi-Asset.
+  *
+  * Design goals:
+  * - visually match a professional aggregated Greeks/GEX chart;
+@@ -9,8 +9,8 @@
+  */
+ (function () {
+     'use strict';
+-    if (window.__MM_OPTIONS_FRONTEND_175114__) return;
+-    window.__MM_OPTIONS_FRONTEND_175114__ = true;
++    if (window.__MM_OPTIONS_FRONTEND_COMMIT19_1_GREEKS__) return;
++    window.__MM_OPTIONS_FRONTEND_COMMIT19_1_GREEKS__ = true;
+ 
+     const $ = id => document.getElementById(id);
+     const finite = v => {
+@@ -54,6 +54,7 @@
+         if (x === 'POSITIVE_GAMMA') return 'Gamma positiva';
+         if (x === 'NEGATIVE_GAMMA') return 'Gamma negativa';
+         if (x === 'MIXED_GAMMA') return 'Gamma mixta';
++        if (x === 'THEORETICAL_SHAPE') return 'Curva teórica';
+         return x ? x.replaceAll('_', ' ') : '--';
+     }
+ 
+@@ -109,6 +110,37 @@
+         return null;
+     }
+ 
++    function currentMarket() {
++        if (window.IS_MULTI_ASSET_PAGE === true) return 'multiasset';
++        if (window.IS_FUTURES_PAGE === true) return 'futures';
++        return 'spot';
++    }
++
++    function supportsObservedServer(symbol, market) {
++        const sym = String(symbol || '').toUpperCase().replace('/', '-');
++        // Resource contract: no provider fan-out across the full universe.
++        // Direct observed chain is currently enabled only where the existing
++        // provider adapter has a direct BTC/ETH underlying.
++        return market !== 'multiasset' && (sym.startsWith('BTC-') || sym.startsWith('ETH-'));
++    }
++
++    async function lightweightVisiblePrice(symbol, timeframe, market, seq) {
++        let spot = localSpot();
++        if (spot > 0) return spot;
++        try {
++            const pResp = await fetch(
++                `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=${encodeURIComponent(market)}`,
++                { credentials: 'same-origin', cache: 'no-store' }
++            );
++            const pJson = await pResp.json();
++            if (seq !== requestSeq) return null;
++            spot = finite(pJson?.current_price);
++        } catch (_) {
++            spot = null;
++        }
++        return spot;
++    }
++
+     function buildLocalTheoreticalContext(spot) {
+         const s = finite(spot);
+         if (s === null || s <= 0) return null;
+@@ -174,8 +206,8 @@
+         if (title) title.innerHTML = '<i class="fas fa-wave-square me-2"></i>Delta / Gamma / Theta';
+         if (subtitle) {
+             subtitle.textContent = observed
+-                ? 'Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.'
+-                : 'Black-Scholes teórico cuando no existe una cadena pública directamente compatible.';
++                ? 'Cadena pública observada + Black-Scholes. Los niveles de opciones actúan sólo como confluencia de ejecución.'
++                : 'Black-Scholes teórico para este activo: sensibilidades visibles, sin inventar Open Interest ni paredes de dealers.';
+         }
+         const headerLeft = card.querySelector('.card-header > div');
+         if (headerLeft && !document.getElementById('mm-aggregate-pill')) {
+@@ -203,7 +235,7 @@
+         );
+         text(
+             'mm-option-authority',
+-            String(reason || 'Sin datos observados; no se genera sesgo direccional.')
++            String(reason || 'Sin datos observados; no se genera sesgo direccional ni niveles de ejecución.')
+         );
+         const chart = $('mm-options-chart');
+         if (chart) {
+@@ -289,8 +321,8 @@
+         text(
+             'mm-option-authority',
+             observed
+-                ? 'GEX firmado usa CALL+/PUT− como heurística. Delta neta usa el signo propio de Delta; el Open Interest no revela el inventario real del market maker.'
+-                : 'SHADOW teórico: no cambia señal, Entry, SL, TP, leverage ni Safety.'
++                ? 'Los niveles observados pueden actuar como confluencia de ejecución. No crean dirección, no saltan controles de riesgo y CALL+/PUT− sigue siendo una heurística porque el Open Interest no revela inventario real de dealers.'
++                : 'Modelo teórico informativo: no tiene autoridad para mover Entry, SL, TP, leverage ni controles de riesgo.'
+         );
+ 
+         const cleanPairs = rows => (Array.isArray(rows) ? rows : [])
+@@ -318,7 +350,7 @@
+                 y: gy,
+                 type: 'scatter',
+                 mode: 'lines',
+-                name: 'GEX firmado (heurístico)',
++                name: observed ? 'GEX firmado (heurístico)' : 'Gamma teórica relativa',
+                 line: {
+                     width: 2.8,
+                     color: '#18a8e8',
+@@ -332,7 +364,7 @@
+                 y: dy,
+                 type: 'scatter',
+                 mode: 'lines',
+-                name: 'Delta neta por OI',
++                name: observed ? 'Delta neta por OI' : 'Delta teórica Call+Put',
+                 yaxis: 'y2',
+                 line: {
+                     width: 2.5,
+@@ -449,7 +481,7 @@
+                 bordercolor: '#3a424a',
+                 font: { color: '#f2f5f7' }
+             },
+-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175114`
++            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-1-greeks`
+         };
+ 
+         window.Plotly.react(
+@@ -466,25 +498,37 @@
+     }
+ 
+     async function refresh() {
+-        if (
+-            !window.IS_FUTURES_PAGE
+-            || window.IS_MULTI_ASSET_PAGE
+-            || !$('mm-options-chart')
+-        ) return;
++        if (!$('mm-options-chart')) return;
+ 
+         const symbol =
+             document.getElementById('symbol-select')?.value
+             || window.currentSymbol
++            || (window.PAGE_CONFIG?.defaultSymbol)
+             || 'BTC-USDT';
+         const timeframe =
+             document.getElementById('interval-select')?.value
+             || window.currentInterval
++            || (window.PAGE_CONFIG?.defaultTimeframe)
+             || '1h';
++        const market = currentMarket();
+         const seq = ++requestSeq;
+ 
++        // Most assets intentionally do NOT call an options provider. They render
++        // a local theoretical surface from the already-visible price/volatility.
++        // This is what makes Greeks available across Spot/Futures/Multi-Asset
++        // without multiplying Render service-initiated bandwidth.
++        if (!supportsObservedServer(symbol, market)) {
++            const spot = await lightweightVisiblePrice(symbol, timeframe, market, seq);
++            if (seq !== requestSeq) return;
++            const local = buildLocalTheoreticalContext(spot);
++            if (local) render({ market_maker_context: local });
++            else unavailable('Precio no disponible para la superficie teórica.');
++            return;
++        }
++
+         try {
+             const url =
+-                `/api/futures/market-maker-context?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
++                `/api/market-maker-context?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
+             const resp = await fetch(url, {
+                 credentials: 'same-origin',
+                 cache: 'no-store'
+@@ -492,59 +536,28 @@
+             const payload = await resp.json();
+             if (seq !== requestSeq) return;
+ 
+-            let mm = mmFrom(payload || {});
+-            let hasCurves = Boolean(
++            const mm = mmFrom(payload || {});
++            const hasCurves = Boolean(
+                 mm && mm.available !== false
+                 && Array.isArray(mm.gex_curve) && mm.gex_curve.length >= 3
+                 && Array.isArray(mm.delta_curve) && mm.delta_curve.length >= 3
+             );
+-
+-            if (!hasCurves) {
+-                // R.4: the options provider can be unavailable while Futures
+-                // itself still has a perfectly valid live price. Fetch only that
+-                // lightweight display price once; this is not polling and never
+-                // launches the heavy analysis pipeline.
+-                let spot = finite(mm?.spot) ?? localSpot();
+-                if (!(spot > 0)) {
+-                    try {
+-                        const pResp = await fetch(
+-                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
+-                            { credentials: 'same-origin', cache: 'no-store' }
+-                        );
+-                        const pJson = await pResp.json();
+-                        if (seq !== requestSeq) return;
+-                        spot = finite(pJson?.current_price);
+-                    } catch (_) {
+-                        spot = null;
+-                    }
+-                }
+-                const local = buildLocalTheoreticalContext(spot);
+-                if (local) {
+-                    render({ market_maker_context: local });
+-                    return;
+-                }
+-            }
+-            render(payload || {});
+-        } catch (err) {
+-            // R3 compatibility assertion reference only: render({ reason: 'Contexto de opciones temporalmente no disponible.' })
+-            if (seq === requestSeq) {
+-                let spot = localSpot();
+-                if (!(spot > 0)) {
+-                    try {
+-                        const pResp = await fetch(
+-                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
+-                            { credentials: 'same-origin', cache: 'no-store' }
+-                        );
+-                        const pJson = await pResp.json();
+-                        spot = finite(pJson?.current_price);
+-                    } catch (_) {
+-                        spot = null;
+-                    }
+-                }
+-                const local = buildLocalTheoreticalContext(spot);
+-                if (local) render({ market_maker_context: local });
+-                else unavailable('Contexto de opciones temporalmente no disponible.');
++            if (hasCurves) {
++                render(payload || {});
++                return;
+             }
++
++            const spot = finite(mm?.spot) ?? await lightweightVisiblePrice(symbol, timeframe, market, seq);
++            if (seq !== requestSeq) return;
++            const local = buildLocalTheoreticalContext(spot);
++            if (local) render({ market_maker_context: local });
++            else unavailable(mm?.reason || 'Contexto de opciones temporalmente no disponible.');
++        } catch (_) {
++            const spot = await lightweightVisiblePrice(symbol, timeframe, market, seq);
++            if (seq !== requestSeq) return;
++            const local = buildLocalTheoreticalContext(spot);
++            if (local) render({ market_maker_context: local });
++            else unavailable('Contexto de opciones temporalmente no disponible.');
+         }
+     }
+ 
+@@ -555,7 +568,7 @@
+ 
+     function installAnalysisHook() {
+         if (
+-            window.__MM_OPTIONS_UPDATE_HOOKED_175114__
++            window.__MM_OPTIONS_UPDATE_HOOKED_COMMIT19_1_GREEKS__
+             || typeof window.updateAllCharts !== 'function'
+         ) return;
+         const original = window.updateAllCharts;
+@@ -568,11 +581,10 @@
+             } catch (_) { schedule(80); }
+             return out;
+         };
+-        window.__MM_OPTIONS_UPDATE_HOOKED_175114__ = true;
++        window.__MM_OPTIONS_UPDATE_HOOKED_COMMIT19_1_GREEKS__ = true;
+     }
+ 
+     function init() {
+-        if (window.IS_FUTURES_PAGE === false || window.IS_MULTI_ASSET_PAGE === true) return;
+         installAnalysisHook();
+         document.getElementById('symbol-select')
+             ?.addEventListener?.('change', () => schedule(180));
+--- /mnt/data/c19_1_greeks/c19_1build/static/chart_workspace.js	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/static/chart_workspace.js	2026-10-01 23:55:09.854703322 +0000
+@@ -257,7 +257,7 @@
+         if (id === 'order-flow' && window.IS_FUTURES_PAGE) return true;
+         if (ALWAYS.has(id)) return true;
+         if (state.hidden.has(id) && !state.pinned.has(id) && !state.manual.has(id)) return false;
+-        if (id === 'market-maker-options' && window.IS_FUTURES_PAGE) return true;
++        if (id === 'market-maker-options') return true;
+         return state.pinned.has(id) || state.manual.has(id) || autoEvidence.includes(id);
+     }
+ 
+--- /mnt/data/c19_1_greeks/c19_1build/templates/index.html	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/templates/index.html	2026-10-01 23:55:05.127183112 +0000
+@@ -1283,13 +1283,12 @@
+                         </div>
+                     </div>
+ 
+-                {% if is_futures and not is_multiasset|default(false) %}
+-                <!-- COMMIT 17.5.10 FINAL — BLACK-SCHOLES / GAMMA / 0DTE / DELTA -->
++                <!-- COMMIT 19.1 FINAL — GREEKS / OPTIONS REACTION MAP · SPOT + FUTURES + MULTI -->
+                 <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="market-maker-options">
+                     <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
+                         <div>
+                             <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Delta / Gamma / Theta</h5>
+-                            <small class="text-muted">Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.</small>
++                            <small class="text-muted">Greeks y mapa de reacción: cadena observada cuando existe un subyacente directo; modelo teórico claramente identificado en el resto.</small>
+                         </div>
+                         <span id="mm-option-source" class="badge bg-secondary">Esperando datos</span>
+                     </div>
+@@ -1336,7 +1335,6 @@
+                         </div>
+                     </div>
+                 </div>
+-                {% endif %}
+ 
+                 {% if is_futures %}
+                 <!-- COMMIT 15B — ORDER BOOK / ORDER FLOW MICROSTRUCTURE -->
+@@ -2677,15 +2675,17 @@
+     {% if is_futures %}
+ 
+     <script
+-        src="{{ url_for('static', filename='futures.js') }}?v=20261001-COMMIT18-1-1-MEMORY-STABILITY"
+-    ></script>
+-    <script
+-        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261001-COMMIT18-1-1-MEMORY-STABILITY"
++        src="{{ url_for('static', filename='futures.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"
+     ></script>
+ 
+     {% endif %}
+ 
+-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260911-C15-ORDERFLOW"></script>
++    <!-- Greeks chart is shared by Spot, Futures and Multi-Asset. -->
++    <script
++        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"
++    ></script>
++
++    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"></script>
+ 
+     <!-- ============================================================= -->
+     <!-- IA AISLADA -->
+--- /mnt/data/c19_1_greeks/c19_1build/render.yaml	2026-10-01 23:18:02.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/render.yaml	2026-10-01 23:55:54.930960357 +0000
+@@ -45,6 +45,19 @@
+         value: "1"
+       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
+         value: "12"
++      # Commit 19.1 FINAL — Greeks/options provider guard. The chart is
++      # theoretical/local for unsupported assets; only direct BTC/ETH chains
++      # may consume provider egress, under this independent daily cap.
++      - key: OPTIONS_MM_CONTEXT_ENABLED
++        value: "1"
++      - key: OPTIONS_MM_CACHE_TTL_SECONDS
++        value: "7200"
++      - key: OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB
++        value: "12"
++      - key: OPTIONS_MM_MAX_RESPONSE_BYTES
++        value: "1572864"
++      - key: OPTIONS_MM_MAX_CHAIN_ROWS
++        value: "220"
+       - key: AI_GROQ_DAILY_TOKEN_BUDGET
+         value: "160000"
+       - key: AI_GROQ_DAILY_TOKEN_RESERVE
+--- /mnt/data/c19_1_greeks/c19_1build/.env.example	2026-10-01 16:41:17.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/.env.example	2026-10-01 23:55:54.931098334 +0000
+@@ -115,3 +115,10 @@
+ SUPABASE_402_COOLDOWN_SECONDS=21600
+ LOCAL_RESILIENCE_MAX_OUTBOX=3000
+ LOCAL_RESILIENCE_MAX_SNAPSHOTS=250
++
++# Commit 19.1 FINAL — Greeks/options resource guard
++OPTIONS_MM_CONTEXT_ENABLED=1
++OPTIONS_MM_CACHE_TTL_SECONDS=7200
++OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB=12
++OPTIONS_MM_MAX_RESPONSE_BYTES=1572864
++OPTIONS_MM_MAX_CHAIN_ROWS=220
+--- /mnt/data/c19_1_greeks/c19_1build/commit19_1_runtime.py	2026-10-01 23:18:02.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/commit19_1_runtime.py	2026-10-01 23:56:14.064776736 +0000
+@@ -3,7 +3,7 @@
+ import sys
+ from typing import Any, Dict
+ 
+-VERSION="COMMIT19_1_CHAMPION_PLUS_QUANT_SYNTHESIS_V1"
++VERSION="COMMIT19_1_FINAL_CHAMPION_QUANT_GREEKS_V1"
+ _ORIGINALS: Dict[str,Any]={}
+ 
+ def _u(v): return str(v or "").strip().upper().replace("/","-")
+@@ -187,4 +187,4 @@
+     return {"version":VERSION,"base19":base,"moderator":moderator,"execution_quality":levels,"review":review}
+ 
+ def audit():
+-    return {"version":VERSION,"base":"COMMIT19_CHAMPION_EDGE_EXECUTION_V1","live_lanes":["PROFITABLE_CHAMPION","NATIVE_QUANT_SYNTHESIS"],"majority_vote_restored":False,"changes_safety_thresholds":False,"changes_rr_floor":False,"changes_leverage_v6":False,"adds_llm_calls":False,"adds_background_threads":False,"adds_market_data_requests":False,"adds_schema":False,"alpha_decay":"8 LIVE losses per synthesis fingerprint -> SHADOW/Research; 8 Shadow -> RETIRED"}
++    return {"version":VERSION,"base":"COMMIT19_CHAMPION_EDGE_EXECUTION_V1","live_lanes":["PROFITABLE_CHAMPION","NATIVE_QUANT_SYNTHESIS"],"majority_vote_restored":False,"changes_safety_thresholds":False,"changes_rr_floor":False,"changes_leverage_v6":False,"adds_llm_calls":False,"adds_background_threads":False,"adds_market_data_requests":"BOUNDED_DIRECT_BTC_ETH_OPTIONS_ONLY","adds_schema":False,"alpha_decay":"8 LIVE losses per synthesis fingerprint -> SHADOW/Research; 8 Shadow -> RETIRED","greeks_execution":"observed-chain confluence ranker only; theoretical surfaces UI/context only","resource_contract":"1 worker/2 threads; provider <=12 MB/day; no polling"}
+--- /mnt/data/c19_1_greeks/c19_1build/qa_commit19_1.py	2026-10-01 23:18:02.000000000 +0000
++++ /mnt/data/c19_1_greeks_work/qa_commit19_1.py	2026-10-01 23:59:39.750369927 +0000
+@@ -65,7 +65,7 @@
+     rt=open(os.path.join(ROOT,"commit19_1_runtime.py"),encoding="utf-8").read()
+     checks["safety_not_modified"]='changes_safety_thresholds":False' in rt
+     checks["rr_not_modified"]='changes_rr_floor":False' in rt
+-    checks["no_llm_threads_market_requests"]=all(s in rt for s in ['adds_llm_calls":False','adds_background_threads":False','adds_market_data_requests":False'])
++    checks["no_llm_threads_bounded_market_requests"]=all(s in rt for s in ['adds_llm_calls":False','adds_background_threads":False']) and 'adds_market_data_requests":"BOUNDED_DIRECT_BTC_ETH_OPTIONS_ONLY"' in rt
+     checks["review_tags"]='C19SYNTH::' in rt and 'C19SYNTHCELL::' in rt
+     failed=[k for k,v in checks.items() if not v]
+     for k,v in checks.items(): print(("PASS" if v else "FAIL"),k)
+--- /dev/null	2026-10-01 22:41:42.544792603 +0000
++++ /mnt/data/c19_1_greeks_work/greeks_execution_context_19_1.py	2026-10-01 23:52:09.469061904 +0000
+@@ -0,0 +1,275 @@
++"""Commit 19.1 FINAL — observed Greeks/options reaction-map execution lens.
++
++Purpose
++-------
++Use directly observed option-chain reaction levels as a *small confluence/tie-breaker*
++inside Entry / SL / TP ranking without turning Greeks into a direction engine.
++
++Anti-overfit / safety contract
++------------------------------
++* theoretical Black-Scholes surfaces have ZERO live execution authority;
++* option levels never create LONG/SHORT;
++* option levels never create a standalone Entry/SL/TP price;
++* only an already-existing technical candidate may receive a bounded ranking lens;
++* Safety, R/R, leverage and publication gates remain downstream and unchanged;
++* public OI does not reveal dealer inventory, so CALL+/PUT- GEX stays heuristic.
++
++The helper is pure/local: no network, DB, threads or caches.
++"""
++from __future__ import annotations
++
++from math import isfinite
++from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
++
++VERSION = "COMMIT19_1_GREEKS_REACTION_MAP_V1"
++
++
++def _f(value: Any, default: float = 0.0) -> float:
++    try:
++        out = float(value)
++        return out if isfinite(out) else default
++    except Exception:
++        return default
++
++
++def _d(value: Any) -> Dict[str, Any]:
++    return value if isinstance(value, dict) else {}
++
++
++def _clip(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
++    return max(lo, min(hi, float(value)))
++
++
++def compact_execution_market_maker_context(mm: Any) -> Dict[str, Any]:
++    """Keep only the tiny fields execution committees need.
++
++    UI curves are intentionally removed from the hot analysis path.  The chart
++    obtains those curves on demand, so this reduces transient heap pressure on
++    the 512 MB Render service and avoids duplicating payloads in runtime objects.
++    """
++    src = _d(mm)
++    if not src:
++        return {}
++    keep = (
++        "version", "available", "authority", "observed_option_chain",
++        "dealer_position_sign", "delta_exposure_semantics", "confidence",
++        "contracts_used", "spot", "gamma_regime", "zero_dte_gamma_share",
++        "nearest_expiry_hours", "gamma_wall", "call_wall", "put_wall",
++        "zero_gamma_level", "delta_neutral_level",
++        "execution_reaction_map_authority", "can_refine_entry",
++        "can_refine_sl", "can_refine_tp", "can_create_direction",
++        "can_raise_leverage", "can_bypass_safety",
++        "can_create_standalone_execution_level",
++        "context_quality_score", "source", "fetched_at",
++    )
++    out = {k: src.get(k) for k in keep if k in src}
++    shadow = _d(src.get("specialist_shadow_context"))
++    if shadow:
++        out["context_quality_score"] = _f(
++            src.get("context_quality_score"),
++            _f(shadow.get("context_quality_score"), 0.0),
++        )
++        if shadow.get("flags"):
++            out["flags"] = list(shadow.get("flags") or [])[:8]
++    return out
++
++
++def _observed_eligible(mm: Mapping[str, Any]) -> Tuple[bool, str]:
++    if not isinstance(mm, Mapping):
++        return False, "NO_CONTEXT"
++    if mm.get("observed_option_chain") is not True:
++        return False, "THEORETICAL_OR_UNOBSERVED"
++    if str(mm.get("execution_reaction_map_authority") or "").upper() != "OBSERVED_CONFLUENCE_RANKER_ONLY":
++        return False, "NO_EXECUTION_REACTION_AUTHORITY"
++    confidence = str(mm.get("confidence") or "").upper()
++    contracts = int(_f(mm.get("contracts_used"), 0.0))
++    if confidence not in {"MEDIUM", "HIGH"} or contracts < 8:
++        return False, "OBSERVED_CHAIN_TOO_THIN"
++    return True, "OBSERVED_CHAIN_OK"
++
++
++def observed_reaction_map(mm: Any, *, spot: float, atr: float) -> Dict[str, Any]:
++    """Return de-duplicated observed reaction levels and a conservative radius."""
++    src = _d(mm)
++    eligible, reason = _observed_eligible(src)
++    s = max(_f(spot), _f(src.get("spot"), 0.0))
++    a = max(_f(atr), 0.0)
++    if not eligible or s <= 0 or a <= 0:
++        return {
++            "version": VERSION, "eligible": False, "reason": reason,
++            "levels": [], "radius": 0.0,
++        }
++
++    # Broad confluence window rather than an optimized strike-specific rule.
++    # It is deliberately small enough to act only as a tie-breaker around an
++    # already-existing technical zone.
++    radius = min(s * 0.006, max(a * 0.22, s * 0.0012))
++    dedupe = max(a * 0.06, s * 0.00035)
++
++    raw: List[Tuple[str, float, float]] = [
++        ("Zero-Gamma", _f(src.get("zero_gamma_level")), 1.00),
++        ("Delta-Neutral", _f(src.get("delta_neutral_level")), 0.95),
++        ("Gamma Wall", _f(src.get("gamma_wall")), 1.00),
++        ("Call Wall", _f(src.get("call_wall")), 0.85),
++        ("Put Wall", _f(src.get("put_wall")), 0.85),
++    ]
++    levels: List[Dict[str, Any]] = []
++    for label, price, strength in raw:
++        if price <= 0:
++            continue
++        merged = None
++        for row in levels:
++            if abs(_f(row.get("price")) - price) <= dedupe:
++                merged = row
++                break
++        if merged is None:
++            levels.append({
++                "price": price,
++                "labels": [label],
++                "strength": strength,
++            })
++        else:
++            merged["strength"] = max(_f(merged.get("strength"), 0.0), strength)
++            if label not in merged["labels"]:
++                merged["labels"].append(label)
++
++    return {
++        "version": VERSION,
++        "eligible": bool(levels),
++        "reason": "OBSERVED_LEVELS_READY" if levels else "NO_OBSERVED_LEVELS",
++        "levels": levels,
++        "radius": radius,
++        "confidence": str(src.get("confidence") or ""),
++        "contracts_used": int(_f(src.get("contracts_used"), 0.0)),
++        "dealer_sign_is_heuristic": True,
++    }
++
++
++def _nearest(levels: Iterable[Mapping[str, Any]], price: float) -> Optional[Tuple[Mapping[str, Any], float]]:
++    best = None
++    for row in levels or []:
++        p = _f(row.get("price"), 0.0)
++        if p <= 0:
++            continue
++        d = abs(price - p)
++        if best is None or d < best[1]:
++            best = (row, d)
++    return best
++
++
++def score_entry_confluence(*, candidate: Mapping[str, Any], context: Mapping[str, Any],
++                            current_price: float, atr: float) -> Dict[str, Any]:
++    """Bounded tie-breaker for an existing technical Entry candidate only."""
++    family = str(candidate.get("family") or "")
++    # Baseline-by-itself is not independent technical evidence.
++    if family in {"", "baseline"}:
++        return {"score": None, "reason": "NO_STANDALONE_OPTIONS_ENTRY"}
++    price = _f(candidate.get("price"), 0.0)
++    if price <= 0:
++        return {"score": None, "reason": "INVALID_PRICE"}
++    mm = _d(_d(context).get("market_maker_context"))
++    reaction = observed_reaction_map(mm, spot=current_price, atr=atr)
++    if not reaction.get("eligible"):
++        return {"score": None, "reason": reaction.get("reason")}
++    nearest = _nearest(reaction.get("levels") or [], price)
++    if nearest is None or nearest[1] > _f(reaction.get("radius"), 0.0):
++        return {"score": None, "reason": "NO_OPTIONS_CONFLUENCE_NEAR_TECHNICAL_ENTRY"}
++    row, distance = nearest
++    radius = max(_f(reaction.get("radius"), 0.0), 1e-12)
++    closeness = 1.0 - min(1.0, distance / radius)
++    multi = max(1, len(list(row.get("labels") or [])))
++    score = _clip(58.0 + 24.0 * closeness + 4.0 * min(2, multi - 1) + 5.0 * _f(row.get("strength"), 0.0))
++    return {
++        "score": round(score, 2),
++        "reason": "OBSERVED_OPTIONS_CONFLUENCE",
++        "nearest_level": round(_f(row.get("price")), 10),
++        "labels": list(row.get("labels") or [])[:4],
++        "distance": round(distance, 10),
++        "radius": round(radius, 10),
++    }
++
++
++def score_sl_collision(*, candidate: Mapping[str, Any], context: Mapping[str, Any],
++                       entry: float, direction: str, atr: float) -> Dict[str, Any]:
++    """Penalize a stop placed *inside* an observed options reaction zone.
++
++    It never proposes a new stop. Existing structural candidates compete as usual.
++    """
++    price = _f(candidate.get("price"), 0.0)
++    if price <= 0:
++        return {"score": None, "reason": "INVALID_PRICE"}
++    mm = _d(_d(context).get("market_maker_context"))
++    reaction = observed_reaction_map(mm, spot=entry, atr=atr)
++    if not reaction.get("eligible"):
++        return {"score": None, "reason": reaction.get("reason")}
++    nearest = _nearest(reaction.get("levels") or [], price)
++    if nearest is None:
++        return {"score": None, "reason": "NO_OPTIONS_LEVELS"}
++    row, distance = nearest
++    radius = max(_f(reaction.get("radius"), 0.0), 1e-12)
++    if distance > radius:
++        # No relation => abstain instead of adding a constant score to all SLs.
++        return {"score": None, "reason": "NO_OPTIONS_COLLISION"}
++    closeness = 1.0 - min(1.0, distance / radius)
++    score = _clip(58.0 - 38.0 * closeness)
++    return {
++        "score": round(score, 2),
++        "reason": "SL_NEAR_OBSERVED_OPTIONS_REACTION",
++        "nearest_level": round(_f(row.get("price")), 10),
++        "labels": list(row.get("labels") or [])[:4],
++        "distance": round(distance, 10),
++        "radius": round(radius, 10),
++        "direction": str(direction or "").lower(),
++    }
++
++
++def score_tp_barrier(*, candidate: Mapping[str, Any], context: Mapping[str, Any],
++                     entry: float, direction: str, atr: float) -> Dict[str, Any]:
++    """Rank existing structural TPs relative to the first observed options barrier."""
++    target = _f(candidate.get("price"), 0.0)
++    entry = _f(entry, 0.0)
++    if target <= 0 or entry <= 0:
++        return {"score": None, "reason": "INVALID_PRICE"}
++    mm = _d(_d(context).get("market_maker_context"))
++    reaction = observed_reaction_map(mm, spot=entry, atr=atr)
++    if not reaction.get("eligible"):
++        return {"score": None, "reason": reaction.get("reason")}
++    direction = str(direction or "").lower()
++    if direction == "long":
++        ahead = sorted([r for r in reaction["levels"] if _f(r.get("price")) > entry], key=lambda r: _f(r.get("price")))
++    elif direction == "short":
++        ahead = sorted([r for r in reaction["levels"] if _f(r.get("price")) < entry], key=lambda r: _f(r.get("price")), reverse=True)
++    else:
++        return {"score": None, "reason": "INVALID_DIRECTION"}
++    if not ahead:
++        return {"score": None, "reason": "NO_OPTIONS_BARRIER_AHEAD"}
++    barrier = ahead[0]
++    bp = _f(barrier.get("price"), 0.0)
++    radius = max(_f(reaction.get("radius"), 0.0), 1e-12)
++    if direction == "long":
++        safe_side = target <= bp
++        gap = bp - target
++        beyond = target > bp
++    else:
++        safe_side = target >= bp
++        gap = target - bp
++        beyond = target < bp
++
++    if safe_side and 0 <= gap <= radius:
++        score = 92.0 - 12.0 * min(1.0, gap / radius)
++        reason = "TP_FRONTRUNS_OBSERVED_OPTIONS_BARRIER"
++    elif beyond:
++        overshoot = abs(target - bp)
++        score = _clip(48.0 - 22.0 * min(1.0, overshoot / max(radius * 2.0, 1e-12)))
++        reason = "TP_BEYOND_OBSERVED_OPTIONS_BARRIER"
++    else:
++        # The target is safely before the barrier but not close enough for the
++        # barrier to be relevant. Abstain to keep the lens a true tie-breaker.
++        return {"score": None, "reason": "OPTIONS_BARRIER_NOT_MATERIAL"}
++    return {
++        "score": round(score, 2),
++        "reason": reason,
++        "barrier": round(bp, 10),
++        "labels": list(barrier.get("labels") or [])[:4],
++        "radius": round(radius, 10),
++    }
+--- /dev/null	2026-10-01 22:41:42.544792603 +0000
++++ /mnt/data/c19_1_greeks_work/qa_commit19_1_greeks_final.py	2026-10-01 23:57:20.375861545 +0000
+@@ -0,0 +1,116 @@
++from __future__ import annotations
++
++from datetime import datetime, timedelta, timezone
++from pathlib import Path
++import json
++import sys
++
++ROOT = Path(__file__).resolve().parent
++sys.path.insert(0, str(ROOT))
++
++FAILS = []
++PASSES = []
++
++def ok(name, cond, detail=''):
++    if cond:
++        PASSES.append(name)
++        print(f'PASS {name}')
++    else:
++        FAILS.append((name, detail))
++        print(f'FAIL {name}: {detail}')
++
++# 1) math + observed/theoretical authority
++from market_maker_math import build_market_maker_context
++from greeks_execution_context_19_1 import (
++    observed_reaction_map, score_entry_confluence, score_sl_collision,
++    score_tp_barrier, compact_execution_market_maker_context,
++)
++
++asof = datetime(2026, 10, 1, 12, tzinfo=timezone.utc)
++expiry = asof + timedelta(hours=18)
++rows = []
++for strike in (94, 96, 98, 100, 102, 104, 106, 108, 110, 112):
++    # Make call OI strongest above spot, put OI strongest below spot.
++    call_oi = 800 if strike == 106 else 180 + max(0, strike-100)*12
++    put_oi = 900 if strike == 96 else 190 + max(0, 100-strike)*12
++    rows.append({'strike': strike, 'open_interest': call_oi, 'iv': 0.62, 'option_type': 'CALL', 'expiry': expiry, 'contract_multiplier': 1})
++    rows.append({'strike': strike, 'open_interest': put_oi, 'iv': 0.66, 'option_type': 'PUT', 'expiry': expiry, 'contract_multiplier': 1})
++
++observed = build_market_maker_context(spot=100, option_chain=rows, realized_or_implied_volatility=.6, as_of=asof)
++theo = build_market_maker_context(spot=100, option_chain=[], realized_or_implied_volatility=.6, as_of=asof)
++
++ok('01_observed_chain_live_execution_ranker_only', observed.get('observed_option_chain') is True and observed.get('execution_reaction_map_authority') == 'OBSERVED_CONFLUENCE_RANKER_ONLY')
++ok('02_observed_never_direction_or_safety_bypass', observed.get('can_create_direction') is False and observed.get('can_bypass_safety') is False and observed.get('can_create_standalone_execution_level') is False)
++ok('03_theoretical_zero_execution_authority', theo.get('observed_option_chain') is False and theo.get('can_refine_entry') is False and theo.get('can_refine_sl') is False and theo.get('can_refine_tp') is False)
++ok('04_theoretical_has_atm_greeks_for_every_asset_ui', isinstance(theo.get('representative_atm_greeks'), dict) and 'call' in theo['representative_atm_greeks'] and 'put' in theo['representative_atm_greeks'])
++
++rx = observed_reaction_map(observed, spot=100, atr=2)
++ok('05_observed_reaction_map_eligible', rx.get('eligible') is True and len(rx.get('levels') or []) >= 2, str(rx))
++
++put_wall = float(observed.get('put_wall') or 96)
++call_wall = float(observed.get('call_wall') or 106)
++ctx = {'market_maker_context': compact_execution_market_maker_context(observed)}
++entry_score = score_entry_confluence(candidate={'price': put_wall, 'family':'smc_poi'}, context=ctx, current_price=100, atr=2)
++base_score = score_entry_confluence(candidate={'price': put_wall, 'family':'baseline'}, context=ctx, current_price=100, atr=2)
++sl_score = score_sl_collision(candidate={'price': put_wall, 'family':'structural_invalidation'}, context=ctx, entry=100, direction='long', atr=2)
++first_barrier = min(float(r['price']) for r in rx['levels'] if float(r['price']) > 100)
++tp_score = score_tp_barrier(candidate={'price': first_barrier-0.05, 'family':'structure_target'}, context=ctx, entry=100, direction='long', atr=2)
++
++theo_ctx = {'market_maker_context': compact_execution_market_maker_context(theo)}
++theo_entry = score_entry_confluence(candidate={'price':99,'family':'smc_poi'}, context=theo_ctx, current_price=100, atr=2)
++
++ok('06_entry_existing_zone_can_receive_observed_options_confluence', entry_score.get('score') is not None and entry_score.get('score',0) >= 50, str(entry_score))
++ok('07_options_cannot_create_baseline_entry', base_score.get('score') is None, str(base_score))
++ok('08_sl_near_observed_reaction_is_penalized_only', sl_score.get('score') is not None and sl_score.get('score',100) < 60, str(sl_score))
++ok('09_tp_before_observed_barrier_is_preferred', tp_score.get('score') is not None and tp_score.get('score',0) >= 75, str(tp_score))
++ok('10_theoretical_surface_abstains_from_execution', theo_entry.get('score') is None, str(theo_entry))
++
++compact = compact_execution_market_maker_context(observed)
++ok('11_hot_execution_context_drops_curves', all(k not in compact for k in ('gex_curve','delta_curve','theta_curve')))
++
++# 2) committee wiring remains bounded, no hard authority
++committee = (ROOT/'execution_specialist_committees.py').read_text(encoding='utf-8')
++ok('12_committee_has_low_weight_entry_greeks', '"options_reaction":0.40' in committee)
++ok('13_committee_has_low_weight_sl_greeks', '"options_collision":0.45' in committee)
++ok('14_committee_has_low_weight_tp_greeks', '"options_barrier":0.45' in committee)
++ok('15_greeks_not_in_harmonic_core', 'scores.get("options_reaction")' not in committee.split('def _harmonic',1)[1].split('def _rank_candidates',1)[0])
++
++# 3) frontend Spot/Futures/Multi support and no polling
++html = (ROOT/'templates'/'index.html').read_text(encoding='utf-8')
++front = (ROOT/'static'/'market_maker_frontend.js').read_text(encoding='utf-8')
++workspace = (ROOT/'static'/'chart_workspace.js').read_text(encoding='utf-8')
++card_idx = html.find('data-indicator="market-maker-options"')
++near = html[max(0,card_idx-250):card_idx]
++ok('16_spot_frontend_contains_greeks_card', card_idx >= 0 and '{% if is_futures' not in near and 'is_multiasset' not in near)
++ok('17_greeks_script_loaded_on_all_pages', "filename='market_maker_frontend.js'" in html and html.find("filename='market_maker_frontend.js'") > html.find('{% endif %}', html.find("filename='futures.js'")))
++ok('18_workspace_keeps_greeks_visible_all_pages', "if (id === 'market-maker-options') return true;" in workspace)
++ok('19_frontend_supports_spot_futures_multi', "return 'multiasset'" in front and "return 'futures'" in front and "return 'spot'" in front)
++ok('20_no_options_polling', 'setInterval(' not in front)
++ok('21_non_direct_assets_use_local_theoretical', 'if (!supportsObservedServer(symbol, market))' in front and 'buildLocalTheoreticalContext' in front)
++ok('22_direct_provider_endpoint_is_generic', '/api/market-maker-context?market=' in front)
++
++# 4) provider + Render resource guard
++opt = (ROOT/'options_market_context.py').read_text(encoding='utf-8')
++render = (ROOT/'render.yaml').read_text(encoding='utf-8')
++app = (ROOT/'app.py').read_text(encoding='utf-8')
++ok('23_provider_direct_underlyings_bounded_btc_eth', 'if sym.startswith("BTC-")' in opt and 'if sym.startswith("ETH-")' in opt and 'return None' in opt)
++ok('24_provider_daily_budget_12mb', 'OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB", "12"' in opt and 'DAILY_PROVIDER_BUDGET_BYTES' in opt)
++ok('25_provider_response_stream_byte_cap', 'stream=True' in opt and 'MAX_RESPONSE_BYTES' in opt and 'iter_content(chunk_size=65536)' in opt)
++ok('26_provider_cache_ttl_2h_default', 'OPTIONS_MM_CACHE_TTL_SECONDS", "7200"' in opt)
++ok('27_render_single_worker_two_threads', '--workers 1 --threads 2' in render)
++ok('28_render_memory_hard_cap_300mb_below_512', 'MEMORY_HARD_LIMIT_MB' in render and 'value: "300"' in render)
++ok('29_render_greeks_provider_budget_present', 'OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB' in render and 'value: "12"' in render)
++ok('30_main_runtime_compacts_greeks_context', 'compact_execution_market_maker_context' in app)
++ok('31_generic_endpoint_no_full_analysis', "@app.route('/api/market-maker-context'" in app and 'NO full analysis is launched' in app)
++ok('32_spot_execution_may_use_direct_observed_chain', "execution_market_type in {'futures', 'spot'}" in app)
++
++# 5) Commit 19/19.1 safety invariants still stated
++runtime = (ROOT/'commit19_1_runtime.py').read_text(encoding='utf-8')
++ok('33_no_new_llm_or_background_threads', '"adds_llm_calls":False' in runtime and '"adds_background_threads":False' in runtime)
++ok('34_safety_rr_leverage_unchanged', '"changes_safety_thresholds":False' in runtime and '"changes_rr_floor":False' in runtime and '"changes_leverage_v6":False' in runtime)
++
++summary = {'passes': len(PASSES), 'fails': len(FAILS), 'failed': FAILS}
++(ROOT/'QA_COMMIT19_1_GREEKS_FINAL_RESULT.json').write_text(json.dumps(summary, indent=2), encoding='utf-8')
++print(json.dumps(summary, indent=2))
++if FAILS:
++    raise SystemExit(1)

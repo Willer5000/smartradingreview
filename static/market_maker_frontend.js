@@ -1,4 +1,4 @@
-/* Commit 17.5.11 — Delta / Gamma / Theta trader-facing panel.
+/* Commit 19.1 FINAL — Delta / Gamma / Theta · Spot/Futures/Multi-Asset.
  *
  * Design goals:
  * - visually match a professional aggregated Greeks/GEX chart;
@@ -9,8 +9,8 @@
  */
 (function () {
     'use strict';
-    if (window.__MM_OPTIONS_FRONTEND_175114__) return;
-    window.__MM_OPTIONS_FRONTEND_175114__ = true;
+    if (window.__MM_OPTIONS_FRONTEND_COMMIT19_1_GREEKS__) return;
+    window.__MM_OPTIONS_FRONTEND_COMMIT19_1_GREEKS__ = true;
 
     const $ = id => document.getElementById(id);
     const finite = v => {
@@ -54,6 +54,7 @@
         if (x === 'POSITIVE_GAMMA') return 'Gamma positiva';
         if (x === 'NEGATIVE_GAMMA') return 'Gamma negativa';
         if (x === 'MIXED_GAMMA') return 'Gamma mixta';
+        if (x === 'THEORETICAL_SHAPE') return 'Curva teórica';
         return x ? x.replaceAll('_', ' ') : '--';
     }
 
@@ -107,6 +108,37 @@
             if (n !== null && n > 0) return n;
         }
         return null;
+    }
+
+    function currentMarket() {
+        if (window.IS_MULTI_ASSET_PAGE === true) return 'multiasset';
+        if (window.IS_FUTURES_PAGE === true) return 'futures';
+        return 'spot';
+    }
+
+    function supportsObservedServer(symbol, market) {
+        const sym = String(symbol || '').toUpperCase().replace('/', '-');
+        // Resource contract: no provider fan-out across the full universe.
+        // Direct observed chain is currently enabled only where the existing
+        // provider adapter has a direct BTC/ETH underlying.
+        return market !== 'multiasset' && (sym.startsWith('BTC-') || sym.startsWith('ETH-'));
+    }
+
+    async function lightweightVisiblePrice(symbol, timeframe, market, seq) {
+        let spot = localSpot();
+        if (spot > 0) return spot;
+        try {
+            const pResp = await fetch(
+                `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=${encodeURIComponent(market)}`,
+                { credentials: 'same-origin', cache: 'no-store' }
+            );
+            const pJson = await pResp.json();
+            if (seq !== requestSeq) return null;
+            spot = finite(pJson?.current_price);
+        } catch (_) {
+            spot = null;
+        }
+        return spot;
     }
 
     function buildLocalTheoreticalContext(spot) {
@@ -174,8 +206,8 @@
         if (title) title.innerHTML = '<i class="fas fa-wave-square me-2"></i>Delta / Gamma / Theta';
         if (subtitle) {
             subtitle.textContent = observed
-                ? 'Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.'
-                : 'Black-Scholes teórico cuando no existe una cadena pública directamente compatible.';
+                ? 'Cadena pública observada + Black-Scholes. Los niveles de opciones actúan sólo como confluencia de ejecución.'
+                : 'Black-Scholes teórico para este activo: sensibilidades visibles, sin inventar Open Interest ni paredes de dealers.';
         }
         const headerLeft = card.querySelector('.card-header > div');
         if (headerLeft && !document.getElementById('mm-aggregate-pill')) {
@@ -203,7 +235,7 @@
         );
         text(
             'mm-option-authority',
-            String(reason || 'Sin datos observados; no se genera sesgo direccional.')
+            String(reason || 'Sin datos observados; no se genera sesgo direccional ni niveles de ejecución.')
         );
         const chart = $('mm-options-chart');
         if (chart) {
@@ -289,8 +321,8 @@
         text(
             'mm-option-authority',
             observed
-                ? 'GEX firmado usa CALL+/PUT− como heurística. Delta neta usa el signo propio de Delta; el Open Interest no revela el inventario real del market maker.'
-                : 'SHADOW teórico: no cambia señal, Entry, SL, TP, leverage ni Safety.'
+                ? 'Los niveles observados pueden actuar como confluencia de ejecución. No crean dirección, no saltan controles de riesgo y CALL+/PUT− sigue siendo una heurística porque el Open Interest no revela inventario real de dealers.'
+                : 'Modelo teórico informativo: no tiene autoridad para mover Entry, SL, TP, leverage ni controles de riesgo.'
         );
 
         const cleanPairs = rows => (Array.isArray(rows) ? rows : [])
@@ -318,7 +350,7 @@
                 y: gy,
                 type: 'scatter',
                 mode: 'lines',
-                name: 'GEX firmado (heurístico)',
+                name: observed ? 'GEX firmado (heurístico)' : 'Gamma teórica relativa',
                 line: {
                     width: 2.8,
                     color: '#18a8e8',
@@ -332,7 +364,7 @@
                 y: dy,
                 type: 'scatter',
                 mode: 'lines',
-                name: 'Delta neta por OI',
+                name: observed ? 'Delta neta por OI' : 'Delta teórica Call+Put',
                 yaxis: 'y2',
                 line: {
                     width: 2.5,
@@ -449,7 +481,7 @@
                 bordercolor: '#3a424a',
                 font: { color: '#f2f5f7' }
             },
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-175114`
+            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-1-greeks`
         };
 
         window.Plotly.react(
@@ -466,25 +498,37 @@
     }
 
     async function refresh() {
-        if (
-            !window.IS_FUTURES_PAGE
-            || window.IS_MULTI_ASSET_PAGE
-            || !$('mm-options-chart')
-        ) return;
+        if (!$('mm-options-chart')) return;
 
         const symbol =
             document.getElementById('symbol-select')?.value
             || window.currentSymbol
+            || (window.PAGE_CONFIG?.defaultSymbol)
             || 'BTC-USDT';
         const timeframe =
             document.getElementById('interval-select')?.value
             || window.currentInterval
+            || (window.PAGE_CONFIG?.defaultTimeframe)
             || '1h';
+        const market = currentMarket();
         const seq = ++requestSeq;
+
+        // Most assets intentionally do NOT call an options provider. They render
+        // a local theoretical surface from the already-visible price/volatility.
+        // This is what makes Greeks available across Spot/Futures/Multi-Asset
+        // without multiplying Render service-initiated bandwidth.
+        if (!supportsObservedServer(symbol, market)) {
+            const spot = await lightweightVisiblePrice(symbol, timeframe, market, seq);
+            if (seq !== requestSeq) return;
+            const local = buildLocalTheoreticalContext(spot);
+            if (local) render({ market_maker_context: local });
+            else unavailable('Precio no disponible para la superficie teórica.');
+            return;
+        }
 
         try {
             const url =
-                `/api/futures/market-maker-context?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
+                `/api/market-maker-context?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`;
             const resp = await fetch(url, {
                 credentials: 'same-origin',
                 cache: 'no-store'
@@ -492,59 +536,28 @@
             const payload = await resp.json();
             if (seq !== requestSeq) return;
 
-            let mm = mmFrom(payload || {});
-            let hasCurves = Boolean(
+            const mm = mmFrom(payload || {});
+            const hasCurves = Boolean(
                 mm && mm.available !== false
                 && Array.isArray(mm.gex_curve) && mm.gex_curve.length >= 3
                 && Array.isArray(mm.delta_curve) && mm.delta_curve.length >= 3
             );
+            if (hasCurves) {
+                render(payload || {});
+                return;
+            }
 
-            if (!hasCurves) {
-                // R.4: the options provider can be unavailable while Futures
-                // itself still has a perfectly valid live price. Fetch only that
-                // lightweight display price once; this is not polling and never
-                // launches the heavy analysis pipeline.
-                let spot = finite(mm?.spot) ?? localSpot();
-                if (!(spot > 0)) {
-                    try {
-                        const pResp = await fetch(
-                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
-                            { credentials: 'same-origin', cache: 'no-store' }
-                        );
-                        const pJson = await pResp.json();
-                        if (seq !== requestSeq) return;
-                        spot = finite(pJson?.current_price);
-                    } catch (_) {
-                        spot = null;
-                    }
-                }
-                const local = buildLocalTheoreticalContext(spot);
-                if (local) {
-                    render({ market_maker_context: local });
-                    return;
-                }
-            }
-            render(payload || {});
-        } catch (err) {
-            // R3 compatibility assertion reference only: render({ reason: 'Contexto de opciones temporalmente no disponible.' })
-            if (seq === requestSeq) {
-                let spot = localSpot();
-                if (!(spot > 0)) {
-                    try {
-                        const pResp = await fetch(
-                            `/api/price?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(timeframe)}&market=futures`,
-                            { credentials: 'same-origin', cache: 'no-store' }
-                        );
-                        const pJson = await pResp.json();
-                        spot = finite(pJson?.current_price);
-                    } catch (_) {
-                        spot = null;
-                    }
-                }
-                const local = buildLocalTheoreticalContext(spot);
-                if (local) render({ market_maker_context: local });
-                else unavailable('Contexto de opciones temporalmente no disponible.');
-            }
+            const spot = finite(mm?.spot) ?? await lightweightVisiblePrice(symbol, timeframe, market, seq);
+            if (seq !== requestSeq) return;
+            const local = buildLocalTheoreticalContext(spot);
+            if (local) render({ market_maker_context: local });
+            else unavailable(mm?.reason || 'Contexto de opciones temporalmente no disponible.');
+        } catch (_) {
+            const spot = await lightweightVisiblePrice(symbol, timeframe, market, seq);
+            if (seq !== requestSeq) return;
+            const local = buildLocalTheoreticalContext(spot);
+            if (local) render({ market_maker_context: local });
+            else unavailable('Contexto de opciones temporalmente no disponible.');
         }
     }
 
@@ -555,7 +568,7 @@
 
     function installAnalysisHook() {
         if (
-            window.__MM_OPTIONS_UPDATE_HOOKED_175114__
+            window.__MM_OPTIONS_UPDATE_HOOKED_COMMIT19_1_GREEKS__
             || typeof window.updateAllCharts !== 'function'
         ) return;
         const original = window.updateAllCharts;
@@ -568,11 +581,10 @@
             } catch (_) { schedule(80); }
             return out;
         };
-        window.__MM_OPTIONS_UPDATE_HOOKED_175114__ = true;
+        window.__MM_OPTIONS_UPDATE_HOOKED_COMMIT19_1_GREEKS__ = true;
     }
 
     function init() {
-        if (window.IS_FUTURES_PAGE === false || window.IS_MULTI_ASSET_PAGE === true) return;
         installAnalysisHook();
         document.getElementById('symbol-select')
             ?.addEventListener?.('change', () => schedule(180));

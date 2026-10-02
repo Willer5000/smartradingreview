@@ -17742,7 +17742,7 @@ class TradingExpertSystem:
                         # crypto Futures may use a cached Deribit public summary.
                         # This happens only after a directional execution candidate
                         # exists, so bandwidth is bounded and failures are fail-open.
-                        if execution_market_type == 'futures' and not _option_chain:
+                        if execution_market_type in {'futures', 'spot'} and not _option_chain:
                             try:
                                 from options_market_context import get_crypto_option_chain
                                 _chain_snapshot = get_crypto_option_chain(symbol) or {}
@@ -17761,6 +17761,14 @@ class TradingExpertSystem:
                             option_chain=_option_chain if isinstance(_option_chain, (list, tuple)) else [],
                             realized_or_implied_volatility=_mm_vol,
                         ) or {}
+                        # Commit 19.1 FINAL: keep curves out of the hot analysis
+                        # object. Committees need only compact observed reaction
+                        # levels; the frontend requests chart curves on demand.
+                        try:
+                            from greeks_execution_context_19_1 import compact_execution_market_maker_context
+                            _market_maker_context = compact_execution_market_maker_context(_market_maker_context)
+                        except Exception:
+                            pass
                     except Exception:
                         _market_maker_context = {'authority': 'UNAVAILABLE_FAIL_OPEN', 'production_score_adjustment': 0.0}
 
@@ -35481,7 +35489,7 @@ def _attach_mm_ui_context(result, market='futures'):
     if not isinstance(chain, (list, tuple)):
         chain = []
     symbol = str(out.get('symbol') or '').upper().replace('/', '-')
-    if not chain and str(market or '').lower() == 'futures' and symbol.startswith(('BTC-', 'ETH-')):
+    if not chain and str(market or '').lower() in {'futures', 'spot'} and symbol.startswith(('BTC-', 'ETH-')):
         try:
             from options_market_context import get_crypto_option_chain
             snap = get_crypto_option_chain(symbol) or {}
@@ -36596,85 +36604,111 @@ def api_multiasset_signals_active():
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180],'signals':[]}),500
 
+@app.route('/api/market-maker-context', methods=['GET'])
 @app.route('/api/futures/market-maker-context', methods=['GET'])
 def api_futures_market_maker_context():
-    """Lightweight Greeks/GEX endpoint; never launches a full market analysis."""
-    user=_require_auth()
-    if not isinstance(user,str):
-        return user
-    symbol=str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/','-')
-    timeframe=str(request.args.get('timeframe') or '1h')
-    result={}
-    try:
-        with _futures_analysis_cache['lock']:
-            _cache_data=dict(_futures_analysis_cache.get('data') or {})
-        _analyses=dict(_cache_data.get('analysis') or {})
-        result=dict(_analyses.get((symbol,timeframe)) or {})
-    except Exception:
-        result={}
-    # Rich UI cache is often newer than the compact 30-cell runtime snapshot.
-    if not result:
-        try:
-            _ui_mm = _get_futures_ui_cached(symbol,timeframe)
-            if isinstance(_ui_mm,dict): result=dict(_ui_mm)
-        except Exception:
-            pass
-    levels=dict(result.get('levels') or {}) if isinstance(result,dict) else {}
-    mm=dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result,dict) else {}
+    """Commit 19.1 FINAL — lightweight Greeks/GEX context for every page.
 
-    # A user opening this indicator may request one lawful provider snapshot.
-    # options_market_context itself caches BTC/ETH for one hour. No polling and
-    # no full Futures analysis are triggered here.
+    Resource contract:
+    * NO full analysis is launched;
+    * observed provider requests are permitted only for direct BTC/ETH option
+      underlyings on Spot/Futures and are protected by the provider TTL + daily
+      byte budget in options_market_context.py;
+    * all other Futures/Spot/Multi-Asset symbols use a local/theoretical chart
+      in the browser (or a cached theoretical server context if one already
+      exists), so no new external request is created for those assets.
+    """
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+
+    legacy_futures = str(getattr(request, 'path', '') or '').startswith('/api/futures/')
+    market = str(request.args.get('market') or ('futures' if legacy_futures else 'spot')).strip().lower()
+    if market not in {'spot', 'futures', 'multiasset'}:
+        market = 'spot'
+    symbol = str(request.args.get('symbol') or 'BTC-USDT').upper().replace('/', '-')
+    timeframe = str(request.args.get('timeframe') or ('1h' if market != 'spot' else '1D'))
+
+    result = {}
+    if market == 'futures':
+        try:
+            with _futures_analysis_cache['lock']:
+                _cache_data = dict(_futures_analysis_cache.get('data') or {})
+            _analyses = dict(_cache_data.get('analysis') or {})
+            result = dict(_analyses.get((symbol, timeframe)) or {})
+        except Exception:
+            result = {}
+        if not result:
+            try:
+                _ui_mm = _get_futures_ui_cached(symbol, timeframe)
+                if isinstance(_ui_mm, dict):
+                    result = dict(_ui_mm)
+            except Exception:
+                pass
+    elif market == 'multiasset':
+        try:
+            with _MULTI_ASSET_CACHE['lock']:
+                _multi = dict(_MULTI_ASSET_CACHE.get('analysis') or {})
+            result = dict(_multi.get((symbol, timeframe)) or {})
+        except Exception:
+            result = {}
+
+    levels = dict(result.get('levels') or {}) if isinstance(result, dict) else {}
+    mm = dict(levels.get('market_maker_context') or result.get('market_maker_context') or {}) if isinstance(result, dict) else {}
+
+    direct_observed = market in {'spot', 'futures'} and symbol.startswith(('BTC-', 'ETH-'))
     try:
-        if symbol.startswith(('BTC-','ETH-')) and not bool(mm.get('observed_option_chain')):
+        if direct_observed and not bool(mm.get('observed_option_chain')):
             from options_market_context import get_crypto_option_chain
-            snap=get_crypto_option_chain(symbol) or {}
-            rows=snap.get('rows') or []
-            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
+            snap = get_crypto_option_chain(symbol) or {}
+            rows = snap.get('rows') or []
+            spot = float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
             if spot <= 0 and rows:
-                spot=float((rows[0] or {}).get('underlying_price') or 0)
-            if spot <= 0:
-                try:
-                    market=_get_futures_system(); df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
-                    if df is not None and not getattr(df,'empty',True): spot=float(df['close'].iloc[-1])
-                except Exception: spot=0.0
+                spot = float((rows[0] or {}).get('underlying_price') or 0)
+            # Do not perform an extra market-data HTTP call solely for this
+            # panel. If provider rows do not include an underlying price, the
+            # browser falls back to its already-visible market price.
             if spot > 0:
                 from market_maker_math import build_market_maker_context
-                mm=build_market_maker_context(
+                mm = build_market_maker_context(
                     spot=spot,
                     option_chain=rows,
-                    realized_or_implied_volatility=_estimate_mm_volatility(result or {'levels':{'entry':spot}}),
+                    realized_or_implied_volatility=_estimate_mm_volatility(result or {'levels': {'entry': spot}}),
                     as_of=(result.get('source_candle_close_timestamp') if result else None),
                 ) or {}
-        elif not mm:
-            spot=float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0) if result else 0.0
-            if spot <= 0:
-                # UI-only lightweight fallback: the chart must not disappear
-                # just because the rich Futures analysis cache was evicted.
-                try:
-                    market=_get_futures_system()
-                    df=market.get_kucoin_data(symbol,timeframe) if market is not None else None
-                    if df is not None and not getattr(df,'empty',True):
-                        spot=float(df['close'].iloc[-1])
-                except Exception:
-                    spot=0.0
+                if isinstance(mm, dict):
+                    mm['provider_budget'] = {
+                        'cache_hit': bool(snap.get('cache_hit')),
+                        'bytes_today': int(snap.get('provider_bytes_today') or 0),
+                        'daily_budget_bytes': int(snap.get('provider_daily_budget_bytes') or 0),
+                    }
+        elif not mm and result:
+            spot = float(result.get('live_price') or result.get('current_price') or levels.get('entry') or 0)
             if spot > 0:
                 from market_maker_math import build_market_maker_context
-                _mm_seed = result if result else {'current_price':spot,'levels':{'entry':spot}}
-                mm=build_market_maker_context(
-                    spot=spot, option_chain=[],
-                    realized_or_implied_volatility=_estimate_mm_volatility(_mm_seed),
-                    as_of=(result.get('source_candle_close_timestamp') if result else None),
+                mm = build_market_maker_context(
+                    spot=spot,
+                    option_chain=[],
+                    realized_or_implied_volatility=_estimate_mm_volatility(result),
+                    as_of=result.get('source_candle_close_timestamp'),
                 ) or {}
     except Exception as exc:
         if not mm:
-            mm={'available':False,'authority':'NO_AUTHORITY','reason':type(exc).__name__}
+            mm = {'available': False, 'authority': 'NO_AUTHORITY', 'reason': type(exc).__name__}
+
     return jsonify({
-        'success':True,'symbol':symbol,'timeframe':timeframe,
-        'cache_only_market_analysis':True,
-        'market_maker_context':mm,
-        'note':'No inicia análisis Futures; BTC/ETH puede usar una cadena pública cacheada por solicitud del usuario.'
-    }),200
+        'success': True,
+        'market': market,
+        'symbol': symbol,
+        'timeframe': timeframe,
+        'cache_only_market_analysis': True,
+        'direct_observed_provider_eligible': bool(direct_observed),
+        'market_maker_context': mm,
+        'note': (
+            'Cadena pública directa sólo para subyacentes compatibles y bajo presupuesto; '
+            'resto de activos usa superficie teórica local sin autoridad de Entry/SL/TP.'
+        ),
+    }), 200
 
 
 @app.route('/api/diagnostics/pipeline-integrity', methods=['GET'])

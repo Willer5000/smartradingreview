@@ -1,0 +1,293 @@
+{
+  "commit": "COMMIT19_CHAMPION_EDGE_EXECUTION",
+  "registry_version": "COMMIT19_CHAMPION_EDGE_EXECUTION_V1",
+  "raw_replay_30m": {
+    "source": "BACKTEST_ROWS_17_5_10_PROFITABILITY.csv",
+    "evidence_level": "RAW_COHORT_REPLAY_IN_ZIP",
+    "in_sample": {
+      "n": 11,
+      "tp": 5,
+      "sl": 1,
+      "expired_after_entry": 4,
+      "other_unresolved": 1,
+      "net_stress_r": 1.702,
+      "expectancy_stress_r": 0.1547,
+      "profit_factor_stress": 1.254,
+      "max_drawdown_r": 2.236,
+      "conservative_tp_rate_pct": 45.45
+    },
+    "out_of_sample": {
+      "n": 4,
+      "tp": 3,
+      "sl": 0,
+      "expired_after_entry": 1,
+      "other_unresolved": 0,
+      "net_stress_r": 3.928,
+      "expectancy_stress_r": 0.982,
+      "profit_factor_stress": 4.513,
+      "max_drawdown_r": 1.118,
+      "conservative_tp_rate_pct": 75.0
+    },
+    "combined": {
+      "n": 15,
+      "tp": 8,
+      "sl": 1,
+      "expired_after_entry": 5,
+      "other_unresolved": 1,
+      "net_stress_r": 5.63,
+      "expectancy_stress_r": 0.3753,
+      "profit_factor_stress": 1.719,
+      "max_drawdown_r": 2.236,
+      "conservative_tp_rate_pct": 53.33
+    },
+    "bootstrap": {
+      "iterations": 20000,
+      "seed": 17510,
+      "probability_mean_gt_zero": 0.9029,
+      "ci95_mean_r": [
+        -0.3713,
+        1.122
+      ],
+      "interpretation": "CI95_INCLUDES_ZERO_SMALL_SAMPLE"
+    },
+    "release_pass": true
+  },
+  "champions": {
+    "F30_SHARED_LIQ_SWEEP_MSS_POI_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "BTC-USDT",
+        "ETH-USDT",
+        "SOL-USDT",
+        "XRP-USDT",
+        "ADA-USDT",
+        "LINK-USDT"
+      ],
+      "timeframe": "30M",
+      "state": "LIVE_CHAMPION",
+      "source_type": "RAW_COHORT_REPLAY_IN_ZIP",
+      "parts": {
+        "is": {
+          "n": 11,
+          "net_r": 1.702,
+          "expectancy_r": 0.1547,
+          "pf": 1.254,
+          "max_dd_r": 2.236,
+          "profitable": true
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.928,
+          "expectancy_r": 0.982,
+          "pf": 4.513,
+          "max_dd_r": 1.118,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "STRUCTURAL_POI",
+        "sl_mode": "STRUCTURAL_INVALIDATION",
+        "tp_mode": "STRUCTURAL_REACHABLE",
+        "rr": null,
+        "note": "Uses the production-stored structural Entry/SL/TP geometry represented by the replay cohort."
+      }
+    },
+    "ETH_2H_LONG_RSI_TREND_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "ETH-USDT"
+      ],
+      "timeframe": "2H",
+      "state": "LIVE_CHAMPION",
+      "source_type": "GOVERNED_RESEARCH_CAUSAL_EVIDENCE",
+      "parts": {
+        "is": {
+          "n": 40,
+          "expectancy_r": 0.08658,
+          "pf": 1.1848,
+          "profitable": true
+        },
+        "selection": {
+          "n": 14,
+          "expectancy_r": 0.16459,
+          "pf": 1.4815,
+          "profitable": true
+        },
+        "oos": {
+          "n": 14,
+          "expectancy_r": 0.33306,
+          "pf": 1.9675,
+          "max_dd_r": 2.8382,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "NEXT_OPEN",
+        "entry_atr": 0.0,
+        "sl_atr": 2.0,
+        "rr": 2.0
+      }
+    },
+    "SOL_2H_SHORT_SUPERTREND_PULLBACK_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "SOL-USDT"
+      ],
+      "timeframe": "2H",
+      "state": "LIVE_CHAMPION",
+      "source_type": "GOVERNED_RESEARCH_CAUSAL_EVIDENCE",
+      "parts": {
+        "is": {
+          "n": 23,
+          "expectancy_r": 0.1015,
+          "pf": 1.1378,
+          "profitable": true
+        },
+        "selection": {
+          "n": 8,
+          "expectancy_r": 0.50334,
+          "pf": 1.8731,
+          "profitable": true
+        },
+        "oos": {
+          "n": 8,
+          "expectancy_r": 0.31297,
+          "pf": 1.416,
+          "max_dd_r": 2.6281,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "PULLBACK",
+        "entry_atr": 0.18,
+        "sl_atr": 0.9,
+        "rr": 3.0
+      }
+    },
+    "XRP_2H_SHORT_TREND_CONTINUATION_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "XRP-USDT"
+      ],
+      "timeframe": "2H",
+      "state": "LIVE_CHAMPION",
+      "source_type": "GOVERNED_RESEARCH_CAUSAL_EVIDENCE",
+      "parts": {
+        "is": {
+          "n": 52,
+          "expectancy_r": 0.11126,
+          "pf": 1.2117,
+          "profitable": true
+        },
+        "selection": {
+          "n": 17,
+          "expectancy_r": 0.33056,
+          "pf": 1.8261,
+          "profitable": true
+        },
+        "oos": {
+          "n": 18,
+          "expectancy_r": 0.27854,
+          "pf": 1.5187,
+          "max_dd_r": 4.7945,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "NEXT_OPEN",
+        "entry_atr": 0.0,
+        "sl_atr": 1.4,
+        "rr": 3.0
+      }
+    },
+    "LINK_4H_SHORT_RSI_TREND_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "LINK-USDT"
+      ],
+      "timeframe": "4H",
+      "state": "LIVE_CHAMPION",
+      "source_type": "GOVERNED_RESEARCH_CAUSAL_EVIDENCE_PARITY_REPAIRED_IN_C19",
+      "parts": {
+        "is": {
+          "n": 49,
+          "expectancy_r": 0.00714,
+          "pf": 1.0163,
+          "profitable": true
+        },
+        "selection": {
+          "n": 16,
+          "expectancy_r": 0.54218,
+          "pf": 3.6331,
+          "profitable": true
+        },
+        "oos": {
+          "n": 17,
+          "expectancy_r": 0.27538,
+          "pf": 1.8529,
+          "max_dd_r": 2.2538,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "PULLBACK",
+        "entry_atr": 0.18,
+        "sl_atr": 1.15,
+        "rr": 2.0
+      }
+    },
+    "US_INDEX_1D_TREND_PULLBACK_RR18_V1": {
+      "market": "MULTIASSET",
+      "symbols": [
+        "SPY-USDT",
+        "QQQ-USDT"
+      ],
+      "timeframe": "1D",
+      "state": "LIVE_CHAMPION",
+      "source_type": "PRIOR_INDEPENDENT_PUBLIC_HISTORY_BACKTEST_EVIDENCE",
+      "parts": {
+        "is": {
+          "n": 213,
+          "expectancy_r": 0.0211,
+          "pf": 1.043,
+          "profitable": true
+        },
+        "selection": {
+          "n": 71,
+          "expectancy_r": 0.013,
+          "pf": 1.03,
+          "profitable": true
+        },
+        "oos": {
+          "n": 72,
+          "expectancy_r": 0.5055,
+          "pf": 2.912,
+          "profitable": true
+        }
+      },
+      "release_pass": true,
+      "historical_geometry": {
+        "entry_style": "PULLBACK",
+        "sl_mode": "STRUCTURAL_ATR",
+        "rr": 1.8
+      }
+    }
+  },
+  "acceptance": {
+    "raw_30m_is_oos_profitable": true,
+    "all_registry_champions_positive_is_oos": true,
+    "all_release_pass": true,
+    "future_profit_guarantee": false
+  },
+  "limitations": [
+    "30m is the only route whose row-level cohort is physically present in the attached Main ZIP and is re-executed here.",
+    "ETH/SOL/XRP/LINK use governed causal IS/Selection/OOS metrics audited from Research/Supabase; their raw candle datasets are not in the attached Main ZIP.",
+    "US_INDEX 1D uses the independent public-history IS/Selection/OOS result recorded by the Commit-19 audit; the external raw price dataset is not bundled here.",
+    "Positive historical IS/OOS evidence is a release criterion, not a guarantee of future profitability."
+  ]
+}

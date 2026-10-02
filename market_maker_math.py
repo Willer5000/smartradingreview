@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from math import erf, exp, log, pi, sqrt
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
-VERSION = "COMMIT17_5_11R_MM_MATH_QA_V3"
+VERSION = "COMMIT19_1_GREEKS_EXECUTION_QA_V1"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -252,8 +252,8 @@ def _shadow_context(
         flags.append("HIGH_NEAR_EXPIRY_GAMMA_SHARE")
 
     return {
-        "version": "17.5.10.2_GREEKS_SHADOW_CONTEXT_V1",
-        "authority": "SHADOW_CONTEXT_ONLY",
+        "version": "COMMIT19_1_GREEKS_REACTION_CONTEXT_V1",
+        "authority": ("OBSERVED_CONFLUENCE_RANKER_ONLY" if observed else "SHADOW_THEORETICAL_ONLY"),
         "observed_chain": bool(observed),
         "context_quality_score": round(quality, 2),
         "gamma_regime": gamma_regime,
@@ -266,19 +266,23 @@ def _shadow_context(
         "local_gex_shape": shape,
         "flags": flags,
         "consumers": [
-            "EXECUTION_CONTEXT_SHADOW",
-            "ENTRY_LOCATION_SHADOW",
-            "TP_LOCATION_SHADOW",
+            "EXECUTION_CONTEXT",
+            "ENTRY_LOCATION_CONFLUENCE",
+            "SL_REACTION_COLLISION",
+            "TP_BARRIER_CONFLUENCE",
             "RISK_CONTEXT_SHADOW",
             "REVIEWTRADER_POINT_IN_TIME_LEARNING",
         ],
         "can_create_direction": False,
-        "can_modify_entry": False,
-        "can_modify_sl": False,
-        "can_modify_tp": False,
+        # Observed chains may rank ALREADY-EXISTING technical candidates only.
+        # They never manufacture a price and theoretical surfaces retain zero authority.
+        "can_modify_entry": bool(observed),
+        "can_modify_sl": bool(observed),
+        "can_modify_tp": bool(observed),
+        "can_create_standalone_execution_level": False,
         "can_raise_leverage": False,
         "can_bypass_safety": False,
-        "requires_point_in_time_oos_before_live_authority": True,
+        "requires_point_in_time_oos_before_direction_authority": True,
         "as_of": as_of.isoformat(),
     }
 
@@ -441,6 +445,13 @@ def aggregate_gamma_exposure(
         "available": True,
         "authority": "CONTEXT_ONLY_NOT_DIRECTION",
         "observed_option_chain": True,
+        "execution_reaction_map_authority": "OBSERVED_CONFLUENCE_RANKER_ONLY",
+        "context_quality_score": specialist_shadow.get("context_quality_score"),
+        "can_refine_entry": True,
+        "can_refine_sl": True,
+        "can_refine_tp": True,
+        "can_create_standalone_execution_level": False,
+        "can_raise_leverage": False,
         "dealer_position_sign": "HEURISTIC_CALL_PLUS_PUT_MINUS_NOT_OBSERVED",
         "delta_exposure_semantics": "OPTION_DELTA_OI_NET_NOT_DEALER_INVENTORY",
         "confidence": confidence,
@@ -527,15 +538,45 @@ def theoretical_gamma_shape(
         "context_quality_score": 0.0,
         "requires_observed_chain_for_learning": True,
     })
+    atm_call = black_scholes_greeks(
+        spot=s, strike=s, t_years=t, volatility=vol, option_type="CALL"
+    )
+    atm_put = black_scholes_greeks(
+        spot=s, strike=s, t_years=t, volatility=vol, option_type="PUT"
+    )
+    representative = {
+        "call": {
+            "strike": round(s, 10), "expiry_hours": round(t * 365.0 * 24.0, 4),
+            "iv": round(vol, 6), "delta": round(atm_call["delta"], 6),
+            "gamma": round(atm_call["gamma"], 10), "vega": round(atm_call["vega"], 6),
+            "theta_per_day": round(atm_call["theta_per_day"], 6),
+        },
+        "put": {
+            "strike": round(s, 10), "expiry_hours": round(t * 365.0 * 24.0, 4),
+            "iv": round(vol, 6), "delta": round(atm_put["delta"], 6),
+            "gamma": round(atm_put["gamma"], 10), "vega": round(atm_put["vega"], 6),
+            "theta_per_day": round(atm_put["theta_per_day"], 6),
+        },
+    }
     return {
         "version": VERSION, "available": True,
         "authority": "SHADOW_THEORETICAL_ONLY",
         "observed_option_chain": False,
+        "execution_reaction_map_authority": "NO_LIVE_EXECUTION_AUTHORITY",
+        "context_quality_score": 0.0,
+        "can_refine_entry": False, "can_refine_sl": False, "can_refine_tp": False,
+        "can_create_standalone_execution_level": False, "can_raise_leverage": False,
         "dealer_position_sign": "NOT_AVAILABLE_THEORETICAL_SHAPE_ONLY",
         "confidence": "THEORETICAL", "contracts_used": 0, "spot": round(s,10),
         "gamma_regime": "THEORETICAL_SHAPE",
         "gamma_wall": None, "call_wall": None, "put_wall": None,
         "zero_gamma_level": None, "delta_neutral_level": None,
+        "representative_atm_greeks": representative,
+        "aggregate_vega_per_iv_point": None,
+        "aggregate_theta_per_day": None,
+        "heuristic_signed_delta_dollars": None,
+        "heuristic_signed_gamma_exposure": None,
+        "zero_dte_gamma_share": 0.0,
         "gex_curve": gex_curve, "delta_curve": delta_curve, "theta_curve": theta_curve,
         "specialist_shadow_context": shadow, "production_score_adjustment": 0.0,
         "can_create_direction": False, "can_bypass_safety": False,

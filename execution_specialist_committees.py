@@ -20,7 +20,7 @@ from math import isfinite, sqrt
 from statistics import median
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "COMMIT17_5_11R_1_CONTEXT_ALIGNED_EXECUTION_V1"
+VERSION = "COMMIT19_1_GREEKS_CONTEXT_ALIGNED_EXECUTION_V1"
 
 try:
     from preliminary_backtest_prior import (
@@ -166,12 +166,13 @@ def build_execution_context(*, structure=None, volume=None, volatility=None,
         "sentiment_value": round(sentiment_value, 2),
         "sentiment_bias": str(sentiment.get("sentiment_bias") or "neutral"),
         "market_regime": str(market_regime.get("regime") or market_regime.get("state") or "UNKNOWN"),
-        # 17.5.10: Black-Scholes/Greeks/GEX context is carried into the
-        # execution desk, but has zero production score authority until a
-        # point-in-time options replay validates it.  Workers can reason about
-        # gamma walls/delta-neutral levels without turning them into votes.
+        # Commit 19.1 FINAL: observed option-chain reaction levels are a
+        # bounded execution tie-breaker only. Theoretical surfaces remain
+        # context-only. Neither mode can create direction, bypass Safety, or
+        # manufacture a standalone Entry/SL/TP level.
         "market_maker_context": market_maker_context,
         "market_maker_authority": str(market_maker_context.get("authority") or "UNAVAILABLE"),
+        "greeks_execution_authority": str(market_maker_context.get("execution_reaction_map_authority") or "NO_LIVE_EXECUTION_AUTHORITY"),
     }
 
 
@@ -769,6 +770,21 @@ def _entry_specialists(candidate, universe, *, direction, current_price, atr,
         "context": context_score, "backtest_prior": _clip(backtest_score),
     }
 
+    # Commit 19.1 FINAL — observed Greeks/option levels can only strengthen an
+    # existing technical Entry candidate. The helper abstains for theoretical
+    # surfaces and for the baseline-only candidate, preventing options from
+    # becoming an unbacktested standalone signal/price generator.
+    try:
+        from greeks_execution_context_19_1 import score_entry_confluence
+        _greeks = score_entry_confluence(
+            candidate=candidate, context=context, current_price=current_price, atr=atr
+        ) or {}
+        if _greeks.get("score") is not None:
+            scores["options_reaction"] = _clip(_f(_greeks.get("score")))
+            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
+    except Exception:
+        pass
+
     # COMMIT 17.5.11R — validated execution route (ranker only).
     # Historical execution-forensics were split chronologically 70/30 before
     # promotion. LIQUIDITY_SWEEP_MSS_POI passed the stricter hit-efficiency +
@@ -903,9 +919,20 @@ def _sl_specialists(candidate, universe, *, direction, entry, tp_hint, atr,
     except Exception:
         backtest_score = 50.0
 
-    return {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
-            "liquidity":liquidity,"risk":risk,"strategy":strategy,
-            "backtest_prior":_clip(backtest_score)}
+    scores = {"invalidation":invalidation,"noise":noise,"reaction_collision":collision,
+              "liquidity":liquidity,"risk":risk,"strategy":strategy,
+              "backtest_prior":_clip(backtest_score)}
+    try:
+        from greeks_execution_context_19_1 import score_sl_collision
+        _greeks = score_sl_collision(
+            candidate=candidate, context=context, entry=entry, direction=direction, atr=atr
+        ) or {}
+        if _greeks.get("score") is not None:
+            scores["options_collision"] = _clip(_f(_greeks.get("score")))
+            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
+    except Exception:
+        pass
+    return scores
 
 
 def _path_barrier_score(tp: float, entry: float, direction: str, structure: Dict[str, Any], atr: float, liquidation=None) -> float:
@@ -1006,10 +1033,21 @@ def _tp_specialists(candidate, universe, *, direction, entry, sl, atr, structure
     except Exception:
         backtest_score = 50.0
 
-    return {"target":target,"path":path,"touch_probability":touch,
-            "continuation":continuation,"economics":economics,
-            "strategy":strategy,"context":context_score,
-            "backtest_prior":_clip(backtest_score)}
+    scores = {"target":target,"path":path,"touch_probability":touch,
+              "continuation":continuation,"economics":economics,
+              "strategy":strategy,"context":context_score,
+              "backtest_prior":_clip(backtest_score)}
+    try:
+        from greeks_execution_context_19_1 import score_tp_barrier
+        _greeks = score_tp_barrier(
+            candidate=candidate, context=context, entry=entry, direction=direction, atr=atr
+        ) or {}
+        if _greeks.get("score") is not None:
+            scores["options_barrier"] = _clip(_f(_greeks.get("score")))
+            candidate["options_reaction_context"] = {k:v for k,v in _greeks.items() if k != "score"}
+    except Exception:
+        pass
+    return scores
 
 
 def _weights_for(role: str, market_type: str) -> Dict[str, float]:
@@ -1018,18 +1056,19 @@ def _weights_for(role: str, market_type: str) -> Dict[str, float]:
         # Spot is slightly more tolerant; derivatives demand reaction + fill quality.
         base = {"reaction":1.25,"smc":1.20,"strategy":1.05,"reachability":1.15,
                 "volatility":0.85,"flow":0.85,"context":0.75,"backtest_prior":0.0,
-                "validated_liquidity_route":0.90}
+                "validated_liquidity_route":0.90,"options_reaction":0.40}
         if market in {"futures","multiasset"}:
             base.update({"reaction":1.35,"smc":1.30,"reachability":1.25,"volatility":1.0})
         return base
     if role == "sl":
         base = {"invalidation":1.35,"noise":1.05,"reaction_collision":1.25,
-                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0}
+                "liquidity":1.0,"risk":1.15,"strategy":0.9,"backtest_prior":0.0,
+                "options_collision":0.45}
         if market == "spot": base["risk"] = 1.0
         return base
     return {"target":1.20,"path":1.25,"touch_probability":1.25,
             "continuation":0.95,"economics":1.25,"strategy":0.9,"context":0.7,
-            "backtest_prior":0.0}
+            "backtest_prior":0.0,"options_barrier":0.45}
 
 
 def _harmonic(values: Iterable[float]) -> Optional[float]:

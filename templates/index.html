@@ -1283,13 +1283,12 @@
                         </div>
                     </div>
 
-                {% if is_futures and not is_multiasset|default(false) %}
-                <!-- COMMIT 17.5.10 FINAL — BLACK-SCHOLES / GAMMA / 0DTE / DELTA -->
+                <!-- COMMIT 19.1 FINAL — GREEKS / OPTIONS REACTION MAP · SPOT + FUTURES + MULTI -->
                 <div class="card bg-dark border-info mb-4 indicator-card" data-indicator="market-maker-options">
                     <div class="card-header d-flex justify-content-between align-items-center bg-info bg-opacity-10">
                         <div>
                             <h5 class="mb-0"><i class="fas fa-wave-square me-2"></i>Delta / Gamma / Theta</h5>
-                            <small class="text-muted">Black-Scholes + exposición Gamma/Delta derivada de opciones públicas cuando existe cadena compatible.</small>
+                            <small class="text-muted">Greeks y mapa de reacción: cadena observada cuando existe un subyacente directo; modelo teórico claramente identificado en el resto.</small>
                         </div>
                         <span id="mm-option-source" class="badge bg-secondary">Esperando datos</span>
                     </div>
@@ -1336,7 +1335,6 @@
                         </div>
                     </div>
                 </div>
-                {% endif %}
 
                 {% if is_futures %}
                 <!-- COMMIT 15B — ORDER BOOK / ORDER FLOW MICROSTRUCTURE -->
@@ -2677,15 +2675,17 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20261001-COMMIT18-1-1-MEMORY-STABILITY"
-    ></script>
-    <script
-        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261001-COMMIT18-1-1-MEMORY-STABILITY"
+        src="{{ url_for('static', filename='futures.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"
     ></script>
 
     {% endif %}
 
-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20260911-C15-ORDERFLOW"></script>
+    <!-- Greeks chart is shared by Spot, Futures and Multi-Asset. -->
+    <script
+        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"
+    ></script>
+
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20261001-COMMIT19-1-GREEKS-FINAL"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->
