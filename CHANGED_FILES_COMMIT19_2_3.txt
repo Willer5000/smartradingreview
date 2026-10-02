@@ -1,0 +1,28 @@
+Runtime/code:
+- app.py
+- candle_close_authority_19_2_3.py (new)
+- commit19_2_3_main_entrypoint.py (new)
+- Procfile
+- render.yaml
+
+QA/release docs:
+- qa_commit19_2_3.py
+- qa_commit19_2_regression_19_2_3.py
+- qa_commit19_2_1_regression_19_2_3.py
+- qa_commit19_2_2_regression_19_2_3.py
+- QA_COMMIT19_2_3.txt
+- QA_COMMIT19_2_REGRESSION_19_2_3.txt
+- QA_COMMIT19_2_1_REGRESSION_19_2_3.txt
+- QA_COMMIT19_2_2_REGRESSION_19_2_3.txt
+- QA_COMMIT19_1_REGRESSION_19_2_3.txt
+- QA_17_5_11R1_REGRESSION_19_2_3.txt
+- BACKTEST_COMMIT19_RESULT_19_2_3.md
+- BACKTEST_COMMIT19_19_2_3_CONSOLE.txt
+- AUDITORIA_COMMIT19_2_3_CANDLE_CLOSE_AUTHORITY.md
+- PROMPT_MAESTRO_COMMIT19_2_3.md
+- README_COMMIT19_2_3.md
+- RELEASE_NOTES_COMMIT19_2_3.md
+- RESOURCE_BUDGET_COMMIT19_2_3.md
+- ROLLBACK_COMMIT19_2_3.md
+- INSTRUCCIONES_INSTALACION_COMMIT19_2_3.md
+- COMMIT_MESSAGE_COMMIT19_2_3.txt

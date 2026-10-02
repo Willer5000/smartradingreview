@@ -1,0 +1,7 @@
+Commit 19.2.3 — Candle Close Authority & Telegram Timing
+
+- Anchor 1W to Monday 00:00 UTC instead of Unix-epoch weekday.
+- Send CONFIRMED Telegram only within bounded post-close freshness windows.
+- Persist per-timeframe Spot close watermarks and recompute only TFs that actually closed.
+- Apply same close authority to Spot/Futures/Multi without lowering quality gates.
+- Preserve Render 1 worker / 2 threads and existing RAM/egress budgets.

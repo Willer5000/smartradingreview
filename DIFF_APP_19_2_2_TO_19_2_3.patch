@@ -1,0 +1,345 @@
+--- /mnt/data/c19_2_2_work/app.py	2026-10-02 04:19:10.851785666 +0000
++++ /mnt/data/c19_2_3_work/app.py	2026-10-02 04:56:51.520637756 +0000
+@@ -30567,12 +30567,32 @@
+     'last_error': None,
+ }
+ 
+-# HOTFIX H.3 — Spot sólo necesita reconstruir el universo 4h/12h/1D/1W
+-# cuando aparece una nueva vela cerrada del TF operativo más rápido (4h).
+-# El endpoint puede seguir consultándose cada pocos minutos, pero devuelve el
+-# último snapshot y NO dispara 12 análisis pesados cada 10/60 minutos.
++# Commit 19.2.3 — closed-candle authority.
++# Spot no longer rebuilds 12 analyses merely because a 4h bucket changed.
++# Every timeframe owns an explicit UTC close watermark.  1D is refreshed only
++# after 00:00 UTC; 1W only after Monday 00:00 UTC.  Missing legacy watermarks
++# cause one safe catch-up after deploy, then persist in the compact snapshot.
+ _SPOT_PREVIOUS_FASTEST_SECONDS = 4 * 60 * 60
+ _SPOT_PREVIOUS_CLOSE_GRACE_SECONDS = 90
++_SPOT_CONFIRMED_WATERMARK_ATTR = 'spot_confirmed_close_watermarks'
++
++def _spot_confirmed_watermarks():
++    raw = getattr(expert_system, _SPOT_CONFIRMED_WATERMARK_ATTR, None)
++    return dict(raw) if isinstance(raw, dict) else {}
++
++
++def _spot_due_confirmed_timeframes(now_utc=None):
++    try:
++        from candle_close_authority_19_2_3 import due_spot_timeframes
++        return due_spot_timeframes(
++            _spot_confirmed_watermarks(),
++            now=now_utc,
++            timeframes=('4h', '12h', '1D', '1W'),
++        )
++    except Exception as exc:
++        print(f"⚠️ [SPOT CLOSE AUTH] fallback por {type(exc).__name__}: {exc}", flush=True)
++        return {'4h': None, '12h': None, '1D': None, '1W': None}
++
+ 
+ def _spot_previous_refresh_due(cache_time, now_ts=None):
+     try:
+@@ -30581,13 +30601,12 @@
+         cache_time = 0.0
+     if cache_time <= 0:
+         return True
+-
+-    now_ts = float(now_ts or time.time())
+-    bucket = float(_SPOT_PREVIOUS_FASTEST_SECONDS)
+-    current_bucket_start = int(now_ts // bucket) * bucket
+-    if now_ts < current_bucket_start + _SPOT_PREVIOUS_CLOSE_GRACE_SECONDS:
+-        return False
+-    return cache_time < current_bucket_start
++    try:
++        now_utc = pd.Timestamp(float(now_ts), unit='s', tz='UTC') if now_ts is not None else pd.Timestamp.now(tz='UTC')
++        return bool(_spot_due_confirmed_timeframes(now_utc))
++    except Exception:
++        # Fail open to a refresh rather than silently skipping a real close.
++        return True
+ 
+ def _spot_previous_processing_age():
+     if not _PREV_SIGNALS_COMPUTING.get('running'):
+@@ -30655,7 +30674,8 @@
+         previous = getattr(expert_system, 'prev_signals_cache', None)
+         active = getattr(expert_system, 'spot_active_signals_cache', None)
+         vigent = getattr(expert_system, 'spot_vigent_signals_cache', None)
+-        if previous is None and active is None and vigent is None:
++        watermarks = _spot_confirmed_watermarks()
++        if previous is None and active is None and vigent is None and not watermarks:
+             return False
+         now_ts = time.time()
+         previous_ts = float(
+@@ -30718,6 +30738,9 @@
+             # RC9.7.12: Activas = intrabar efímero; jamás sobrevivir deploy.
+             'active': None,
+             'vigent': vigent if isinstance(vigent, dict) else None,
++            # Commit 19.2.3: per-TF closed-candle watermarks survive worker
++            # recycle so 1D/1W are not re-analysed or re-announced on a 4h job.
++            'closed_candle_watermarks': watermarks,
+             'active_complete': False,
+         }
+         return save_runtime_snapshot(
+@@ -30759,6 +30782,10 @@
+             setattr(expert_system, 'spot_vigent_signals_cache', vigent)
+             setattr(expert_system, 'spot_vigent_signals_cache_time', vigent_ts)
+             loaded_any = True
++        watermarks = payload.get('closed_candle_watermarks')
++        if isinstance(watermarks, dict):
++            setattr(expert_system, _SPOT_CONFIRMED_WATERMARK_ATTR, dict(watermarks))
++            loaded_any = True
+         if loaded_any:
+             print(f"📂 [SPOT CACHE] Snapshot Supabase restaurado ({int(age)}s).")
+         return loaded_any
+@@ -32483,13 +32510,31 @@
+         for key, value in (getattr(expert_system, 'spot_vigent_signals_cache', None) or {}).items()
+         if isinstance(value, dict)
+     }
+-    resultados = {}
++    now_utc = pd.Timestamp.now(tz='UTC')
++    due_close_by_tf = _spot_due_confirmed_timeframes(now_utc)
++    temporalidades = [
++        tf for tf in ('4h', '12h', '1D', '1W')
++        if tf in due_close_by_tf
++    ]
++    if not temporalidades:
++        print('♻️ [SPOT CLOSE AUTH] No hay un nuevo cierre por temporalidad; se conserva el snapshot.', flush=True)
++        return old_confirmed_cache
++
++    # Preserve the latest confirmed snapshot for TFs whose candle has NOT just
++    # closed.  For a due TF we intentionally remove the prior confirmed row:
++    # the new close must either replace it or move the old one to Vigentes.
++    resultados = {
++        key: dict(value)
++        for key, value in old_confirmed_cache.items()
++        if str((value or {}).get('timeframe') or '') not in set(temporalidades)
++    }
+     active_results = {}
+     spot_price_snapshots = {}
++    processed_symbols_by_tf = {tf: set() for tf in temporalidades}
+     tiempo_actual = datetime.now(bolivia_tz)
+-    temporalidades = ['4h', '12h', '1D', '1W']
+     pares = ['BTC-USDT', 'PAXG-USDT', 'PAXG-BTC']
+     print(f"\n{'='*60}\n🧮 CALCULANDO previous_signals en BACKGROUND\n{'='*60}")
++    print(f"🕯️ [SPOT CLOSE AUTH] cierres pendientes: {', '.join(temporalidades)}")
+         
+     # ============ OBTENER ANÁLISIS DE CORRELACIÓN POR TEMPORALIDAD ============
+     print("📊 Obteniendo análisis de correlación para todas las temporalidades...")
+@@ -32734,7 +32779,11 @@
+                 if not analisis or not analisis.get('success'):
+                     print(f"   ⚠️ {symbol} {timeframe}: análisis falló")
+                     continue
+-                
++
++                # A timeframe watermark advances only after every configured
++                # Spot cell has successfully evaluated this exact closed candle;
++                # NO_OPERAR is still a valid completed evaluation.
++                processed_symbols_by_tf.setdefault(timeframe, set()).add(symbol)
+                 previous_correlations[timeframe][symbol] = analisis
+                 decision = analisis['decision']['action']
+                 confianza = float(analisis['decision']['confidence'])
+@@ -32955,6 +33004,28 @@
+                 continue
+             time.sleep(0.2)
+     
++    # Commit 19.2.3 — advance only fully processed timeframe watermarks.
++    # A partial provider failure keeps the old watermark so the scheduler can
++    # retry that close. Telegram dedup remains idempotent for already completed
++    # cells during a retry.
++    _watermarks = _spot_confirmed_watermarks()
++    for _tf in temporalidades:
++        if len(processed_symbols_by_tf.get(_tf) or set()) >= len(pares):
++            _close = due_close_by_tf.get(_tf)
++            if _close is not None:
++                try:
++                    _watermarks[_tf] = pd.Timestamp(_close).tz_convert('UTC').isoformat()
++                except Exception:
++                    _watermarks[_tf] = str(_close)
++                print(f"✅ [SPOT CLOSE AUTH] {_tf} procesado hasta {_watermarks[_tf]}", flush=True)
++        else:
++            print(
++                f"⚠️ [SPOT CLOSE AUTH] {_tf} incompleto "
++                f"({len(processed_symbols_by_tf.get(_tf) or set())}/{len(pares)}); se reintentará.",
++                flush=True,
++            )
++    setattr(expert_system, _SPOT_CONFIRMED_WATERMARK_ATTR, _watermarks)
++
+     # HOTFIX 10.2.2 — las confirmadas Spot ya se intentaron enviar celda por
+     # celda, inmediatamente al confirmarse. No esperar al final del barrido.
+ 
+@@ -44412,53 +44483,21 @@
+ 
+ 
+ def _normalize_candle_start(timeframe, candle_ts):
+-    """
+-    Normaliza el candle_timestamp al INICIO EXACTO de la vela según su TF.
+-    
+-    Esta función garantiza que dentro de una misma vela, siempre se genera
+-    la MISMA clave de dedup, sin importar si el candle_ts recibido varía
+-    ligeramente por refreshes de caché o análisis intermedios.
+-    
+-    Ejemplos:
+-      - TF 4h, candle_ts='2026-08-22 05:12:34' → '2026-08-22 04:00:00'
+-      - TF 4h, candle_ts='2026-08-22 05:15:00' → '2026-08-22 04:00:00' (misma vela!)
+-      - TF 1h, candle_ts='2026-08-22 05:35:00' → '2026-08-22 05:00:00'
+-      - TF 1D, candle_ts='2026-08-22 14:30:00' → '2026-08-22 00:00:00'
++    """Canonical UTC candle start used by Telegram/Entry dedup.
++
++    Commit 19.2.3 fixes the weekly anchor explicitly to Monday 00:00 UTC.
++    The previous generic epoch grid anchored 1W to Thursday (Unix epoch day),
++    which could make a weekly confirmation look due on Wednesday evening in
++    Argentina / Wednesday night in Bolivia.
+     """
+     if not candle_ts:
+         return 'unknown'
+     try:
+-        from datetime import datetime, timezone
+-        # Intentar parsear el timestamp
+-        ts_str = str(candle_ts)
+-        # Formatos comunes: 'YYYY-MM-DD HH:MM:SS' o ISO
+-        dt = None
+-        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d %H:%M:%S.%f'):
+-            try:
+-                dt = datetime.strptime(ts_str.split('+')[0].split('Z')[0].strip(), fmt)
+-                break
+-            except ValueError:
+-                continue
++        from candle_close_authority_19_2_3 import canonical_start_utc
++        dt = canonical_start_utc(timeframe, candle_ts)
+         if dt is None:
+-            # ISO 8601 fallback
+-            try:
+-                dt = datetime.fromisoformat(ts_str.replace('Z', '+00:00').split('+')[0])
+-            except Exception:
+-                return str(candle_ts)  # Sin poder parsear, devolver original
+-        
+-        # Truncar según TF
+-        tf_sec = _TF_SECONDS.get(timeframe, 3600)
+-        if tf_sec >= 86400:
+-            # Truncar a día completo
+-            dt_norm = dt.replace(hour=0, minute=0, second=0, microsecond=0)
+-        else:
+-            # Truncar hora al múltiplo de tf_hours
+-            tf_hours = tf_sec // 3600
+-            dt_norm = dt.replace(
+-                hour=(dt.hour // tf_hours) * tf_hours,
+-                minute=0, second=0, microsecond=0
+-            )
+-        return dt_norm.strftime('%Y-%m-%d %H:%M:%S')
++            return str(candle_ts)
++        return dt.strftime('%Y-%m-%d %H:%M:%S')
+     except Exception:
+         return str(candle_ts)
+ 
+@@ -44816,40 +44855,16 @@
+ 
+ 
+ def _confirmed_signal_close_timestamp(signal, timeframe):
+-    """Timestamp UTC CANÓNICO del cierre que originó la confirmación.
++    """Canonical UTC close represented by the signal snapshot.
+ 
+-    17.5.11R: workers/cachés pueden reportar segundos o milisegundos distintos
+-    para la misma vela. El cierre se ancla al grid temporal real antes de crear
+-    la clave durable de Telegram/lifecycle.
+-    """
+-    raw_close = (signal or {}).get('source_candle_close_timestamp')
+-    raw_open = (
+-        (signal or {}).get('source_candle_timestamp')
+-        or (signal or {}).get('candle_timestamp')
+-        or (signal or {}).get('previous_candle_timestamp')
+-    )
++    Commit 19.2.3 delegates calendar anchoring to a single authority shared by
++    Spot/Futures/Multi.  1W closes at Monday 00:00 UTC (Sunday evening in South
++    America), not at the Unix-epoch Thursday boundary.
++    """
+     try:
+-        seconds = _confirmed_signal_tf_seconds(timeframe)
+-        if seconds <= 0:
+-            return None
+-
+-        if raw_open:
+-            ts = pd.Timestamp(raw_open)
+-            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+-            epoch = ts.timestamp()
+-            start_epoch = int(epoch // seconds) * seconds
+-            return pd.Timestamp(start_epoch + seconds, unit='s', tz='UTC')
+-
+-        if raw_close:
+-            ts = pd.Timestamp(raw_close)
+-            ts = ts.tz_localize('UTC') if ts.tz is None else ts.tz_convert('UTC')
+-            epoch = ts.timestamp()
+-            # Snap to the nearest candle boundary. This absorbs small runtime
+-            # timestamp jitter without merging genuinely different candles.
+-            close_epoch = int(round(epoch / seconds)) * seconds
+-            return pd.Timestamp(close_epoch, unit='s', tz='UTC')
+-
+-        return None
++        from candle_close_authority_19_2_3 import signal_close_utc
++        close = signal_close_utc(signal or {}, timeframe)
++        return pd.Timestamp(close) if close is not None else None
+     except Exception:
+         return None
+ 
+@@ -44891,38 +44906,19 @@
+     return f"{market}|{symbol}|{timeframe}|{action}|{close_key}"
+ 
+ 
+-def _confirmed_signal_recent_enough(signal, timeframe):
+-    """RC9.8.1 anti-backfill resilient to Render cold-start.
++def _confirmed_signal_recent_enough(signal, timeframe, now_utc=None):
++    """Fresh-close Telegram discovery gate.
+ 
+-    Durable dedup is the primary anti-duplication authority.  A recent close may
+-    be announced even if the worker started a few minutes AFTER the exchange
+-    closed the candle; genuinely old history is still suppressed.
++    A signal may finish a few/tens of minutes after the exchange close, but a
++    1D/1W result discovered hours or days later is not announced as *new*.
++    Durable frontend/lifecycle state remains available even when Telegram is
++    intentionally suppressed as stale.
+     """
+-    close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
+-    if close_ts is None:
+-        return False
+-    now = pd.Timestamp.now(tz='UTC')
+-    age = (now - close_ts).total_seconds()
+-    if age < -5 * 60:
++    try:
++        from candle_close_authority_19_2_3 import confirmed_recent_enough
++        return bool(confirmed_recent_enough(signal or {}, timeframe, now=now_utc))
++    except Exception:
+         return False
+-    tf_seconds = _confirmed_signal_tf_seconds(timeframe) or 3600
+-    # RC10.2.1: Render Free/LOW_MEMORY puede diferir el worker pesado. Una vela
+-    # recién cerrada 1D/1W no debe convertirse en "histórica" sólo porque el
+-    # análisis terminó >2h después. Ventanas acotadas por TF + dedup durable.
+-    explicit_windows = {
+-        '30m': 30 * 60,
+-        '1h': 45 * 60,
+-        '2h': 60 * 60,
+-        '4h': 2 * 60 * 60,
+-        '12h': 4 * 60 * 60,
+-        '1D': 6 * 60 * 60,
+-        '1W': 12 * 60 * 60,
+-    }
+-    recent_window = explicit_windows.get(
+-        str(timeframe or ''),
+-        max(15 * 60, min(2 * 60 * 60, int(tf_seconds * 0.35)))
+-    )
+-    return age <= recent_window
+ 
+ 
+ def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
+@@ -45284,7 +45280,15 @@
+             return False
+     elif action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
+         return False
+-    if confidence < 60 or not _confirmed_signal_preferences_allow(market, timeframe) or not _confirmed_signal_recent_enough(signal, timeframe):
++    if confidence < 60 or not _confirmed_signal_preferences_allow(market, timeframe):
++        return False
++    if not _confirmed_signal_recent_enough(signal, timeframe):
++        close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
++        print(
++            f"⏭️ [CONFIRMED CLOSE AUTH] {market.upper()} {symbol} {timeframe} "
++            f"no se anuncia como nueva: cierre={close_ts} fuera de la ventana post-cierre.",
++            flush=True,
++        )
+         return False
+     key = _confirmed_signal_event_key(market, signal)
+     with _confirmed_signal_alerts_lock:
