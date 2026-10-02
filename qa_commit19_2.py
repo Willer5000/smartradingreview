@@ -101,7 +101,7 @@ def main():
     _check('memory_hard_guard_300mb', 'MEMORY_HARD_LIMIT_MB' in render and 'value: "300"' in render, checks)
     _check('options_provider_budget_12mb_day', 'OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB' in render and 'value: "12"' in render, checks)
     _check('multi_deep_limit_2', 'MULTIASSET_DEEP_LIMIT' in render and 'value: "2"' in render, checks)
-    _check('new_entrypoint_commit19_2', (('commit19_2_main_entrypoint:app' in proc and 'commit19_2_main_entrypoint:app' in render) or ('commit19_2_1_main_entrypoint:app' in proc and 'commit19_2_1_main_entrypoint:app' in render)), checks)
+    _check('new_entrypoint_commit19_2', (('commit19_2_main_entrypoint:app' in proc and 'commit19_2_main_entrypoint:app' in render) or ('commit19_2_1_main_entrypoint:app' in proc and 'commit19_2_1_main_entrypoint:app' in render) or ('commit19_2_2_main_entrypoint:app' in proc and 'commit19_2_2_main_entrypoint:app' in render)), checks)
 
     # 10) Manual diagnostics show the exact Premium blocker instead of only a
     # generic explanation, so remaining analysis-only rows are auditable.

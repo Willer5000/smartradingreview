@@ -70,7 +70,7 @@ ck('memory_hard_guard_300', 'MEMORY_HARD_LIMIT_MB' in render and 'value: "300"' 
 ck('memory_job_guard_200', 'MEMORY_JOB_START_LIMIT_MB' in render and 'value: "200"' in render)
 ck('options_budget_12mb_day', 'OPTIONS_MM_DAILY_PROVIDER_BUDGET_MB' in render and 'value: "12"' in render)
 ck('multi_deep_limit_2', 'MULTIASSET_DEEP_LIMIT' in render and 'value: "2"' in render)
-ck('entrypoint_19_2_1', 'commit19_2_1_main_entrypoint:app' in proc and 'commit19_2_1_main_entrypoint:app' in render)
+ck('entrypoint_19_2_1', (('commit19_2_1_main_entrypoint:app' in proc and 'commit19_2_1_main_entrypoint:app' in render) or ('commit19_2_2_main_entrypoint:app' in proc and 'commit19_2_2_main_entrypoint:app' in render)))
 ck('no_new_llm_for_greeks', 'Groq' not in mm and 'groq' not in js.lower())
 
 passed=sum(checks.values()); total=len(checks)

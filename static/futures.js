@@ -2931,6 +2931,10 @@ window.loadFuturesOpportunities96 = async function() {
             _ts: String(Date.now())
         });
         const response = await _futFetchBounded(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'});
+        if (!response.ok) {
+            const body = await response.text();
+            throw new Error(`HTTP ${response.status}: ${String(body || '').slice(0, 180)}`);
+        }
         const data = await response.json();
         const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
         const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
@@ -3010,15 +3014,38 @@ window.loadFuturesOpportunities96 = async function() {
                     </div>
                 </button>`;
         }).join('');
+        window._lastDerivOpportunityView = {
+            html: panel.innerHTML,
+            count: total,
+            symbol: selectedSymbol,
+            timeframe: selectedTimeframe,
+            market: window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures',
+            at: Date.now()
+        };
     } catch (error) {
-        if (countEl) {
-            countEl.textContent = 'ERR';
-            countEl.className = 'badge bg-danger';
+        console.warn('Opportunity lane read deferred:', error);
+        const last = window._lastDerivOpportunityView || null;
+        const sameMarket = last && last.market === (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures');
+        if (sameMarket && last.html) {
+            panel.innerHTML = last.html + `
+                <div class="list-group-item bg-dark text-warning text-center py-2">
+                    <small>Actualización temporalmente diferida; se conserva el último estado válido.</small>
+                </div>`;
+            if (countEl) {
+                countEl.textContent = String(Number(last.count || 0));
+                countEl.className = `badge bg-${Number(last.count || 0) > 0 ? 'success' : 'secondary'}`;
+            }
+        } else {
+            if (countEl) {
+                countEl.textContent = '0';
+                countEl.className = 'badge bg-secondary';
+            }
+            panel.innerHTML = `
+                <div class="list-group-item bg-dark text-muted text-center py-3">
+                    <strong>Actualización del análisis en espera.</strong>
+                    <br><small>El scheduler continúa en segundo plano; no se fuerza una consulta pesada desde el navegador.</small>
+                </div>`;
         }
-        panel.innerHTML = `
-            <div class="list-group-item bg-dark text-muted text-center py-3">
-                Señales activas temporalmente no disponibles.
-            </div>`;
     }
 };
 

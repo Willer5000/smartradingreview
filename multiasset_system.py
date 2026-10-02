@@ -327,6 +327,19 @@ def scan_opportunities(timeframe: str='4h', force: bool=False) -> List[Dict]:
     return rows
 
 
+def cached_opportunities(timeframe: str='4h') -> List[Dict]:
+    """Return the current cheap-router snapshot without provider I/O.
+
+    Commit 19.2.2: browser/API reads must never fan out across the Multi
+    universe.  Only the background scheduler refreshes ``scan_opportunities``.
+    """
+    if timeframe not in MULTIASSET_TIMEFRAMES:
+        timeframe='4h'
+    with _router_lock:
+        row=_router_cache.get(timeframe) or {}
+        return [dict(x) for x in (row.get('rows') or [])]
+
+
 def router_cache_status() -> Dict:
     """Cache-only diagnostics; never opens exchange requests."""
     now = time.monotonic()

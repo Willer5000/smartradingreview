@@ -31033,6 +31033,14 @@ _MEMORY_JOB_START_LIMIT_MB = min(
 _MEMORY_ANALYSIS_CACHE_KEEP = max(1, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '2') or 2))
 _LOW_MEMORY_MODE = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
 _FREE_RUNTIME_MAX_THREADS = max(6, int(os.environ.get('FREE_RUNTIME_MAX_THREADS', '10') or 10))
+# Commit 19.2.2: threading.active_count() contains the service's permanent
+# daemon threads and is not a valid proxy for heavy-analysis concurrency.
+# Track that baseline separately. The single _HEAVY_ANALYSIS_LOCK + RSS
+# job-start guard remain authoritative.
+_FREE_RUNTIME_THREAD_BASELINE = None
+_FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM = max(
+    2, int(os.environ.get('FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM', '4') or 4)
+)
 _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = max(0.0, float(os.environ.get('FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS', '1') or 1))
 _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS', '10') or 10))
 
@@ -31225,6 +31233,8 @@ def _memory_runtime_state():
         'memory_job_start_limit_mb': _MEMORY_JOB_START_LIMIT_MB,
         'low_memory_mode': _LOW_MEMORY_MODE,
         'free_runtime_max_threads': _FREE_RUNTIME_MAX_THREADS,
+        'free_runtime_thread_baseline': _FREE_RUNTIME_THREAD_BASELINE,
+        'free_runtime_transient_thread_headroom': _FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM,
         'background_lock_wait_seconds': _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS,
         'interactive_lock_wait_seconds': _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS,
     }
@@ -31283,16 +31293,35 @@ def _acquire_heavy_analysis(owner, timeout=None):
     else:
         timeout = max(0, float(timeout))
 
-    if (
-        _LOW_MEMORY_MODE
-        and not interactive_owner
-        and threading.active_count() >= _FREE_RUNTIME_MAX_THREADS
-    ):
-        print(
-            f"⏸️ [FREE-RUNTIME] {owner}: threads={threading.active_count()} "
-            f">= {_FREE_RUNTIME_MAX_THREADS}; job de fondo diferido."
+    # Commit 19.2.2 ROOT CAUSE — do not confuse permanent service threads
+    # with concurrent heavy jobs. In 19.2.1 the worker normally sat at
+    # 11–12 threads while FREE_RUNTIME_MAX_THREADS=10, so background
+    # Multi/Futures refreshes were deferred even with a free heavy lock.
+    if _LOW_MEMORY_MODE and not interactive_owner:
+        _threads = threading.active_count()
+        _baseline = int(_FREE_RUNTIME_THREAD_BASELINE or _FREE_RUNTIME_MAX_THREADS)
+        _emergency_threads = max(
+            _FREE_RUNTIME_MAX_THREADS + _FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM,
+            _baseline + _FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM,
         )
-        return False
+        _rss_now = _process_rss_mb()
+        if (
+            _threads >= _emergency_threads
+            and _rss_now is not None
+            and float(_rss_now) >= float(_MEMORY_JOB_START_LIMIT_MB) * 0.90
+        ):
+            print(
+                f"⏸️ [FREE-RUNTIME] {owner}: transient pressure "
+                f"threads={_threads} baseline={_baseline} emergency={_emergency_threads} "
+                f"rss={_rss_now}MB; job de fondo diferido."
+            )
+            return False
+        if _threads >= _FREE_RUNTIME_MAX_THREADS:
+            print(
+                f"ℹ️ [FREE-RUNTIME] {owner}: threads={_threads} incluye daemons "
+                f"permanentes (baseline={_baseline}); autoridad de concurrencia="
+                "heavy-lock + RSS, no el conteo absoluto."
+            )
     if not interactive_owner:
         priority_fn = globals().get('_system_interactive_priority_active')
         fallback_fn = globals().get('_futures_interactive_priority_active')
@@ -35934,7 +35963,23 @@ def _technical_signal_funnel_row(result):
     elif not bool(oi.get('candidate_ready')):
         stage, reason = 'CANDIDATE', str(oi.get('candidate_source') or 'CANDIDATE_NOT_READY')
     elif action not in ('LONG','SHORT'):
-        stage, reason = 'DIRECTION_CONFIRMATION', str((decision.get('audit') or {}).get('reason') or decision.get('reason') or action or 'NOT_DIRECTIONAL')[:180]
+        # Commit 19.2.2: distinguish a real lack of direction from a later
+        # execution-quality downgrade. A candidate can be directionally valid,
+        # receive complete Entry/SL/TP, and then become ESPERAR/PRECAUCION in
+        # execution_setup_guard. Calling that "DIRECTION_CONFIRMATION" hid the
+        # actual reason (as seen in the CL 4h production card).
+        _op_exec=result.get('operational_execution') or {}
+        _spot_exec=result.get('spot_execution_quality') or {}
+        if isinstance(_op_exec,dict) and bool(_op_exec.get('applied')):
+            stage='EXECUTION_SETUP_GUARD'
+            _reasons=[str(x) for x in (_op_exec.get('reasons') or []) if str(x).strip()]
+            reason=('; '.join(_reasons) or str(_op_exec.get('status') or 'SETUP_NOT_EXECUTABLE'))[:180]
+        elif isinstance(_spot_exec,dict) and bool(_spot_exec.get('applied')):
+            stage='ENTRY_FRESHNESS'
+            reason=str(_spot_exec.get('reason') or _spot_exec.get('status') or 'ENTRY_NOT_CURRENTLY_EXECUTABLE')[:180]
+        else:
+            stage='DIRECTION_CONFIRMATION'
+            reason=str((decision.get('audit') or {}).get('reason') or decision.get('reason') or action or 'NOT_DIRECTIONAL')[:180]
     elif publication != 'EXECUTABLE_SIGNAL' or not executable:
         reason = str(levels.get('rejected_reason') or result.get('rejected_reason') or publication or 'NOT_EXECUTABLE')[:180]
         _ru = reason.upper()
@@ -36691,26 +36736,68 @@ def api_multiasset_universe():
 
 @app.route('/api/multiasset/opportunities', methods=['GET'])
 def api_multiasset_opportunities():
+    """Cache-only Multi active lane.
+
+    Commit 19.2.2 root-cause fix: a browser refresh must never trigger a
+    seven-market provider scan.  In 19.2.1 this GET called scan_opportunities()
+    synchronously; under Render Free it could return 502 and simultaneously
+    consume the same network/CPU budget needed by the background scheduler.
+    """
     try:
         _multiasset_restore_local_snapshot_once()
-        from multiasset_system import scan_opportunities, MULTIASSET_DEEP_LIMIT
+        from multiasset_system import cached_opportunities, MULTIASSET_DEEP_LIMIT
         tf=str(request.args.get('timeframe') or '4h')
-        rows=scan_opportunities(tf, force=False)
+        rows=cached_opportunities(tf)
+        # 4h has an additional app-level router snapshot used by the scheduler.
+        if not rows and tf == '4h':
+            with _MULTI_ROUTER_STATE_LOCK:
+                rows=[dict(x) for x in (_MULTI_ROUTER_STATE.get('rows') or [])]
         with _MULTI_ASSET_CACHE['lock']:
             analyses=dict(_MULTI_ASSET_CACHE['analysis'])
         signals=[]
         for (symbol,timeframe),result in analyses.items():
+            if str(timeframe) != tf:
+                continue
             if isinstance(result,dict) and _multiasset_is_executable(result):
                 signals.append(_multiasset_signal_row(result,'ACTIVE_CONFIRMED'))
+        selected=str(request.args.get('symbol') or '').upper().replace('/','-')
+        queue=_multiasset_queue_snapshot()
+        with _MULTI_AUTO_LOCK:
+            _pending_snapshot=[dict(x) for x in (_MULTI_PENDING_QUEUE or [])]
+        processing_selected=bool(
+            selected and any(
+                str((x or {}).get('symbol') or '').upper()==selected
+                and str((x or {}).get('timeframe') or '')==tf
+                for x in _pending_snapshot
+            )
+        )
         return jsonify({
             'success':True,'total':len(signals),'signals':signals,
-            'count':len(signals),'opportunities':signals,'processing_selected':False,
-            'router':rows,'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
-            'resource_policy':{'scanner_db_writes':0,'scanner_ai_calls':0,'deep_limit_display_only':MULTIASSET_DEEP_LIMIT,'shortlist_role':'DISPLAY_PRIORITY_ONLY_NOT_DEEP_ELIGIBILITY', **_multiasset_queue_snapshot()},
+            'count':len(signals),'opportunities':signals,
+            'processing_selected':processing_selected,
+            'warming_up':bool(not rows and not analyses),
+            'cache_only':True,
+            'router':rows,
+            'shortlist':[r for r in rows if r.get('deep_candidate')][:MULTIASSET_DEEP_LIMIT],
+            'resource_policy':{
+                'scanner_db_writes':0,'scanner_ai_calls':0,
+                'http_provider_scans':0,
+                'deep_limit_display_only':MULTIASSET_DEEP_LIMIT,
+                'shortlist_role':'DISPLAY_PRIORITY_ONLY_NOT_DEEP_ELIGIBILITY',
+                **queue,
+            },
             'timestamp':datetime.now(bolivia_tz).isoformat(),
-        })
+        }),200
     except Exception as exc:
-        return jsonify({'success':False,'error':str(exc)[:180]}),500
+        # Read lanes fail soft: keep the UI alive and let the background
+        # scheduler refill the cache. Never launch provider I/O as recovery.
+        return jsonify({
+            'success':True,'total':0,'signals':[],'count':0,'opportunities':[],
+            'processing_selected':False,'warming_up':True,'cache_only':True,
+            'router':[],'shortlist':[],'degraded_read':True,
+            'error':str(exc)[:180],
+            'timestamp':datetime.now(bolivia_tz).isoformat(),
+        }),200
 
 @app.route('/api/multiasset/display', methods=['GET'])
 def api_multiasset_display_18():
@@ -37055,13 +37142,13 @@ def api_backtest_prior():
 @app.route('/api/multiasset/correlation', methods=['GET'])
 def api_multiasset_correlation():
     try:
-        from multiasset_system import scan_opportunities
-        rows=scan_opportunities(str(request.args.get('timeframe') or '4h'),force=False)
+        from multiasset_system import cached_opportunities
+        rows=cached_opportunities(str(request.args.get('timeframe') or '4h'))
         selected=str(request.args.get('symbol') or '')
         best=rows[0] if rows else None
-        return jsonify({'success':True,'selected_symbol':selected,'market_context':'MULTI_ASSET_OPPORTUNITY_ROUTER','best_opportunity':best,'rankings':rows[:7],'description':'Router determinístico por actividad/tendencia/volatilidad; Macro Gate confirma o veta, nunca crea dirección.'})
+        return jsonify({'success':True,'selected_symbol':selected,'market_context':'MULTI_ASSET_OPPORTUNITY_ROUTER','best_opportunity':best,'rankings':rows[:7],'cache_only':True,'description':'Router determinístico por actividad/tendencia/volatilidad; Macro Gate confirma o veta, nunca crea dirección.'})
     except Exception as exc:
-        return jsonify({'success':False,'error':str(exc)[:180]}),500
+        return jsonify({'success':True,'selected_symbol':str(request.args.get('symbol') or ''),'market_context':'MULTI_ASSET_OPPORTUNITY_ROUTER','best_opportunity':None,'rankings':[],'cache_only':True,'degraded_read':True,'error':str(exc)[:180]}),200
 
 @app.route('/api/multiasset/microstructure', methods=['GET'])
 def api_multiasset_microstructure():
@@ -50084,8 +50171,8 @@ def _build_ai_advisor_context(
         if selected:
             context['system_action'] = selected.get('action')
         try:
-            from multiasset_system import scan_opportunities
-            router = scan_opportunities('4h', force=False)
+            from multiasset_system import cached_opportunities
+            router = cached_opportunities('4h')
             context['opportunity_router'] = [
                 {k: row.get(k) for k in ('symbol','display_name','asset_class','router_score','bias','macro_gate','session')}
                 for row in router[:4]
@@ -55698,7 +55785,7 @@ def _start_background_threads():
     Idempotente: si ya se arrancaron, no hace nada.
     Se desactiva con la variable de entorno DISABLE_SCHEDULER=1 (para tests).
     """
-    global _BACKGROUND_THREADS_STARTED
+    global _BACKGROUND_THREADS_STARTED, _FREE_RUNTIME_THREAD_BASELINE
     
     if os.environ.get('DISABLE_SCHEDULER'):
         print("⏭️ Scheduler DESHABILITADO por variable DISABLE_SCHEDULER")
@@ -55847,6 +55934,19 @@ def _start_background_threads():
     # RC9.6.2 — legacy scalping notifier retired. 5m/15m are not part of
     # the active Futures contract; all 30m+ executable alerts use the common
     # futures_standard_alert_loop. Do not start an idle legacy thread.
+    # Commit 19.2.2: capture the permanent daemon baseline after startup.
+    try:
+        _FREE_RUNTIME_THREAD_BASELINE = max(
+            int(_FREE_RUNTIME_MAX_THREADS),
+            int(threading.active_count()),
+        )
+        print(
+            f"🧵 [FREE-RUNTIME] baseline permanente="
+            f"{_FREE_RUNTIME_THREAD_BASELINE} threads; heavy concurrency=1"
+        )
+    except Exception:
+        _FREE_RUNTIME_THREAD_BASELINE = int(_FREE_RUNTIME_MAX_THREADS)
+
     print("=" * 60 + "\n")
 
 
