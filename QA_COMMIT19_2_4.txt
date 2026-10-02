@@ -1,0 +1,10 @@
+PASS python -m py_compile cpqe_19_2_4.py
+PASS python -m py_compile commit19_2_3_main_entrypoint.py
+PASS node --check static/commit19_2_4_recovery.js
+PASS backtest control: 11 IS + 4 OOS rows, 0 automatic promotions without Q1-Q9 source fields
+PASS positive route validation: ETH 2h LONG 77.88; SOL 2h SHORT 78.24; XRP 2h SHORT 78.77
+PASS no new network calls in CPQE module
+PASS no new threads in CPQE module
+PASS no Entry/SL/TP generation in CPQE module
+PASS existing hard economic gates preserved
+PASS Procfile/render.yaml unchanged by release package
