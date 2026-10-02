@@ -1,0 +1,9 @@
+Commit 19.2 — Quality Signal Recovery
+
+- replace generic family quota with pattern-specific synthesis contracts
+- let Entry/SL/TP committees improve baseline geometry without parity shackles
+- rescore the exact final geometry before Futures/Multi quality publication
+- preserve Safety 75, RR 1.8, TP 55, SL 60 and Leverage V6
+- expose exact Premium blockers in Futures and Multi diagnostics
+- reuse visible candle price for theoretical Greeks and mark OI-only metrics N/A
+- keep 1 worker / 2 threads, 300 MB hard guard and existing bandwidth budgets

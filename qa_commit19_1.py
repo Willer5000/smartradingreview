@@ -55,7 +55,18 @@ def main():
     checks["mtf_conflict_blocks"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
     c,r=_case("BULLISH"); c["macro_context"]["risk_level"]="CRITICAL"
     checks["critical_macro_blocks"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
-    c,r=_case("BULLISH"); c["operational_intelligence"]["thesis"]["long_families"]=["trend"]
+    c,r=_case("BULLISH")
+    # Commit 19.2: a mere label count is no longer the anti-noise gate. Test a
+    # genuinely single-indicator situation: no POI/sweep/MSS, no momentum, weak
+    # ADX/volume, and specialist notes stripped of structural hints.
+    c["operational_intelligence"]["thesis"]["long_families"]=["trend"]
+    c["structure"]={"current_price":100}
+    c["momentum"]={"direction":"neutral","rsi":50,"macd_histogram":0}
+    c["volume"]={"volume_ratio":0.6}
+    c["trend"]={"direction":"bullish","adx":12}
+    for _w in r["worker_desk_17_5_9"]["workers"]:
+        _w["strategies_observed"]=["RSI"]
+        _w["work_notes"]=[]
     checks["single_indicator_not_enough"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
     c,r=_case("BULLISH"); c["operational_intelligence"]["candidate_ready"]=True; c["operational_intelligence"]["candidate_action"]="LONG"
     checks["does_not_override_existing_candidate"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")

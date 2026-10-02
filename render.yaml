@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit19_1_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn commit19_2_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -45,7 +45,7 @@ services:
         value: "1"
       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
         value: "12"
-      # Commit 19.1 FINAL — Greeks/options provider guard. The chart is
+      # Commit 19.2 — Greeks/options provider guard (budget unchanged). The chart is
       # theoretical/local for unsupported assets; only direct BTC/ETH chains
       # may consume provider egress, under this independent daily cap.
       - key: OPTIONS_MM_CONTEXT_ENABLED

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Any, Dict
 
-VERSION="COMMIT19_1_FINAL_CHAMPION_QUANT_GREEKS_V1"
+VERSION="COMMIT19_2_QUALITY_SIGNAL_RECOVERY_V1"
 _ORIGINALS: Dict[str,Any]={}
 
 def _u(v): return str(v or "").strip().upper().replace("/","-")
@@ -119,6 +119,68 @@ def _install_execution_quality_overlay():
         try:
             op=dict((execution_observations or {}).get("operational_intelligence") or {}) if isinstance(execution_observations,dict) else {}
             synth=dict(op.get("live_quant_synthesis") or {})
+
+            # Commit 19.2 QUALITY RECOVERY — score the exact geometry that will
+            # reach Futures/Multi publication.  This fixes a state mismatch in
+            # which committees or the Champion overlay changed Entry/SL/TP but
+            # Safety still consumed scores belonging to the old baseline.  No
+            # threshold is lowered and no price is changed here.
+            _action=_u(decision)
+            _should_rescore=bool(
+                _action in {"LONG","SHORT"}
+                and (
+                    levels.get("execution_refinement_applied")
+                    or levels.get("structural_recovery_applied")
+                    or levels.get("commit19_geometry_parity")
+                    or (synth.get("authority")=="LIVE_QUANT_SYNTHESIS_COMMIT19_1" and synth.get("eligible_for_execution_routing"))
+                )
+            )
+            if _should_rescore:
+                try:
+                    from execution_specialist_committees import build_execution_context, score_execution_geometry
+                    _market="futures"
+                    try:
+                        from multiasset_system import MULTIASSET_SYMBOLS
+                        if str(symbol or "").upper() in set(MULTIASSET_SYMBOLS or {}): _market="multiasset"
+                    except Exception:
+                        pass
+                    _obs=execution_observations if isinstance(execution_observations,dict) else {}
+                    _current=float((structure or {}).get("current_price") or _obs.get("current_price") or 0)
+                    _atr=float((volatility or {}).get("atr") or 0)
+                    _mm=dict(levels.get("market_maker_context") or {}) if isinstance(levels.get("market_maker_context"),dict) else {}
+                    _ctx=build_execution_context(
+                        structure=structure, volume=_obs.get("volume") or (structure or {}).get("volume_analysis") or {},
+                        volatility=volatility, market_hours=_obs.get("market_hours") or {},
+                        sentiment=_obs.get("sentiment") or {}, macro_context=_obs.get("macro_context") or {},
+                        market_regime=_obs.get("market_regime") or {}, market_maker_context=_mm,
+                        symbol=symbol, timeframe=timeframe, market_type=_market,
+                    )
+                    _family=str(synth.get("setup_family") or ((op.get("default_strategy") or {}).get("family")) or "UNSPECIFIED")
+                    _scored=score_execution_geometry(
+                        entry=float(levels.get("entry") or 0), stop_loss=float(levels.get("stop_loss") or 0),
+                        take_profit=float(levels.get("take_profit") or 0), direction="long" if _action=="LONG" else "short",
+                        current_price=_current, atr=_atr, structure=structure, trend=trend, momentum=momentum,
+                        volatility=volatility, setup_family=_family, liquidation=liquidation, market_type=_market,
+                        symbol=symbol, timeframe=timeframe, execution_context=_ctx,
+                        rr_floor=float(levels.get("minimum_viable_rr") or 1.8),
+                        rr_ceiling=float(levels.get("maximum_technical_rr") or 4.5),
+                        leverage_hint=float(levels.get("leverage") or 1.0),
+                    ) or {}
+                    if _scored.get("success"):
+                        levels["entry_score"]=round(float(_scored.get("entry_quality") or 0),1)
+                        levels["entry_quality_score"]=round(float(_scored.get("entry_quality") or 0),1)
+                        levels["sl_reliability"]=round(float(_scored.get("sl_quality") or 0)/100.0,2)
+                        levels["tp_quality_score"]=round(float(_scored.get("tp_quality") or 0),1)
+                        levels["execution_geometry_quality"]=round(float(_scored.get("geometry_quality") or 0),2)
+                        levels["final_geometry_quality_rescored"]=True
+                        levels["final_geometry_quality_version"]="COMMIT19_2_FINAL_GEOMETRY_SCORE_V1"
+                        levels["final_geometry_quality_authority"]="MEASURE_ACTUAL_GEOMETRY_NO_THRESHOLD_CHANGE"
+                    else:
+                        levels["final_geometry_quality_rescored"]=False
+                        levels["final_geometry_quality_reason"]=_scored.get("reason")
+                except Exception as _rescore_error:
+                    levels["final_geometry_quality_rescored"]=False
+                    levels["final_geometry_quality_reason"]=f"RESCORE_FAIL_OPEN:{type(_rescore_error).__name__}"
             if synth.get("authority")!="LIVE_QUANT_SYNTHESIS_COMMIT19_1" or not synth.get("eligible_for_execution_routing"):
                 return levels
             levels["live_quant_synthesis_id"]=synth.get("synthesis_id")

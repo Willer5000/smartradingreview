@@ -96,12 +96,47 @@
         return 0.5 * (1 + erfApprox(x / Math.sqrt(2)));
     }
 
+    function lastPositive(value) {
+        if (Array.isArray(value)) {
+            for (let i = value.length - 1; i >= 0; i -= 1) {
+                const n = finite(value[i]);
+                if (n !== null && n > 0) return n;
+            }
+        }
+        return null;
+    }
+
+    function visibleCandlePrice() {
+        // Commit 19.2: reuse the price already rendered on the main candle
+        // chart before opening another network request. This fixes theoretical
+        // Greeks cards that were blank even though the candlestick chart had
+        // valid data (especially Multi-Asset provider fallbacks).
+        try {
+            const chart = $('candle-chart');
+            const traces = chart?.data || [];
+            for (const trace of traces) {
+                const close = lastPositive(trace?.close);
+                if (close !== null) return close;
+                const y = lastPositive(trace?.y);
+                if (y !== null && String(trace?.type || '').toLowerCase() === 'candlestick') return y;
+            }
+        } catch (_) {}
+        return null;
+    }
+
     function localSpot() {
         const candidates = [
             window.currentAnalysis?.current_price,
             window.currentAnalysis?.live_price,
             window.currentAnalysis?.analysis_price,
+            window.currentAnalysis?.price,
+            window.currentAnalysis?.current_candle?.close,
+            window.currentAnalysis?.last_candle?.close,
+            lastPositive(window.currentAnalysis?.df?.close),
+            lastPositive(window.currentAnalysis?.data?.close),
+            lastPositive(window.currentAnalysis?.chart_data?.close),
             window.currentAnalysis?.levels?.entry,
+            visibleCandlePrice(),
         ];
         for (const raw of candidates) {
             const n = finite(raw);
@@ -295,14 +330,14 @@
 
         text('mm-option-source', observed ? 'Cadena observada' : 'Black-Scholes teórico');
         text('mm-gamma-regime', regime(mm.gamma_regime));
-        text('mm-zero-dte-share', pct01(mm.zero_dte_gamma_share));
-        text('mm-zero-gamma', price(mm.zero_gamma_level));
-        text('mm-delta-neutral', price(mm.delta_neutral_level));
-        text('mm-call-wall', observed ? price(mm.call_wall) : '--');
-        text('mm-gamma-wall', price(mm.gamma_wall));
-        text('mm-put-wall', observed ? price(mm.put_wall) : '--');
-        text('mm-delta-dollar', compact(mm.heuristic_signed_delta_dollars));
-        text('mm-gex-total', compact(mm.heuristic_signed_gamma_exposure));
+        text('mm-zero-dte-share', observed ? pct01(mm.zero_dte_gamma_share) : 'N/A');
+        text('mm-zero-gamma', observed ? price(mm.zero_gamma_level) : 'N/A');
+        text('mm-delta-neutral', observed ? price(mm.delta_neutral_level) : 'N/A');
+        text('mm-call-wall', observed ? price(mm.call_wall) : 'N/A');
+        text('mm-gamma-wall', observed ? price(mm.gamma_wall) : 'N/A');
+        text('mm-put-wall', observed ? price(mm.put_wall) : 'N/A');
+        text('mm-delta-dollar', observed ? compact(mm.heuristic_signed_delta_dollars) : 'N/A');
+        text('mm-gex-total', observed ? compact(mm.heuristic_signed_gamma_exposure) : 'N/A');
         text('mm-vega', compact(mm.aggregate_vega_per_iv_point));
         text('mm-theta', compact(mm.aggregate_theta_per_day));
 
@@ -481,7 +516,7 @@
                 bordercolor: '#3a424a',
                 font: { color: '#f2f5f7' }
             },
-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-1-greeks`
+            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-2-quality-greeks`
         };
 
         window.Plotly.react(

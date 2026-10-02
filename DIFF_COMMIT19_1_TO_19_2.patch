@@ -1,0 +1,720 @@
+--- /mnt/data/c19_1_greeks_work/app.py	2026-10-01 23:54:40.716135807 +0000
++++ /mnt/data/c19_2_quality_work/app.py	2026-10-02 00:45:27.422557922 +0000
+@@ -17532,10 +17532,11 @@
+             #   * direction/signal already exists before this block;
+             #   * baseline 17.5.1 Entry/SL/TP is computed first;
+             #   * advanced committees may REFINE that geometry only;
+-            #   * they cannot create a signal, rescue an invalid baseline,
+-            #     lower R/R rules, lower Safety, or change legacy quality scores;
+-            #   * any failure or ambiguous result keeps the 17.5.1 baseline.
+-            # This preserves signal frequency while improving execution quality.
++            #   * they cannot create direction or lower R/R/Safety thresholds;
++            #   * they MAY replace a mediocre baseline when the alternative
++            #     independently passes the same hard timing/setup/risk guards;
++            #   * quality scores must follow the geometry actually selected.
++            # This restores quality-signal recovery without lowering standards.
+             try:
+                 minimum_viable_rr = max(
+                     1.0,
+@@ -17817,29 +17818,40 @@
+                             return False
+                         risk = abs(re - rs)
+                         rr_candidate = abs(rt - re) / risk if risk > 0 else 0.0
++                        # Commit 19.2 QUALITY RECOVERY.  The old refinement
++                        # contract required a better geometry to remain in the
++                        # same R/R bucket, the same timing class, the same 0.60
++                        # ATR side and almost the same risk distance as the
++                        # baseline.  That accidentally prevented the committees
++                        # from repairing a mediocre baseline into a genuinely
++                        # Premium geometry.  We do NOT lower any downstream
++                        # threshold here.  Instead, the alternative must be
++                        # independently stronger and pass the real timing/setup
++                        # guards on its own.
++                        _baseline_gq = proposal.get('baseline_geometry_quality')
++                        _improvement = proposal.get('geometry_improvement')
++                        _candidate_gq = values[3]
++                        _entry_q, _sl_q, _tp_q = values[5], values[6], values[7]
++                        _shift_atr = abs(re - baseline_entry) / max(float(atr), 1e-12)
++                        _risk_ratio = risk / max(baseline_risk, 1e-12)
++                        _quality_improves = bool(
++                            (_baseline_gq is None and _candidate_gq >= 70.0)
++                            or (_baseline_gq is not None and _improvement is not None and values[4] >= 1.50)
++                        )
+                         if not (
+                             min(re, rs, rt) > 0 and risk > 0
+                             and ((direction == 'long' and rs < re < rt and re <= current_price)
+                                  or (direction == 'short' and rt < re < rs and re >= current_price))
+                             and minimum_viable_rr <= rr_candidate <= maximum_technical_rr
+-                            and _rr_safety_bucket(rr_candidate) == _rr_safety_bucket(baseline_rr)
+-                            and abs(re - baseline_entry) / max(float(atr), 1e-12) <= 0.85
+-                            and 0.82 <= risk / max(baseline_risk, 1e-12) <= 1.18
+-                            and proposal.get('baseline_geometry_quality') is not None
+-                            and proposal.get('geometry_improvement') is not None
+-                            and values[4] >= 1.50 and values[3] >= 62.0
+-                            and values[5] >= 55.0 and values[6] >= 60.0 and values[7] >= 60.0
++                            and _shift_atr <= 1.35
++                            and 0.65 <= _risk_ratio <= 1.45
++                            and _quality_improves
++                            and _candidate_gq >= 68.0
++                            and _entry_q >= 65.0 and _sl_q >= 60.0 and _tp_q >= 60.0
+                         ):
+                             return False
+                         metadata = _refined_entry_metadata(re)
+-                        # Retain both the contextual timing class and the 0.60
+-                        # ATR lower-TF trigger boundary used by Entry Reaction.
+-                        # Refinement cannot silently change execution permissions.
+-                        if metadata['entry_timing_mode'] != entry_quality.get('entry_timing_mode'):
+-                            return False
+                         if is_futures:
+-                            if (abs(current_price - re) / atr <= 0.60) != (abs(current_price - baseline_entry) / atr <= 0.60):
+-                                return False
+                             gate = getattr(self, '_futures_entry_timing_gate', None)
+                             if not callable(gate):
+                                 return False
+@@ -17860,8 +17872,12 @@
+                                     except Exception:
+                                         timing_cache[price] = None
+                                 return timing_cache[price]
+-                            baseline_passed, refined_passed = _timing_at(baseline_entry), _timing_at(re)
+-                            if baseline_passed is None or refined_passed is None or baseline_passed != refined_passed:
++                            # The refined Entry must pass the existing gate.  A
++                            # weak baseline is no longer allowed to veto a better
++                            # alternative merely because the baseline itself
++                            # failed that gate.
++                            refined_passed = _timing_at(re)
++                            if refined_passed is not True:
+                                 return False
+ 
+                             # 17.5.5: the advanced search must know the SAME
+@@ -17943,6 +17959,18 @@
+                         entry_source = 'Zona técnica refinada · ' + str(entry_role.get('source') or entry_source)
+                         sl_source = 'Invalidación técnica refinada · ' + str(sl_role.get('source') or sl_source)
+                         tp_source = 'Objetivo técnico refinado · ' + str(tp_role.get('source') or tp_source)
++                        # Commit 19.2: Safety must evaluate the geometry that is
++                        # actually going to production.  Previous releases kept
++                        # the Entry/SL/TP quality scores from the superseded
++                        # baseline even after the committees changed the prices.
++                        # Persist the already-computed committee quality of the
++                        # selected geometry; publication thresholds stay exactly
++                        # the same downstream.
++                        entry_score = float(committee_result.get('entry_quality') or entry_score or 0)
++                        sl_score = float(committee_result.get('sl_quality') or sl_score or 0)
++                        tp_score = float(committee_result.get('tp_quality') or tp_score or 0)
++                        entry_quality['entry_quality_score'] = round(entry_score, 2)
++                        entry_quality['quality_source'] = 'FINAL_EXECUTION_COMMITTEE_COMMIT19_2'
+                         execution_refinement.update({
+                             'applied': True,
+                             'reason': 'BETTER_GEOMETRY_WITH_SIGNAL_GATES_PRESERVED',
+@@ -36411,6 +36439,14 @@
+         levels=_ensure_manual_diagnostic_geometry_175114(result, action, symbol, tf) or (result.get('levels') or {})
+         funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
+         reason=str(levels.get('rejected_reason') or result.get('rejected_reason') or decision.get('reason') or (decision.get('razones') or [''])[0] or 'La tesis no superó la ejecución/publicación técnica.')[:520]
++        # Commit 19.2 — expose the exact unchanged Premium blocker in Multi as
++        # well. This is diagnostic only: it does not relax or bypass the gate.
++        _multi_gate=(levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
++        _multi_gate_reasons=[str(x) for x in (_multi_gate.get('reasons') or []) if str(x).strip()]
++        if _multi_gate_reasons:
++            _detail='Motivo exacto: ' + '; '.join(_multi_gate_reasons[:3])
++            if _detail not in reason:
++                reason=(reason.rstrip('. ') + '. ' + _detail)[:720]
+         state=_multiasset_signal_temporal_state(result)
+         manual_profile = _futures_manual_risk_profile(result)
+         rows.append({'signal_id':str(result.get('signal_id') or ''),'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':bool(manual_profile.get('allowed')),'manual_risk_class':manual_profile.get('risk_class'),'manual_risk_reason':manual_profile.get('reason'),'manual_requires_ack':bool(manual_profile.get('requires_ack')),'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'leverage':levels.get('leverage'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'execution_safety_minimum':manual_profile.get('execution_safety_minimum'),'source_candle_timestamp':result.get('source_candle_timestamp'),'source_candle_close_timestamp':result.get('source_candle_close_timestamp'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
+@@ -41083,14 +41119,17 @@
+ 
+     medium=bool(safety is not None and minimum is not None and safety>=minimum and stage=='PUBLICATION_GATE')
+     risk_class='MEDIUM' if medium else 'HIGH'
++    _publication_gate = (levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
++    _gate_reasons = [str(x) for x in (_publication_gate.get('reasons') or []) if str(x).strip()]
++    _gate_detail = (' Motivo exacto: ' + '; '.join(_gate_reasons[:3]) + '.') if _gate_reasons else ''
+     if source=='GUARANTEED_TECHNICAL_FALLBACK':
+-        reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.'
++        reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.' + _gate_detail
+     elif medium:
+-        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.'
++        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.' + _gate_detail
+     elif safety is not None:
+-        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.'
++        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
+     else:
+-        reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.'
++        reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
+     return {
+         'allowed': True,
+         'risk_class': risk_class,
+--- /mnt/data/c19_1_greeks_work/execution_specialist_committees.py	2026-10-01 23:53:50.056017050 +0000
++++ /mnt/data/c19_2_quality_work/execution_specialist_committees.py	2026-10-02 00:39:00.224235635 +0000
+@@ -20,7 +20,7 @@
+ from statistics import median
+ from typing import Any, Dict, Iterable, List, Optional, Tuple
+ 
+-VERSION = "COMMIT19_1_GREEKS_CONTEXT_ALIGNED_EXECUTION_V1"
++VERSION = "COMMIT19_2_QUALITY_SIGNAL_RECOVERY_EXECUTION_V1"
+ 
+ try:
+     from preliminary_backtest_prior import (
+@@ -1161,6 +1161,32 @@
+     return _clip(62.0 + 38.0 * (ceiling - rr) / span)
+ 
+ 
++
++def _publication_quality_proxy(entry_quality: float, sl_quality: float, tp_quality: float,
++                               rr: float, rr_floor: float, rr_ceiling: float) -> float:
++    """Derivative-quality proxy using the unchanged Futures Safety weights.
++
++    Structure/trend/timeframe are constant for every geometry candidate of the
++    same thesis, so only the components that the Entry/SL/TP committees can
++    actually improve are included.  This is a *ranking* objective, not a new
++    publication threshold.
++    """
++    rr=_f(rr,0.0); floor=max(1.0,_f(rr_floor,1.8)); ceiling=max(floor,_f(rr_ceiling,4.5))
++    if rr<floor: rr_component=0.0
++    elif rr<1.8: rr_component=55.0
++    elif rr<2.0: rr_component=70.0
++    elif rr<2.5: rr_component=82.0
++    elif rr<3.0: rr_component=92.0
++    elif rr<=min(3.5,ceiling): rr_component=100.0
++    elif rr<=ceiling: rr_component=88.0
++    else: rr_component=55.0
++    return round(
++        _clip(entry_quality)*0.25 + _clip(sl_quality)*0.20
++        + _clip(tp_quality)*0.15 + rr_component*0.15,
++        4,
++    )
++
++
+ def _joint_geometry_score(entry_row: Dict[str, Any], sl_row: Dict[str, Any],
+                           tp_row: Dict[str, Any], rr: float,
+                           rr_floor: float, rr_ceiling: float,
+@@ -1435,8 +1461,13 @@
+                     preferred_rr_min, preferred_rr_max,
+                 )
+ 
++                publication_quality_proxy = _publication_quality_proxy(
++                    _f(entry_row.get("committee_score")), _f(sl_row.get("committee_score")),
++                    _f(tp_row.get("committee_score")), rr, rr_floor, rr_ceiling,
++                )
+                 combo = {
+                     "joint_score": round(joint, 2),
++                    "publication_quality_proxy": publication_quality_proxy,
+                     "risk_reward": round(rr, 4),
+                     "entry": entry_price,
+                     "stop_loss": sl_price,
+@@ -1472,15 +1503,35 @@
+                     if not admissible:
+                         admissibility_rejections += 1
+                         continue
+-                if (
+-                    best_combo is None
+-                    or combo["joint_score"] > best_combo["joint_score"]
+-                    or (
+-                        combo["joint_score"] == best_combo["joint_score"]
+-                        and abs(combo["risk_reward"] - 2.6)
+-                        < abs(best_combo["risk_reward"] - 2.6)
++                if market in {"futures", "multiasset"}:
++                    # Commit 19.2: among alternatives that already passed the
++                    # unchanged hard geometry/timing/setup guards, prefer the
++                    # one that maximizes the same Entry/SL/TP/RR components used
++                    # by Futures Safety.  This repairs quality selection rather
++                    # than lowering Premium thresholds.
++                    _better = bool(
++                        best_combo is None
++                        or combo["publication_quality_proxy"] > best_combo.get("publication_quality_proxy", -1)
++                        or (
++                            combo["publication_quality_proxy"] == best_combo.get("publication_quality_proxy", -1)
++                            and combo["joint_score"] > best_combo["joint_score"]
++                        )
++                        or (
++                            combo["publication_quality_proxy"] == best_combo.get("publication_quality_proxy", -1)
++                            and combo["joint_score"] == best_combo["joint_score"]
++                            and abs(combo["risk_reward"] - 2.6) < abs(best_combo["risk_reward"] - 2.6)
++                        )
+                     )
+-                ):
++                else:
++                    _better = bool(
++                        best_combo is None
++                        or combo["joint_score"] > best_combo["joint_score"]
++                        or (
++                            combo["joint_score"] == best_combo["joint_score"]
++                            and abs(combo["risk_reward"] - 2.6) < abs(best_combo["risk_reward"] - 2.6)
++                        )
++                    )
++                if _better:
+                     best_combo = combo
+ 
+     if best_combo is None:
+@@ -1497,9 +1548,8 @@
+     sl_row = best_combo["sl_committee"]
+     tp_row = best_combo["tp_committee"]
+ 
+-    # Committee scores remain internal selection diagnostics.  The caller keeps
+-    # the established legacy Entry/SL/TP quality scale for Safety/ReviewTrader/
+-    # Publication, preventing Commit 16 from silently changing those thresholds.
++    # Commit 19.2 persists these committee scores for the geometry actually
++    # selected. Safety/publication thresholds themselves remain unchanged.
+     return {
+         "success": True,
+         "admissibility_rejections": admissibility_rejections,
+@@ -1512,6 +1562,7 @@
+         "risk_reward": best_combo["risk_reward"],
+         "indicative_leverage": round(leverage_hint, 2),
+         "geometry_quality": best_combo["joint_score"],
++        "publication_quality_proxy": best_combo.get("publication_quality_proxy"),
+         "baseline_geometry_quality": baseline_geometry_quality,
+         "geometry_improvement": (
+             round(best_combo["joint_score"] - baseline_geometry_quality, 2)
+@@ -1529,6 +1580,115 @@
+     }
+ 
+ 
++
++def score_execution_geometry(*, entry: float, stop_loss: float, take_profit: float,
++                             direction: str, current_price: float, atr: float,
++                             structure=None, trend=None, momentum=None, volatility=None,
++                             setup_family=None, liquidation=None, market_type="futures",
++                             symbol=None, timeframe=None, execution_context=None,
++                             rr_floor: float = 1.8, rr_ceiling: float = 4.5,
++                             preferred_rr_min: float = 2.0,
++                             preferred_rr_max: float = 3.2,
++                             leverage_hint: float = 1.0) -> Dict[str, Any]:
++    """Commit 19.2 — score the *actual final* Entry/SL/TP geometry.
++
++    Earlier releases could let the advanced committees select a better geometry
++    while Safety kept the legacy scores of the superseded baseline.  Champion
++    overlays could also replace numerical Entry/SL/TP after the baseline had
++    already been scored.  That created a quality/publication mismatch: good
++    geometry was visible, but Premium still evaluated another geometry's scores.
++
++    This function is a deterministic, zero-I/O bridge.  It evaluates the exact
++    prices with the same Entry/SL/TP specialist models already used by the
++    committee.  It does not create direction, alter prices, lower any threshold,
++    or authorize publication.  Futures Safety and the publication gate remain
++    downstream and unchanged.
++    """
++    structure, trend, momentum, volatility = (
++        _execution_structure(_d(structure)), _d(trend), _d(momentum), _d(volatility)
++    )
++    context = dict(_d(execution_context))
++    market = str(market_type or "futures").lower()
++    direction = str(direction or "").lower()
++    try:
++        e=float(entry); sl=float(stop_loss); tp=float(take_profit)
++        cp=float(current_price); atr_v=float(atr)
++    except Exception:
++        return {"success":False,"reason":"INVALID_GEOMETRY_INPUT","version":VERSION}
++    if not all(isfinite(x) and x>0 for x in (e,sl,tp,cp,atr_v)):
++        return {"success":False,"reason":"INVALID_GEOMETRY_INPUT","version":VERSION}
++    if direction not in {"long","short"}:
++        return {"success":False,"reason":"INVALID_DIRECTION","version":VERSION}
++    if not ((direction=="long" and sl<e<tp) or (direction=="short" and tp<e<sl)):
++        return {"success":False,"reason":"INVALID_GEOMETRY_ORDER","version":VERSION}
++    risk=abs(e-sl)
++    rr=abs(tp-e)/max(risk,1e-12)
++    rr_floor=max(1.0,_f(rr_floor,1.8)); rr_ceiling=max(rr_floor,_f(rr_ceiling,4.5))
++    preferred_rr_min=max(rr_floor,_f(preferred_rr_min,2.0))
++    preferred_rr_max=min(rr_ceiling,max(preferred_rr_min,_f(preferred_rr_max,3.2)))
++    if rr<rr_floor or rr>rr_ceiling:
++        return {"success":False,"reason":"RR_OUTSIDE_TECHNICAL_BAND","risk_reward":round(rr,4),"version":VERSION}
++    context.setdefault("market_type", market)
++    context.setdefault("symbol", str(symbol or ""))
++    context.setdefault("timeframe", str(timeframe or ""))
++    context.setdefault("leverage_hint", max(1.0,_f(leverage_hint,1.0)) if market!="spot" else 1.0)
++
++    # Entry — include exact price as baseline row, then score with the same
++    # specialist functions used by coordinate_execution_committees().
++    entry_candidates=_collect_entry_candidates(structure,direction,e,liquidation=liquidation)
++    _add_execution_recovery_entry_candidates(entry_candidates,structure=structure,direction=direction,current_price=cp,atr=atr_v)
++    entry_row=next((r for r in entry_candidates if abs(_f(r.get("price"))-e)<=max(abs(e)*1e-9,1e-10)),None)
++    if entry_row is None:
++        _append_candidate(entry_candidates,e,"selected_geometry","Entry final seleccionado",2.0)
++        entry_row=entry_candidates[-1]
++    e_scores=_entry_specialists(entry_row,entry_candidates,direction=direction,current_price=cp,atr=atr_v,
++                                structure=structure,trend=trend,momentum=momentum,volatility=volatility,
++                                setup_family=setup_family,context=context,market_type=market)
++    e_score,e_consensus=_score_candidate(e_scores,_weights_for("entry",market),role="entry")
++    entry_row=dict(entry_row); entry_row.update({"scores":e_scores,"committee_score":round(e_score,2),"consensus":round(e_consensus,2)})
++
++    # SL — exact stop must still be a defensible invalidation, not a reaction
++    # level that is likely to be swept before the thesis is invalidated.
++    sl_conflict=evaluate_sl_reaction_conflict(structure=structure,direction=direction,entry=e,stop_loss=sl,atr=atr_v) or {}
++    if sl_conflict.get("conflict"):
++        return {"success":False,"reason":"SL_REACTION_CONFLICT","sl_reaction_guard":sl_conflict,"version":VERSION}
++    activity=_f(context.get("activity_score"),50.0)
++    sl_candidates=_collect_sl_candidates(structure,direction,e,sl,atr_v,activity)
++    _add_execution_recovery_sl_candidates(sl_candidates,structure=structure,direction=direction,entry=e,atr=atr_v,activity=activity)
++    sl_row=next((r for r in sl_candidates if abs(_f(r.get("price"))-sl)<=max(abs(sl)*1e-9,1e-10)),None)
++    if sl_row is None:
++        _append_candidate(sl_candidates,sl,"selected_geometry","SL final seleccionado",2.0)
++        sl_row=sl_candidates[-1]
++    sl_scores=_sl_specialists(sl_row,sl_candidates,direction=direction,entry=e,tp_hint=tp,atr=atr_v,
++                              structure=structure,setup_family=setup_family,context=context,market_type=market,
++                              leverage_hint=context.get("leverage_hint",leverage_hint))
++    sl_score,sl_consensus=_score_candidate(sl_scores,_weights_for("sl",market),role="sl")
++    sl_row=dict(sl_row); sl_row.update({"scores":sl_scores,"committee_score":round(sl_score,2),"consensus":round(sl_consensus,2)})
++
++    # TP — exact target is scored for path/touch/economics and option barrier
++    # confluence where an observed chain exists.
++    tp_candidates=_collect_tp_candidates(structure,direction,e,tp,atr_v,liquidation=liquidation)
++    tp_row=next((r for r in tp_candidates if abs(_f(r.get("price"))-tp)<=max(abs(tp)*1e-9,1e-10)),None)
++    if tp_row is None:
++        _append_candidate(tp_candidates,tp,"selected_geometry","TP final seleccionado",2.0)
++        tp_row=tp_candidates[-1]
++    tp_scores=_tp_specialists(tp_row,tp_candidates,direction=direction,entry=e,sl=sl,atr=atr_v,
++                              structure=structure,trend=trend,momentum=momentum,volatility=volatility,
++                              setup_family=setup_family,context=context,market_type=market,
++                              liquidation=liquidation,leverage_hint=context.get("leverage_hint",leverage_hint))
++    tp_score,tp_consensus=_score_candidate(tp_scores,_weights_for("tp",market),role="tp")
++    tp_row=dict(tp_row); tp_row.update({"scores":tp_scores,"committee_score":round(tp_score,2),"consensus":round(tp_consensus,2)})
++
++    joint=_joint_geometry_score(entry_row,sl_row,tp_row,rr,rr_floor,rr_ceiling,preferred_rr_min,preferred_rr_max)
++    return {
++        "success":True,"version":"COMMIT19_2_FINAL_GEOMETRY_SCORE_V1","market_type":market,
++        "entry_quality":round(e_score,2),"sl_quality":round(sl_score,2),"tp_quality":round(tp_score,2),
++        "geometry_quality":round(joint,2),"risk_reward":round(rr,4),
++        "entry_committee":entry_row,"sl_committee":sl_row,"tp_committee":tp_row,
++        "sl_reaction_guard":sl_conflict,"prices_changed":False,"network_calls":0,
++        "authority":"QUALITY_MEASUREMENT_ONLY",
++    }
++
+ def recover_execution_geometry_from_structure(*, direction: str, current_price: float,
+                                                atr: float, structure=None, trend=None,
+                                                momentum=None, volatility=None,
+--- /mnt/data/c19_1_greeks_work/live_quant_synthesis_commit19_1.py	2026-10-01 23:18:02.000000000 +0000
++++ /mnt/data/c19_2_quality_work/live_quant_synthesis_commit19_1.py	2026-10-02 00:36:24.637028119 +0000
+@@ -29,7 +29,7 @@
+ import hashlib
+ from typing import Any, Dict, Iterable, List, Mapping, Tuple
+ 
+-VERSION = "COMMIT19_1_LIVE_QUANT_SYNTHESIS_V1"
++VERSION = "COMMIT19_2_LIVE_QUANT_SYNTHESIS_PATTERN_CONTRACT_V1"
+ _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
+ 
+ 
+@@ -220,6 +220,70 @@
+     return list(thesis.get("long_families") if direction == "BULLISH" else thesis.get("short_families") or [])
+ 
+ 
++
++def _pattern_support_contract(pattern: str, direction: str, f: Mapping[str, Any],
++                              desks: Mapping[str, Mapping[str, float]],
++                              families: List[str], market: str, risk_class: str) -> Tuple[bool, str, Dict[str, Any]]:
++    """Commit 19.2: pattern-specific evidence replaces generic family quotas.
++
++    A generic ``3/4 families`` count was useful as an anti-noise guard, but in
++    production it became an authority bottleneck: a concrete Sweep+MSS+POI or a
++    Trend+Pullback+MTF setup could be rejected simply because the thesis layer
++    had not labelled enough generic families.  This function does *not* lower
++    the synthesis score, Entry/SL/TP quality, Safety or publication thresholds.
++    It asks each pattern for the evidence that actually defines that pattern.
++    """
++    pattern=_u(pattern); risk_class=_u(risk_class); market=_u(market)
++    setup=_f((desks.get("SETUP") or {}).get(direction))
++    execution=_f((desks.get("EXECUTION") or {}).get(direction))
++    context=_f((desks.get("CONTEXT") or {}).get(direction))
++    mtf_support=bool(f.get("mtf_direction")==direction or f.get("mtf_alignment") in {"ALIGNED","SUPPORTIVE"})
++    trend_support=bool(f.get("trend_direction")==direction)
++    mom_support=bool(f.get("momentum_direction")==direction)
++    volume=_f(f.get("volume_ratio"),1.0)
++    adx=_f(f.get("adx"))
++    high_extra=True
++    # HIGH crypto remains stricter, but the extra condition is market evidence
++    # (MTF/volume), not an arbitrary count of labels.
++    if risk_class=="HIGH":
++        high_extra=bool(mtf_support or volume>=1.15)
++
++    details={
++        "setup":round(setup,3),"execution":round(execution,3),"context":round(context,3),
++        "mtf_support":mtf_support,"trend_support":trend_support,"momentum_support":mom_support,
++        "volume_ratio":round(volume,3),"adx":round(adx,2),"family_labels":len(set(families)),
++        "high_extra":high_extra,
++    }
++    ok=False; reason="PATTERN_EVIDENCE_INCOMPLETE"
++    if pattern=="SWEEP_REVERSAL":
++        ok=bool(f.get("sweep") and (f.get("mss") or f.get("displacement")) and f.get("poi")
++                and setup>=0.48 and execution>=0.48 and high_extra)
++        reason="SWEEP_MSS_POI_CONTRACT"
++    elif pattern=="TREND_PULLBACK":
++        ok=bool(trend_support and f.get("poi") and adx>=18.0
++                and setup>=0.48 and execution>=0.50
++                and (mtf_support or context>=0.38 or volume>=0.90) and high_extra)
++        reason="TREND_PULLBACK_CONTEXT_CONTRACT"
++    elif pattern=="BREAKOUT_RETEST":
++        ok=bool(f.get("breakout") and f.get("retest") and setup>=0.50 and execution>=0.48
++                and (f.get("displacement") or volume>=0.95 or mtf_support) and high_extra)
++        reason="BREAKOUT_RETEST_CONFIRMATION_CONTRACT"
++    elif pattern=="COMPRESSION_EXPANSION":
++        ok=bool(f.get("squeeze") and trend_support and mom_support and volume>=1.05
++                and setup>=0.48 and execution>=0.48 and high_extra)
++        reason="COMPRESSION_EXPANSION_CONTRACT"
++    elif pattern=="MOMENTUM_CONTINUATION":
++        ok=bool(trend_support and mom_support and adx>=18.0 and volume>=1.0
++                and setup>=0.48 and execution>=0.48
++                and (mtf_support or context>=0.42) and high_extra)
++        reason="MOMENTUM_MTF_VOLUME_CONTRACT"
++    elif pattern=="STRUCTURE_RETEST":
++        structure_support=bool(f.get("structure_direction")==direction or mtf_support or trend_support)
++        ok=bool(f.get("poi") and structure_support and setup>=0.55 and execution>=0.55 and high_extra)
++        reason="STRUCTURE_RETEST_CONTRACT"
++    return ok,reason,details
++
++
+ def _public_reasons(direction: str, pattern: str, f: Mapping[str, Any], pattern_reasons: List[str], family_support: List[str]) -> List[str]:
+     human = "alcista" if direction == "BULLISH" else "bajista"
+     out = [f"La lectura de mercado es {human} y el patrón operativo identificado es {pattern.replace('_',' ').lower()}."]
+@@ -288,16 +352,17 @@
+             continue
+         fams = _family_support(op, direction)
+         risk_class = _risk_class(symbol, market)
+-        min_fams = 4 if risk_class == "HIGH" else 3 if market in {"FUTURES", "MULTIASSET"} else 2
+-        if len(fams) < min_fams:
+-            # A strong structural event can replace one generic family count,
+-            # but cannot make a signal from a single indicator.
+-            structural_exception = bool(f.get("sweep") and (f.get("mss") or f.get("displacement")) and f.get("poi"))
+-            if not (structural_exception and len(fams) >= max(2, min_fams - 1)):
+-                continue
+         pattern, pattern_score, pattern_reasons = _pattern(direction, f, desks)
+         if not pattern:
+             continue
++        # Commit 19.2: validate the setup by the concrete evidence required by
++        # its own pattern.  We keep the global synthesis quality floor at 0.66
++        # and all downstream Premium thresholds unchanged.
++        pattern_ok, pattern_contract, pattern_evidence = _pattern_support_contract(
++            pattern, direction, f, desks, fams, market, risk_class
++        )
++        if not pattern_ok:
++            continue
+         desk_strength = (setup + execution + min(1.0, context + 0.15)) / 3.0
+         family_bonus = min(0.12, 0.025 * len(fams))
+         control_penalty = min(0.12, max(0.0, control_opp - control_same) * 0.16)
+@@ -306,6 +371,7 @@
+             "direction": direction, "score": score, "setup": setup, "execution": execution,
+             "context": context, "control_penalty": control_penalty, "families": fams,
+             "pattern": pattern, "pattern_score": pattern_score, "pattern_reasons": pattern_reasons,
++            "pattern_contract": pattern_contract, "pattern_evidence": pattern_evidence,
+         })
+ 
+     if not candidate_rows:
+@@ -347,6 +413,8 @@
+         "synthesis_quality": round(best["score"] * 100.0, 2),
+         "setup_family": setup_family,
+         "pattern_score": round(best["pattern_score"] * 100.0, 2),
++        "pattern_contract": best.get("pattern_contract"),
++        "pattern_evidence": best.get("pattern_evidence"),
+         "synthesis_id": synthesis_id,
+         "decay_key": decay_key,
+         "research_handoff_key": f"C19_1_SHADOW::{decay_key}",
+--- /mnt/data/c19_1_greeks_work/commit19_1_runtime.py	2026-10-01 23:56:14.064776736 +0000
++++ /mnt/data/c19_2_quality_work/commit19_1_runtime.py	2026-10-02 00:35:49.160110204 +0000
+@@ -3,7 +3,7 @@
+ import sys
+ from typing import Any, Dict
+ 
+-VERSION="COMMIT19_1_FINAL_CHAMPION_QUANT_GREEKS_V1"
++VERSION="COMMIT19_2_QUALITY_SIGNAL_RECOVERY_V1"
+ _ORIGINALS: Dict[str,Any]={}
+ 
+ def _u(v): return str(v or "").strip().upper().replace("/","-")
+@@ -119,6 +119,68 @@
+         try:
+             op=dict((execution_observations or {}).get("operational_intelligence") or {}) if isinstance(execution_observations,dict) else {}
+             synth=dict(op.get("live_quant_synthesis") or {})
++
++            # Commit 19.2 QUALITY RECOVERY — score the exact geometry that will
++            # reach Futures/Multi publication.  This fixes a state mismatch in
++            # which committees or the Champion overlay changed Entry/SL/TP but
++            # Safety still consumed scores belonging to the old baseline.  No
++            # threshold is lowered and no price is changed here.
++            _action=_u(decision)
++            _should_rescore=bool(
++                _action in {"LONG","SHORT"}
++                and (
++                    levels.get("execution_refinement_applied")
++                    or levels.get("structural_recovery_applied")
++                    or levels.get("commit19_geometry_parity")
++                    or (synth.get("authority")=="LIVE_QUANT_SYNTHESIS_COMMIT19_1" and synth.get("eligible_for_execution_routing"))
++                )
++            )
++            if _should_rescore:
++                try:
++                    from execution_specialist_committees import build_execution_context, score_execution_geometry
++                    _market="futures"
++                    try:
++                        from multiasset_system import MULTIASSET_SYMBOLS
++                        if str(symbol or "").upper() in set(MULTIASSET_SYMBOLS or {}): _market="multiasset"
++                    except Exception:
++                        pass
++                    _obs=execution_observations if isinstance(execution_observations,dict) else {}
++                    _current=float((structure or {}).get("current_price") or _obs.get("current_price") or 0)
++                    _atr=float((volatility or {}).get("atr") or 0)
++                    _mm=dict(levels.get("market_maker_context") or {}) if isinstance(levels.get("market_maker_context"),dict) else {}
++                    _ctx=build_execution_context(
++                        structure=structure, volume=_obs.get("volume") or (structure or {}).get("volume_analysis") or {},
++                        volatility=volatility, market_hours=_obs.get("market_hours") or {},
++                        sentiment=_obs.get("sentiment") or {}, macro_context=_obs.get("macro_context") or {},
++                        market_regime=_obs.get("market_regime") or {}, market_maker_context=_mm,
++                        symbol=symbol, timeframe=timeframe, market_type=_market,
++                    )
++                    _family=str(synth.get("setup_family") or ((op.get("default_strategy") or {}).get("family")) or "UNSPECIFIED")
++                    _scored=score_execution_geometry(
++                        entry=float(levels.get("entry") or 0), stop_loss=float(levels.get("stop_loss") or 0),
++                        take_profit=float(levels.get("take_profit") or 0), direction="long" if _action=="LONG" else "short",
++                        current_price=_current, atr=_atr, structure=structure, trend=trend, momentum=momentum,
++                        volatility=volatility, setup_family=_family, liquidation=liquidation, market_type=_market,
++                        symbol=symbol, timeframe=timeframe, execution_context=_ctx,
++                        rr_floor=float(levels.get("minimum_viable_rr") or 1.8),
++                        rr_ceiling=float(levels.get("maximum_technical_rr") or 4.5),
++                        leverage_hint=float(levels.get("leverage") or 1.0),
++                    ) or {}
++                    if _scored.get("success"):
++                        levels["entry_score"]=round(float(_scored.get("entry_quality") or 0),1)
++                        levels["entry_quality_score"]=round(float(_scored.get("entry_quality") or 0),1)
++                        levels["sl_reliability"]=round(float(_scored.get("sl_quality") or 0)/100.0,2)
++                        levels["tp_quality_score"]=round(float(_scored.get("tp_quality") or 0),1)
++                        levels["execution_geometry_quality"]=round(float(_scored.get("geometry_quality") or 0),2)
++                        levels["final_geometry_quality_rescored"]=True
++                        levels["final_geometry_quality_version"]="COMMIT19_2_FINAL_GEOMETRY_SCORE_V1"
++                        levels["final_geometry_quality_authority"]="MEASURE_ACTUAL_GEOMETRY_NO_THRESHOLD_CHANGE"
++                    else:
++                        levels["final_geometry_quality_rescored"]=False
++                        levels["final_geometry_quality_reason"]=_scored.get("reason")
++                except Exception as _rescore_error:
++                    levels["final_geometry_quality_rescored"]=False
++                    levels["final_geometry_quality_reason"]=f"RESCORE_FAIL_OPEN:{type(_rescore_error).__name__}"
+             if synth.get("authority")!="LIVE_QUANT_SYNTHESIS_COMMIT19_1" or not synth.get("eligible_for_execution_routing"):
+                 return levels
+             levels["live_quant_synthesis_id"]=synth.get("synthesis_id")
+--- /mnt/data/c19_1_greeks_work/static/market_maker_frontend.js	2026-10-01 23:55:38.453479895 +0000
++++ /mnt/data/c19_2_quality_work/static/market_maker_frontend.js	2026-10-02 00:42:39.751917541 +0000
+@@ -96,12 +96,47 @@
+         return 0.5 * (1 + erfApprox(x / Math.sqrt(2)));
+     }
+ 
++    function lastPositive(value) {
++        if (Array.isArray(value)) {
++            for (let i = value.length - 1; i >= 0; i -= 1) {
++                const n = finite(value[i]);
++                if (n !== null && n > 0) return n;
++            }
++        }
++        return null;
++    }
++
++    function visibleCandlePrice() {
++        // Commit 19.2: reuse the price already rendered on the main candle
++        // chart before opening another network request. This fixes theoretical
++        // Greeks cards that were blank even though the candlestick chart had
++        // valid data (especially Multi-Asset provider fallbacks).
++        try {
++            const chart = $('candle-chart');
++            const traces = chart?.data || [];
++            for (const trace of traces) {
++                const close = lastPositive(trace?.close);
++                if (close !== null) return close;
++                const y = lastPositive(trace?.y);
++                if (y !== null && String(trace?.type || '').toLowerCase() === 'candlestick') return y;
++            }
++        } catch (_) {}
++        return null;
++    }
++
+     function localSpot() {
+         const candidates = [
+             window.currentAnalysis?.current_price,
+             window.currentAnalysis?.live_price,
+             window.currentAnalysis?.analysis_price,
++            window.currentAnalysis?.price,
++            window.currentAnalysis?.current_candle?.close,
++            window.currentAnalysis?.last_candle?.close,
++            lastPositive(window.currentAnalysis?.df?.close),
++            lastPositive(window.currentAnalysis?.data?.close),
++            lastPositive(window.currentAnalysis?.chart_data?.close),
+             window.currentAnalysis?.levels?.entry,
++            visibleCandlePrice(),
+         ];
+         for (const raw of candidates) {
+             const n = finite(raw);
+@@ -295,14 +330,14 @@
+ 
+         text('mm-option-source', observed ? 'Cadena observada' : 'Black-Scholes teórico');
+         text('mm-gamma-regime', regime(mm.gamma_regime));
+-        text('mm-zero-dte-share', pct01(mm.zero_dte_gamma_share));
+-        text('mm-zero-gamma', price(mm.zero_gamma_level));
+-        text('mm-delta-neutral', price(mm.delta_neutral_level));
+-        text('mm-call-wall', observed ? price(mm.call_wall) : '--');
+-        text('mm-gamma-wall', price(mm.gamma_wall));
+-        text('mm-put-wall', observed ? price(mm.put_wall) : '--');
+-        text('mm-delta-dollar', compact(mm.heuristic_signed_delta_dollars));
+-        text('mm-gex-total', compact(mm.heuristic_signed_gamma_exposure));
++        text('mm-zero-dte-share', observed ? pct01(mm.zero_dte_gamma_share) : 'N/A');
++        text('mm-zero-gamma', observed ? price(mm.zero_gamma_level) : 'N/A');
++        text('mm-delta-neutral', observed ? price(mm.delta_neutral_level) : 'N/A');
++        text('mm-call-wall', observed ? price(mm.call_wall) : 'N/A');
++        text('mm-gamma-wall', observed ? price(mm.gamma_wall) : 'N/A');
++        text('mm-put-wall', observed ? price(mm.put_wall) : 'N/A');
++        text('mm-delta-dollar', observed ? compact(mm.heuristic_signed_delta_dollars) : 'N/A');
++        text('mm-gex-total', observed ? compact(mm.heuristic_signed_gamma_exposure) : 'N/A');
+         text('mm-vega', compact(mm.aggregate_vega_per_iv_point));
+         text('mm-theta', compact(mm.aggregate_theta_per_day));
+ 
+@@ -481,7 +516,7 @@
+                 bordercolor: '#3a424a',
+                 font: { color: '#f2f5f7' }
+             },
+-            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-1-greeks`
++            uirevision: `${window.currentSymbol || ''}-${window.currentInterval || ''}-commit19-2-quality-greeks`
+         };
+ 
+         window.Plotly.react(
+--- /mnt/data/c19_1_greeks_work/Procfile	2026-10-01 23:18:02.000000000 +0000
++++ /mnt/data/c19_2_quality_work/Procfile	2026-10-02 00:36:54.701318002 +0000
+@@ -1 +1 @@
+-web: gunicorn commit19_1_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
++web: gunicorn commit19_2_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+--- /mnt/data/c19_1_greeks_work/render.yaml	2026-10-01 23:55:54.930960357 +0000
++++ /mnt/data/c19_2_quality_work/render.yaml	2026-10-02 00:43:02.451557396 +0000
+@@ -3,7 +3,7 @@
+     name: crypto-trader-analyst
+     env: python
+     buildCommand: bash build.sh
+-    startCommand: gunicorn commit19_1_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
++    startCommand: gunicorn commit19_2_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+     envVars:
+       - key: PYTHON_VERSION
+         value: 3.11.9
+@@ -45,7 +45,7 @@
+         value: "1"
+       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
+         value: "12"
+-      # Commit 19.1 FINAL — Greeks/options provider guard. The chart is
++      # Commit 19.2 — Greeks/options provider guard (budget unchanged). The chart is
+       # theoretical/local for unsupported assets; only direct BTC/ETH chains
+       # may consume provider egress, under this independent daily cap.
+       - key: OPTIONS_MM_CONTEXT_ENABLED
+--- /mnt/data/c19_1_greeks_work/qa_commit19_1.py	2026-10-01 23:59:39.750369927 +0000
++++ /mnt/data/c19_2_quality_work/qa_commit19_1.py	2026-10-02 00:39:15.778618439 +0000
+@@ -55,7 +55,18 @@
+     checks["mtf_conflict_blocks"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
+     c,r=_case("BULLISH"); c["macro_context"]["risk_level"]="CRITICAL"
+     checks["critical_macro_blocks"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
+-    c,r=_case("BULLISH"); c["operational_intelligence"]["thesis"]["long_families"]=["trend"]
++    c,r=_case("BULLISH")
++    # Commit 19.2: a mere label count is no longer the anti-noise gate. Test a
++    # genuinely single-indicator situation: no POI/sweep/MSS, no momentum, weak
++    # ADX/volume, and specialist notes stripped of structural hints.
++    c["operational_intelligence"]["thesis"]["long_families"]=["trend"]
++    c["structure"]={"current_price":100}
++    c["momentum"]={"direction":"neutral","rsi":50,"macd_histogram":0}
++    c["volume"]={"volume_ratio":0.6}
++    c["trend"]={"direction":"bullish","adx":12}
++    for _w in r["worker_desk_17_5_9"]["workers"]:
++        _w["strategies_observed"]=["RSI"]
++        _w["work_notes"]=[]
+     checks["single_indicator_not_enough"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
+     c,r=_case("BULLISH"); c["operational_intelligence"]["candidate_ready"]=True; c["operational_intelligence"]["candidate_action"]="LONG"
+     checks["does_not_override_existing_candidate"]=not synthesize_live_candidate(capas=c,vote_record=r,symbol="BTC-USDT",timeframe="1H",system_type="futures",review_trader=Review()).get("use")
+
+# NEW FILES IN COMMIT 19.2
+# commit19_2_main_entrypoint.py
+# qa_commit19_2.py
+# release/audit documentation

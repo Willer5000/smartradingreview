@@ -17532,10 +17532,11 @@ class TradingExpertSystem:
             #   * direction/signal already exists before this block;
             #   * baseline 17.5.1 Entry/SL/TP is computed first;
             #   * advanced committees may REFINE that geometry only;
-            #   * they cannot create a signal, rescue an invalid baseline,
-            #     lower R/R rules, lower Safety, or change legacy quality scores;
-            #   * any failure or ambiguous result keeps the 17.5.1 baseline.
-            # This preserves signal frequency while improving execution quality.
+            #   * they cannot create direction or lower R/R/Safety thresholds;
+            #   * they MAY replace a mediocre baseline when the alternative
+            #     independently passes the same hard timing/setup/risk guards;
+            #   * quality scores must follow the geometry actually selected.
+            # This restores quality-signal recovery without lowering standards.
             try:
                 minimum_viable_rr = max(
                     1.0,
@@ -17817,29 +17818,40 @@ class TradingExpertSystem:
                             return False
                         risk = abs(re - rs)
                         rr_candidate = abs(rt - re) / risk if risk > 0 else 0.0
+                        # Commit 19.2 QUALITY RECOVERY.  The old refinement
+                        # contract required a better geometry to remain in the
+                        # same R/R bucket, the same timing class, the same 0.60
+                        # ATR side and almost the same risk distance as the
+                        # baseline.  That accidentally prevented the committees
+                        # from repairing a mediocre baseline into a genuinely
+                        # Premium geometry.  We do NOT lower any downstream
+                        # threshold here.  Instead, the alternative must be
+                        # independently stronger and pass the real timing/setup
+                        # guards on its own.
+                        _baseline_gq = proposal.get('baseline_geometry_quality')
+                        _improvement = proposal.get('geometry_improvement')
+                        _candidate_gq = values[3]
+                        _entry_q, _sl_q, _tp_q = values[5], values[6], values[7]
+                        _shift_atr = abs(re - baseline_entry) / max(float(atr), 1e-12)
+                        _risk_ratio = risk / max(baseline_risk, 1e-12)
+                        _quality_improves = bool(
+                            (_baseline_gq is None and _candidate_gq >= 70.0)
+                            or (_baseline_gq is not None and _improvement is not None and values[4] >= 1.50)
+                        )
                         if not (
                             min(re, rs, rt) > 0 and risk > 0
                             and ((direction == 'long' and rs < re < rt and re <= current_price)
                                  or (direction == 'short' and rt < re < rs and re >= current_price))
                             and minimum_viable_rr <= rr_candidate <= maximum_technical_rr
-                            and _rr_safety_bucket(rr_candidate) == _rr_safety_bucket(baseline_rr)
-                            and abs(re - baseline_entry) / max(float(atr), 1e-12) <= 0.85
-                            and 0.82 <= risk / max(baseline_risk, 1e-12) <= 1.18
-                            and proposal.get('baseline_geometry_quality') is not None
-                            and proposal.get('geometry_improvement') is not None
-                            and values[4] >= 1.50 and values[3] >= 62.0
-                            and values[5] >= 55.0 and values[6] >= 60.0 and values[7] >= 60.0
+                            and _shift_atr <= 1.35
+                            and 0.65 <= _risk_ratio <= 1.45
+                            and _quality_improves
+                            and _candidate_gq >= 68.0
+                            and _entry_q >= 65.0 and _sl_q >= 60.0 and _tp_q >= 60.0
                         ):
                             return False
                         metadata = _refined_entry_metadata(re)
-                        # Retain both the contextual timing class and the 0.60
-                        # ATR lower-TF trigger boundary used by Entry Reaction.
-                        # Refinement cannot silently change execution permissions.
-                        if metadata['entry_timing_mode'] != entry_quality.get('entry_timing_mode'):
-                            return False
                         if is_futures:
-                            if (abs(current_price - re) / atr <= 0.60) != (abs(current_price - baseline_entry) / atr <= 0.60):
-                                return False
                             gate = getattr(self, '_futures_entry_timing_gate', None)
                             if not callable(gate):
                                 return False
@@ -17860,8 +17872,12 @@ class TradingExpertSystem:
                                     except Exception:
                                         timing_cache[price] = None
                                 return timing_cache[price]
-                            baseline_passed, refined_passed = _timing_at(baseline_entry), _timing_at(re)
-                            if baseline_passed is None or refined_passed is None or baseline_passed != refined_passed:
+                            # The refined Entry must pass the existing gate.  A
+                            # weak baseline is no longer allowed to veto a better
+                            # alternative merely because the baseline itself
+                            # failed that gate.
+                            refined_passed = _timing_at(re)
+                            if refined_passed is not True:
                                 return False
 
                             # 17.5.5: the advanced search must know the SAME
@@ -17943,6 +17959,18 @@ class TradingExpertSystem:
                         entry_source = 'Zona técnica refinada · ' + str(entry_role.get('source') or entry_source)
                         sl_source = 'Invalidación técnica refinada · ' + str(sl_role.get('source') or sl_source)
                         tp_source = 'Objetivo técnico refinado · ' + str(tp_role.get('source') or tp_source)
+                        # Commit 19.2: Safety must evaluate the geometry that is
+                        # actually going to production.  Previous releases kept
+                        # the Entry/SL/TP quality scores from the superseded
+                        # baseline even after the committees changed the prices.
+                        # Persist the already-computed committee quality of the
+                        # selected geometry; publication thresholds stay exactly
+                        # the same downstream.
+                        entry_score = float(committee_result.get('entry_quality') or entry_score or 0)
+                        sl_score = float(committee_result.get('sl_quality') or sl_score or 0)
+                        tp_score = float(committee_result.get('tp_quality') or tp_score or 0)
+                        entry_quality['entry_quality_score'] = round(entry_score, 2)
+                        entry_quality['quality_source'] = 'FINAL_EXECUTION_COMMITTEE_COMMIT19_2'
                         execution_refinement.update({
                             'applied': True,
                             'reason': 'BETTER_GEOMETRY_WITH_SIGNAL_GATES_PRESERVED',
@@ -36411,6 +36439,14 @@ def _multiasset_directional_diagnostics_17511(analyses):
         levels=_ensure_manual_diagnostic_geometry_175114(result, action, symbol, tf) or (result.get('levels') or {})
         funnel=_technical_signal_funnel_row(result) if callable(globals().get('_technical_signal_funnel_row')) else {}
         reason=str(levels.get('rejected_reason') or result.get('rejected_reason') or decision.get('reason') or (decision.get('razones') or [''])[0] or 'La tesis no superó la ejecución/publicación técnica.')[:520]
+        # Commit 19.2 — expose the exact unchanged Premium blocker in Multi as
+        # well. This is diagnostic only: it does not relax or bypass the gate.
+        _multi_gate=(levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
+        _multi_gate_reasons=[str(x) for x in (_multi_gate.get('reasons') or []) if str(x).strip()]
+        if _multi_gate_reasons:
+            _detail='Motivo exacto: ' + '; '.join(_multi_gate_reasons[:3])
+            if _detail not in reason:
+                reason=(reason.rstrip('. ') + '. ' + _detail)[:720]
         state=_multiasset_signal_temporal_state(result)
         manual_profile = _futures_manual_risk_profile(result)
         rows.append({'signal_id':str(result.get('signal_id') or ''),'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':bool(manual_profile.get('allowed')),'manual_risk_class':manual_profile.get('risk_class'),'manual_risk_reason':manual_profile.get('reason'),'manual_requires_ack':bool(manual_profile.get('requires_ack')),'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'leverage':levels.get('leverage'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'execution_safety_minimum':manual_profile.get('execution_safety_minimum'),'source_candle_timestamp':result.get('source_candle_timestamp'),'source_candle_close_timestamp':result.get('source_candle_close_timestamp'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
@@ -41083,14 +41119,17 @@ def _futures_manual_risk_profile(result):
 
     medium=bool(safety is not None and minimum is not None and safety>=minimum and stage=='PUBLICATION_GATE')
     risk_class='MEDIUM' if medium else 'HIGH'
+    _publication_gate = (levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
+    _gate_reasons = [str(x) for x in (_publication_gate.get('reasons') or []) if str(x).strip()]
+    _gate_detail = (' Motivo exacto: ' + '; '.join(_gate_reasons[:3]) + '.') if _gate_reasons else ''
     if source=='GUARANTEED_TECHNICAL_FALLBACK':
-        reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.'
+        reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.' + _gate_detail
     elif medium:
-        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.'
+        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.' + _gate_detail
     elif safety is not None:
-        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.'
+        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
     else:
-        reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.'
+        reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
     return {
         'allowed': True,
         'risk_class': risk_class,
