@@ -1,9 +1,10 @@
-"""Commit 22 — Quality Path Expansion built from stable Commit 20.2.1 + Q1-Q9 context groups.
+"""Commit 23 — Parallel ten-filter quality authority built on stable Commit 20.2.1 + Commit 22 context groups.
 
 The stable 20.2.1 runtime remains the base. This overlay changes only how the
-already-bounded alternative geometries are compared: Q1..Q9 select the route
-with the deepest contextual quality, while Q10 is the unchanged hard safety /
-economic publication gate.
+already-bounded alternative geometries are compared: Q1..Q9 are preserved; ten parallel quality filters may confirm a route when
+any one filter reaches 75/100 and universal execution guards pass. The legacy
+Q10 contract remains fully visible as a diagnostic/legacy gate but is no longer
+a mandatory second veto for a contextual quality-confirmed trade.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from typing import Any, Dict, Mapping
 
 import quality_9q_engine_21 as q9
 
-VERSION = "COMMIT22_CONTEXT_QUALITY_AUTHORITY_V1"
+VERSION = "COMMIT23_TEN_FILTER_QUALITY_AUTHORITY_V1"
 MAX_ALTERNATIVE_ROUTES = 2
 
 
@@ -120,6 +121,136 @@ def _route_geometry_score(levels: Mapping[str, Any]) -> float:
         return max(0.0, min(100.0, .34 * entry + .33 * sl + .33 * tp))
 
 
+
+
+def _quality_filter_summary_text(parallel: Mapping[str, Any]) -> str:
+    if not isinstance(parallel, Mapping):
+        return ""
+    selected = str(parallel.get("selected_filter") or "NONE").upper()
+    selected_name = str(parallel.get("selected_filter_name") or "").strip()
+    score = _f(parallel.get("selected_filter_score"), 0.0)
+    passed = [str(x).upper() for x in (parallel.get("passed_filters") or [])]
+    summary = str(parallel.get("summary") or "").strip()
+    status = "✅ CONFIRMA" if parallel.get("confirmed_one_of_ten") else "⚪ NO CONFIRMA"
+    passed_text = ", ".join(passed) if passed else "ninguno"
+    label = f"{status} · filtro principal {selected}"
+    if selected_name:
+        label += f" {selected_name}"
+    label += f" {score:.1f}/100 · pasan: {passed_text}"
+    if summary:
+        label += f" · {summary}"
+    return label[:900]
+
+
+def _attach_parallel_quality_metadata(
+    out: Dict[str, Any],
+    q: Mapping[str, Any],
+    q10: Mapping[str, Any],
+    gate: Mapping[str, Any],
+    *,
+    symbol: str,
+    timeframe: str,
+    action: str,
+) -> Dict[str, Any]:
+    """Flatten the ten-filter trace so the frontend/Telegram serializers retain it."""
+    result = dict(out or {})
+    parallel = dict(q.get("parallel_quality_filters") or {})
+    legacy_reasons = [str(x).upper() for x in (gate.get("reason_codes") or [])]
+    parallel["legacy_publication_blockers"] = legacy_reasons
+    parallel["legacy_q10_gate_eligible"] = bool(gate.get("eligible"))
+    parallel["q10_is_required"] = False
+    parallel["dedupe_key"] = f"{_u(symbol)}|{str(timeframe or '').strip()}"
+    parallel["direction"] = str(action or "").upper()
+    summary = _quality_filter_summary_text(parallel)
+    result["quality_filter_trace"] = parallel
+    result["parallel_quality_filters"] = parallel
+    result["quality_filter_authority"] = str(parallel.get("selected_filter") or "NONE")
+    result["quality_filter_name"] = str(parallel.get("selected_filter_name") or "")
+    result["quality_filter_score"] = round(_f(parallel.get("selected_filter_score"), 0.0), 2)
+    result["quality_filter_passed"] = list(parallel.get("passed_filters") or [])
+    result["quality_filter_summary"] = summary
+    result["quality_filter_confirmed"] = bool(parallel.get("confirmed_one_of_ten"))
+    result["quality_filter_dedupe_key"] = parallel["dedupe_key"]
+    result["quality_filter_dedupe_score"] = result["quality_filter_score"]
+    result["q10_is_mandatory"] = False
+    result["legacy_q10_gate_eligible"] = bool(gate.get("eligible"))
+    result["legacy_q10_reason_codes"] = legacy_reasons
+    result["parallel_quality_guard_codes"] = list((parallel.get("universal_guards") or {}).get("codes") or [])
+    result["parallel_quality_safety_score"] = round(_f(parallel.get("safety_authority_score"), 0.0), 2)
+    result["parallel_quality_min_score"] = float(q9.PARALLEL_FILTER_MIN_SCORE)
+    result["quality_authority_policy"] = "ONE_OF_TEN_FILTERS_GE75_PLUS_UNIVERSAL_GUARDS"
+    result["quality_filter_membership"] = list(parallel.get("passed_filters") or [])
+    if isinstance(result.get("levels"), dict):
+        lv = result["levels"]
+        for key in (
+            "quality_filter_trace", "parallel_quality_filters", "quality_filter_authority",
+            "quality_filter_name", "quality_filter_score", "quality_filter_passed",
+            "quality_filter_summary", "quality_filter_confirmed", "quality_filter_dedupe_key",
+            "quality_filter_dedupe_score", "q10_is_mandatory", "legacy_q10_gate_eligible",
+            "legacy_q10_reason_codes", "parallel_quality_guard_codes", "parallel_quality_safety_score",
+            "parallel_quality_min_score", "quality_authority_policy", "quality_filter_membership",
+        ):
+            lv[key] = result.get(key)
+    return result
+
+
+def _try_parallel_quality_promotion(
+    out: Dict[str, Any],
+    q: Mapping[str, Any],
+    q10: Mapping[str, Any],
+    gate: Mapping[str, Any],
+    *,
+    symbol: str,
+    timeframe: str,
+    action: str,
+) -> tuple[Dict[str, Any], bool]:
+    """Promote exactly one quality-confirmed candidate without changing Q10 constants."""
+    parallel = dict(q.get("parallel_quality_filters") or {})
+    legacy_reasons = [str(x).upper() for x in (gate.get("reason_codes") or [])]
+    allowed_legacy = {"SAFETY", "TP_QUALITY", "SL_QUALITY", "RR"}
+    guards = dict(parallel.get("universal_guards") or {})
+    any_pass = bool(parallel.get("confirmed_one_of_ten"))
+    stage = str(out.get("futures_filter_stage") or gate.get("stage") or "PUBLICATION_GATE").upper()
+    can_promote = bool(
+        any_pass
+        and stage == "PUBLICATION_GATE"
+        and bool(guards.get("passed"))
+        and set(legacy_reasons).issubset(allowed_legacy)
+    )
+    result = dict(out or {})
+    if can_promote:
+        new_gate = dict(gate or {})
+        new_gate["eligible"] = True
+        new_gate["tier"] = "PREMIUM"
+        new_gate["status"] = "PREMIUM_CONTEXT_QUALITY"
+        new_gate["reasons"] = []
+        new_gate["reason_codes"] = []
+        new_gate["legacy_q10_gate_eligible"] = bool(gate.get("eligible"))
+        new_gate["legacy_q10_reason_codes"] = legacy_reasons
+        new_gate["parallel_quality_authority"] = str(parallel.get("selected_filter") or "NONE")
+        new_gate["parallel_quality_authority_name"] = str(parallel.get("selected_filter_name") or "")
+        new_gate["parallel_quality_score"] = round(_f(parallel.get("selected_filter_score"), 0.0), 2)
+        new_gate["parallel_quality_passed_filters"] = list(parallel.get("passed_filters") or [])
+        new_gate["q10_is_mandatory"] = False
+        new_gate["hard_q10_thresholds_unchanged"] = True
+        result["futures_publication_gate"] = new_gate
+        result["futures_signal_tier"] = "PREMIUM"
+        result["publication_eligible"] = True
+        result["is_rejected"] = False
+        result["is_executable"] = True
+        result["publication_status"] = "EXECUTABLE_SIGNAL"
+        result["premium_confirmation_mode"] = "ONE_OF_TEN_QUALITY_FILTERS"
+        result["quality_authority"] = str(parallel.get("selected_filter") or "NONE")
+        result["quality_authority_name"] = str(parallel.get("selected_filter_name") or "")
+        result["quality_authority_score"] = round(_f(parallel.get("selected_filter_score"), 0.0), 2)
+        result["q10_is_mandatory"] = False
+        result["premium_blocker_stage_21"] = "NONE"
+        result["premium_blocker_codes"] = []
+        result["premium_blocker"] = ""
+        result["quality_filter_confirmed"] = True
+        return result, True
+    return result, False
+
 def install_quality_geometry_router() -> Dict[str, Any]:
     try:
         import app as app_module
@@ -193,11 +324,13 @@ def install_quality_geometry_router() -> Dict[str, Any]:
 
             candidates = []
             baseline_q = _evaluate(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision, market_type=market_type)
+            baseline_parallel = dict(baseline_q.get("parallel_quality_filters") or {})
             candidates.append({
                 "route": setup or "BASELINE",
                 "levels": baseline,
                 "geometry_score": _route_geometry_score(baseline),
                 "quality": baseline_q,
+                "parallel": baseline_parallel,
             })
             meta = []
             for route in routes:
@@ -214,7 +347,8 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                         continue
                     quality = _evaluate(alt_levels, trend, momentum, volatility, alt_structure, symbol, timeframe, decision, market_type=market_type)
                     geometry_score = _route_geometry_score(alt_levels)
-                    candidates.append({"route": route, "levels": alt_levels, "geometry_score": geometry_score, "quality": quality})
+                    parallel = dict(quality.get("parallel_quality_filters") or {})
+                    candidates.append({"route": route, "levels": alt_levels, "geometry_score": geometry_score, "quality": quality, "parallel": parallel})
                     meta.append({
                         "route": route,
                         "geometry_score": round(geometry_score, 2),
@@ -222,6 +356,9 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                         "q9_quality_ready": bool(quality.get("quality_ready")),
                         "q9_quality": quality.get("quality"),
                         "rr": _f(alt_levels.get("risk_reward")),
+                        "quality_filter": parallel.get("selected_filter"),
+                        "quality_filter_score": parallel.get("selected_filter_score"),
+                        "quality_filter_confirmed": bool(parallel.get("publication_candidate")),
                     })
                 except Exception as exc:
                     meta.append({"route": route, "error": type(exc).__name__})
@@ -240,8 +377,17 @@ def install_quality_geometry_router() -> Dict[str, Any]:
             # the native publication gate reject it downstream. This prevents a
             # high 9Q score on an invalid RR/Safety package from replacing a
             # publishable baseline candidate.
-            ranking_pool = q10_viable or candidates
-            ranking_pool.sort(key=lambda row: (-row["q9_route_score"], -row["geometry_score"], 0 if row["route"] == setup else 1))
+            # Commit 23 — route selection now considers the parallel quality authority
+            # before the legacy Q10 gate. A route with one valid >=75 quality filter
+            # can win even when the legacy gate rejects only SAFETY/TP/SL/RR.
+            ranking_pool = candidates
+            ranking_pool.sort(key=lambda row: (
+                -int(bool((row.get("parallel") or {}).get("publication_candidate"))),
+                -_f((row.get("parallel") or {}).get("selected_filter_score"), 0.0),
+                -row["q9_route_score"],
+                -row["geometry_score"],
+                0 if row["route"] == setup else 1,
+            ))
             selected = ranking_pool[0]
             for item in meta:
                 route = item.get("route")
@@ -249,6 +395,9 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                 if match:
                     item["q10_preeligible"] = bool(match.get("q10_preeligible"))
                     item["q10_hard_violation_codes"] = list(match.get("q10_hard_violation_codes") or [])
+                    item["quality_filter"] = (match.get("parallel") or {}).get("selected_filter")
+                    item["quality_filter_score"] = (match.get("parallel") or {}).get("selected_filter_score")
+                    item["quality_filter_confirmed"] = bool((match.get("parallel") or {}).get("publication_candidate"))
             out = _context_levels(selected["levels"], trend, momentum, volatility, structure, symbol, timeframe, decision)
             out["commit21_9q_version"] = VERSION
             out["commit21_9q_route_selection"] = len(candidates) > 1
@@ -257,7 +406,11 @@ def install_quality_geometry_router() -> Dict[str, Any]:
             out["commit21_9q_route_candidates"] = meta[:max_routes]
             out["commit21_9q_route_score"] = selected["q9_route_score"]
             out["quality_9q"] = selected["quality"]
-            out["q10_safety_contract"] = "UNCHANGED"
+            out["parallel_quality_filters"] = dict(selected.get("parallel") or {})
+            out["quality_filter_authority"] = (selected.get("parallel") or {}).get("selected_filter")
+            out["quality_filter_score"] = (selected.get("parallel") or {}).get("selected_filter_score")
+            out["quality_filter_summary"] = _quality_filter_summary_text(selected.get("parallel") or {})
+            out["q10_safety_contract"] = "LEGACY_DIAGNOSTIC_NOT_MANDATORY"
             return out
 
         wrapped._commit21_9q_geometry = True
@@ -288,83 +441,74 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                 momentum = ctx.get("momentum") or getattr(self, "_last_momentum", {}) or {}
                 volatility = ctx.get("volatility") or getattr(self, "_last_volatility", {}) or {}
                 structure = ctx.get("structure") or getattr(self, "_last_structure", {}) or {}
-                q = _evaluate(lv, trend, momentum, volatility, structure, symbol, timeframe, action, market_type=_market_type(symbol, lv))
+                market_type = _market_type(symbol, lv)
+                q = _evaluate(lv, trend, momentum, volatility, structure, symbol, timeframe, action, market_type=market_type)
                 q10 = q9.q10_safety_snapshot(out, lv)
                 context_groups = dict(q.get("context_quality_groups") or {})
                 gate = dict(out.get("futures_publication_gate") or {})
-                legacy_safety = float(q10.get("execution_safety") or 0.0)
-                reasons = [str(x).upper() for x in (gate.get("reason_codes") or [])]
-                deep_upgrade_applied = False
 
-                # COMMIT21.2 — Q1-Q9 becomes a genuine quality authority for the
-                # legacy Safety score, but only inside the already-existing
-                # operational safety band.  This does NOT lower any Q10 hard
-                # threshold and does not rescue RR/loss/ATR violations.
-                #
-                # Why this bridge is necessary:
-                # the old system calculates execution_safety first (65 operational,
-                # 75 Premium) and the original 21.0/21.1 implementation only
-                # recorded Q1-Q9 diagnostically.  Therefore a high deep-quality
-                # thesis could never become the quality score consumed by the
-                # existing publication filter.
-                try:
-                    from futures_system import FUTURES_RISK_CONFIG
-                    operational_min = float((FUTURES_RISK_CONFIG or {}).get("minimum_execution_safety", 65.0) or 65.0)
-                    q10_safety_min = float((FUTURES_RISK_CONFIG or {}).get("minimum_publication_execution_safety", 75.0) or 75.0)
-                except Exception:
-                    operational_min, q10_safety_min = 65.0, 75.0
+                # Attach the parallel authority trace first. This is intentionally
+                # independent from the legacy Q10 veto list so the frontend can
+                # explain exactly which quality filter owns the candidate.
+                out = _attach_parallel_quality_metadata(
+                    out, q, q10, gate, symbol=symbol, timeframe=timeframe, action=action
+                )
+                lv = dict(out.get("levels") or lv or {})
+                gate = dict(out.get("futures_publication_gate") or gate)
 
-                if (
-                    not bool(gate.get("eligible"))
-                    and bool(q.get("quality_ready"))
-                    and legacy_safety >= operational_min
-                    and set(reasons).issubset({"SAFETY"})
-                ):
-                    upgraded_safety = max(legacy_safety, float(q.get("composite") or legacy_safety))
-                    if upgraded_safety >= q10_safety_min:
-                        upgraded_levels = dict(out.get("levels") or lv or {})
-                        upgraded_levels["legacy_execution_safety"] = legacy_safety
-                        upgraded_levels["execution_safety"] = round(upgraded_safety, 1)
-                        upgraded_levels["execution_safety_authority"] = "Q1_Q9_DEEP_QUALITY"
-                        upgraded_levels["q1_q9_safety_upgrade"] = True
-                        upgraded_levels.pop("_commit21_quality_context", None)
-                        upgraded = current(self, upgraded_levels, timeframe, symbol=symbol, action=action)
-                        if isinstance(upgraded, dict):
-                            upgraded_gate = dict(upgraded.get("futures_publication_gate") or {})
-                            if upgraded_gate.get("eligible"):
-                                out = upgraded
-                                gate = upgraded_gate
-                                deep_upgrade_applied = True
-                                q10 = q9.q10_safety_snapshot(out, upgraded_levels)
-                                q10["legacy_execution_safety"] = round(legacy_safety, 2)
-                                q10["deep_quality_safety_authority"] = True
-                                q10["upgrade_points"] = round(upgraded_safety - legacy_safety, 2)
-
-                gate["commit21_9q"] = q
-                gate["q10_safety"] = q10
-                gate["context_quality_groups"] = context_groups
-                gate["context_quality_group_authority"] = bool(q.get("context_quality_authority"))
-                gate["quality_model"] = q9.MODEL
-                gate["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
-                gate["legacy_execution_safety"] = round(legacy_safety, 2)
-                gate["final_execution_safety"] = round(float((out.get("levels") or {}).get("execution_safety") or legacy_safety), 2)
+                # Legacy Q10 stays untouched for audit. Commit 23 permits one of
+                # ten contextual quality filters to become publication authority
+                # when the only legacy failures are SAFETY/TP/SL/RR and all
+                # universal economic guards remain valid.
+                out, parallel_promoted = _try_parallel_quality_promotion(
+                    out, q, q10, gate, symbol=symbol, timeframe=timeframe, action=action
+                )
+                gate = dict(out.get("futures_publication_gate") or gate)
+                gate["commit23_parallel_quality"] = dict(q.get("parallel_quality_filters") or {})
+                gate["legacy_q10_reason_codes"] = [str(x).upper() for x in (gate.get("legacy_q10_reason_codes") or gate.get("reason_codes") or [])]
+                gate["q10_is_mandatory"] = False
                 gate["hard_q10_thresholds_unchanged"] = True
+                gate["parallel_quality_promoted"] = bool(parallel_promoted)
+                gate["quality_authority"] = str((q.get("parallel_quality_filters") or {}).get("selected_filter") or "NONE")
+                gate["quality_authority_score"] = _f((q.get("parallel_quality_filters") or {}).get("selected_filter_score"), 0.0)
                 out["futures_publication_gate"] = gate
                 out["quality_9q"] = q
                 out["q10_safety"] = q10
                 out["context_quality_groups"] = context_groups
-                out["quality_authority"] = "Q1_Q9_PLUS_CONTEXT_GROUPS_PLUS_Q10_HARD_SAFETY"
-                out["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
+                out["parallel_quality_filters"] = dict(q.get("parallel_quality_filters") or {})
+                out["quality_authority"] = str((q.get("parallel_quality_filters") or {}).get("selected_filter") or "NONE")
+                out["quality_authority_name"] = str((q.get("parallel_quality_filters") or {}).get("selected_filter_name") or "")
+                out["quality_authority_score"] = _f((q.get("parallel_quality_filters") or {}).get("selected_filter_score"), 0.0)
+                out["q10_is_mandatory"] = False
+                out["premium_confirmation_mode"] = "ONE_OF_TEN_QUALITY_FILTERS" if parallel_promoted else "NOT_CONFIRMED"
+                out["q1_q9_safety_upgrade_applied"] = False
                 if isinstance(out.get("levels"), dict):
                     out["levels"]["quality_9q"] = q
                     out["levels"]["q10_safety"] = q10
                     out["levels"]["context_quality_groups"] = context_groups
-                    out["levels"]["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
+                    out["levels"]["parallel_quality_filters"] = dict(q.get("parallel_quality_filters") or {})
+                    out["levels"]["quality_filter_authority"] = out["quality_authority"]
+                    out["levels"]["quality_filter_authority_score"] = out["quality_authority_score"]
+                    out["levels"]["q10_is_mandatory"] = False
                     out["levels"].pop("_commit21_quality_context", None)
-                out["premium_blocker_stage_21"] = (
-                    "Q10_SAFETY" if not gate.get("eligible") and not deep_upgrade_applied
-                    else ("Q1_Q9_QUALITY_DIAGNOSTIC" if not q.get("quality_ready") else "NONE")
-                )
+
+                if parallel_promoted:
+                    out["premium_blocker_stage_21"] = "NONE"
+                    out["premium_blocker_codes"] = []
+                    out["premium_blocker"] = ""
+                else:
+                    out["premium_blocker_stage_21"] = (
+                        "PARALLEL_QUALITY_FILTERS" if not (q.get("parallel_quality_filters") or {}).get("selected_filter_passed")
+                        else "UNIVERSAL_GUARD_OR_PRE_GATE"
+                    )
+                # Preserve the visible reason in manual diagnostic cards while
+                # adding the exact quality filter membership.
+                summary = _quality_filter_summary_text(q.get("parallel_quality_filters") or {})
+                if summary:
+                    base_reason = str(out.get("manual_risk_reason") or out.get("rejected_reason") or "").strip()
+                    if summary not in base_reason:
+                        out["manual_risk_reason"] = ((base_reason + " · ") if base_reason else "") + summary
+                    out["quality_filter_summary"] = summary
                 return out
             wrapped._commit21_9q_gate = True
             cls._apply_futures_publication_gate = wrapped
@@ -382,25 +526,53 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                         return out
                     lv = dict(out.get("levels") or levels or {})
                     ctx = lv.get("_commit21_quality_context") if isinstance(lv.get("_commit21_quality_context"), dict) else {}
-                    q = _evaluate(lv, ctx.get("trend") or {}, ctx.get("momentum") or {}, ctx.get("volatility") or {}, ctx.get("structure") or {}, symbol, timeframe, action, market_type=_market_type(symbol, lv))
+                    market_type = _market_type(symbol, lv)
+                    q = _evaluate(lv, ctx.get("trend") or {}, ctx.get("momentum") or {}, ctx.get("volatility") or {}, ctx.get("structure") or {}, symbol, timeframe, action, market_type=market_type)
                     q10 = q9.q10_safety_snapshot(out, lv)
                     context_groups = dict(q.get("context_quality_groups") or {})
                     gate = dict(out.get("futures_publication_gate") or {})
-                    gate["commit21_9q"] = q
-                    gate["q10_safety"] = q10
-                    gate["context_quality_groups"] = context_groups
-                    gate["context_quality_group_authority"] = bool(q.get("context_quality_authority"))
-                    gate["quality_model"] = q9.MODEL
+                    out = _attach_parallel_quality_metadata(
+                        out, q, q10, gate, symbol=symbol, timeframe=timeframe, action=action
+                    )
+                    gate = dict(out.get("futures_publication_gate") or gate)
+                    out, parallel_promoted = _try_parallel_quality_promotion(
+                        out, q, q10, gate, symbol=symbol, timeframe=timeframe, action=action
+                    )
+                    gate = dict(out.get("futures_publication_gate") or gate)
+                    gate["commit23_parallel_quality"] = dict(q.get("parallel_quality_filters") or {})
+                    gate["legacy_q10_reason_codes"] = [str(x).upper() for x in (gate.get("legacy_q10_reason_codes") or gate.get("reason_codes") or [])]
+                    gate["q10_is_mandatory"] = False
+                    gate["hard_q10_thresholds_unchanged"] = True
+                    gate["parallel_quality_promoted"] = bool(parallel_promoted)
                     out["futures_publication_gate"] = gate
                     out["quality_9q"] = q
                     out["q10_safety"] = q10
                     out["context_quality_groups"] = context_groups
-                    out["quality_authority"] = "Q1_Q9_PLUS_CONTEXT_GROUPS_PLUS_Q10_HARD_SAFETY"
+                    out["parallel_quality_filters"] = dict(q.get("parallel_quality_filters") or {})
+                    out["quality_authority"] = str((q.get("parallel_quality_filters") or {}).get("selected_filter") or "NONE")
+                    out["quality_authority_name"] = str((q.get("parallel_quality_filters") or {}).get("selected_filter_name") or "")
+                    out["quality_authority_score"] = _f((q.get("parallel_quality_filters") or {}).get("selected_filter_score"), 0.0)
+                    out["q10_is_mandatory"] = False
+                    out["premium_confirmation_mode"] = "ONE_OF_TEN_QUALITY_FILTERS" if parallel_promoted else "NOT_CONFIRMED"
                     if isinstance(out.get("levels"), dict):
                         out["levels"]["quality_9q"] = q
                         out["levels"]["q10_safety"] = q10
                         out["levels"]["context_quality_groups"] = context_groups
+                        out["levels"]["parallel_quality_filters"] = dict(q.get("parallel_quality_filters") or {})
+                        out["levels"]["quality_filter_authority"] = out["quality_authority"]
+                        out["levels"]["quality_filter_authority_score"] = out["quality_authority_score"]
+                        out["levels"]["q10_is_mandatory"] = False
                         out["levels"].pop("_commit21_quality_context", None)
+                    if parallel_promoted:
+                        out["premium_blocker_stage_21"] = "NONE"
+                        out["premium_blocker_codes"] = []
+                        out["premium_blocker"] = ""
+                    summary = _quality_filter_summary_text(q.get("parallel_quality_filters") or {})
+                    if summary:
+                        base_reason = str(out.get("manual_risk_reason") or out.get("rejected_reason") or "").strip()
+                        if summary not in base_reason:
+                            out["manual_risk_reason"] = ((base_reason + " · ") if base_reason else "") + summary
+                        out["quality_filter_summary"] = summary
                     return out
                 multi_wrapped._commit21_9q_gate = True
                 cls._apply_futures_publication_gate = multi_wrapped
@@ -411,6 +583,56 @@ def install_quality_gate_contract() -> Dict[str, Any]:
         status.append({"error": f"{type(exc).__name__}: {str(exc)[:160]}"})
     return {"patches": status}
 
+
+
+
+def install_frontend_quality_overlay(app: Any) -> Dict[str, Any]:
+    """Inject the Commit 23 frontend overlay without modifying app.py/index.html."""
+    try:
+        if getattr(app, "_commit23_frontend_quality_overlay", False):
+            return {"installed": True, "already": True}
+        from flask import request
+
+        @app.after_request
+        def _commit23_quality_overlay(response):
+            try:
+                if response.status_code != 200:
+                    return response
+                path = str(request.path or "")
+                if path not in {"/futures", "/multiasset"}:
+                    return response
+                content_type = str(response.headers.get("Content-Type") or "")
+                if "text/html" not in content_type.lower():
+                    return response
+                html = response.get_data(as_text=True)
+                src = '/static/quality_filters_frontend.js?v=20261003-COMMIT23-10Q-1'
+                if src in html:
+                    return response
+                tag = f'<script src="{src}"></script>'
+                # Load BEFORE futures.js so its fetch wrapper sees the very first
+                # analysis request. If the exact script tag is not found, place
+                # the overlay immediately before </body>.
+                future_idx = html.find('futures.js')
+                if future_idx >= 0:
+                    start = html.rfind('<script', 0, future_idx)
+                    if start >= 0:
+                        html = html[:start] + tag + '\n' + html[start:]
+                    else:
+                        html = html.replace('</body>', tag + '\n</body>', 1)
+                else:
+                    html = html.replace('</body>', tag + '\n</body>', 1)
+                response.set_data(html)
+                response.headers.pop('Content-Length', None)
+                response.headers['X-Commit23-Quality-Overlay'] = '1'
+            except Exception:
+                # Frontend enhancement must never turn a valid page into a 500.
+                return response
+            return response
+
+        app._commit23_frontend_quality_overlay = True
+        return {"installed": True, "script": "quality_filters_frontend.js", "index_untouched": True}
+    except Exception as exc:
+        return {"installed": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
 def install_health_contract(app: Any) -> Dict[str, Any]:
     try:
@@ -434,6 +656,9 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
                 "quality_engine": q9.VERSION,
                 "quality_model": q9.MODEL,
                 "context_quality_groups": "COMMIT22_CONTEXT_QUALITY_GROUPS_V1",
+                "parallel_quality_filters": "COMMIT23_TEN_FILTER_PARALLEL_AUTHORITY_V1",
+                "one_of_ten_min_score": q9.PARALLEL_FILTER_MIN_SCORE,
+                "q10_is_mandatory": False,
                 "q10_safety_unchanged": True,
                 "base_runtime": "COMMIT20_2_1_STABILITY_FIX_V1",
                 "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
@@ -460,6 +685,11 @@ def install(app: Any) -> Dict[str, Any]:
         "quality_engine": q9.VERSION,
         "geometry": install_quality_geometry_router(),
         "gate": install_quality_gate_contract(),
+        "frontend_quality_overlay": install_frontend_quality_overlay(app),
         "health": install_health_contract(app),
         "base_runtime": "COMMIT20_2_1_STABILITY_FIX_V1",
     }
+
+
+def audit() -> Dict[str, Any]:
+    return {"version": VERSION, "one_of_ten_min_score": q9.PARALLEL_FILTER_MIN_SCORE, "q10_mandatory": False, "new_network_calls": False, "new_threads": False, "index_untouched": True}

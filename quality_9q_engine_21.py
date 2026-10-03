@@ -1,20 +1,22 @@
-"""Commit 22 — Nine-Quality Engine + context groups + independent Q10 safety contract.
+"""Commit 23 — Parallel ten-filter quality authority + context groups.
 
 Q1..Q9 evaluate *quality of an already selected directional thesis and its
 execution package*. They do not create direction, change Entry/SL/TP, add
 market-data requests, or replace the production safety gate.
 
-Q10 is the existing operational safety/publication contract: Safety 75, TP 55,
-SL 60, R/R 1.8..3.5, loss-at-SL and ATR-stress rules. Q10 remains authoritative
-and independent from the nine quality dimensions.
+The legacy Q10 contract is preserved as a diagnostic/legacy gate, but the
+publication authority is now parallel: a candidate may be confirmed when at
+least one of ten quality filters reaches 75/100 and the universal execution
+guards pass. R/R becomes a quality input for fast/contextual filters rather
+than a universal veto. No filter creates direction or changes Entry/SL/TP.
 """
 from __future__ import annotations
 
 import math
 from typing import Any, Dict, Mapping, Iterable
 
-VERSION = "COMMIT22_9Q_ENGINE_V3_CONTEXT_GROUPS"
-MODEL = "Q1-Q9_QUALITY_PLUS_CONTEXT_GROUPS_PLUS_Q10_SAFETY"
+VERSION = "COMMIT23_10Q_ENGINE_V4_PARALLEL_AUTHORITY"
+MODEL = "TEN_PARALLEL_QUALITY_FILTERS_PLUS_LEGACY_Q10_DIAGNOSTIC"
 
 # These are inherited from the established CPQE research contract. They are not
 # fitted on live outcomes in Commit 21.
@@ -27,6 +29,11 @@ MAX_GROUPS = 2
 MAX_BONUS = 5.0
 MAX_GROUP_BONUS = 5.0
 CONTEXT_GROUPS_VERSION = "COMMIT22_CONTEXT_QUALITY_GROUPS_V1"
+PARALLEL_FILTERS_VERSION = "COMMIT23_TEN_FILTER_PARALLEL_AUTHORITY_V1"
+PARALLEL_FILTER_MIN_SCORE = 75.0
+PARALLEL_OPERATIONAL_SAFETY_FLOOR = 65.0
+PARALLEL_MAX_SL_LOSS_PCT = 8.0
+PARALLEL_MAX_ATR_STRESS_PCT = 25.0
 
 # Commit 22 — context groups never lower the global quality contract. They only
 # provide a bounded quality contribution when an existing context is strong.
@@ -395,6 +402,295 @@ def _dir(value: Any) -> str:
     return "NEUTRAL"
 
 
+
+
+# ---------------------------------------------------------------------------
+# COMMIT 23 — TEN PARALLEL QUALITY FILTERS
+# ---------------------------------------------------------------------------
+# These are NOT ten sequential vetoes. They are ten independent quality lenses.
+# One passing filter is sufficient for directional confirmation, provided the
+# universal execution guards are valid. Q10 remains visible and auditable but is
+# not a mandatory second gate.
+_PARALLEL_FILTER_NAMES = {
+    "Q1": "COHERENCIA DIRECCIONAL",
+    "Q2": "ESTRUCTURA / SMC",
+    "Q3": "ALINEACIÓN MULTITEMPORAL",
+    "Q4": "ESTRATEGIA / CONTEXTO",
+    "Q5": "FLUJO / VOLUMEN",
+    "Q6": "ENTRADA / ALCANZABILIDAD",
+    "Q7": "SALIDA / GEOMETRÍA",
+    "Q8": "RÉGIMEN / VOLATILIDAD",
+    "Q9": "EVIDENCIA / VALIDACIÓN",
+    "Q10": "SAFETY DE EJECUCIÓN",
+}
+
+
+def _execution_committee_score(levels: Mapping[str, Any], *, fast: bool = False) -> float:
+    entry = _f(levels.get("entry_score") or levels.get("entry_quality_score"), 0.0)
+    reach = _f(levels.get("entry_reachability") or levels.get("entry_reachability_score") or levels.get("reachability_score"), 0.0)
+    if 0 < reach <= 1.0:
+        reach *= 100.0
+    tp = _f(levels.get("tp_quality_score"), 0.0)
+    sl = _f(levels.get("sl_reliability"), 0.0)
+    if sl <= 1.0:
+        sl *= 100.0
+    entry_component = 0.55 * entry + 0.25 * reach + 0.20 * 70.0
+    if fast:
+        # Fast trades care more about reachable execution and SL protection than
+        # a large R/R multiple.
+        return _clip(0.34 * entry_component + 0.33 * sl + 0.33 * tp)
+    return _clip(0.38 * entry_component + 0.31 * sl + 0.31 * tp)
+
+
+def _fast_rr_quality(rr: float) -> float:
+    """Soft R/R contribution for fast trades; it is never a standalone veto."""
+    rr = _f(rr, 0.0)
+    if rr >= 1.8:
+        return 90.0
+    if rr >= 1.5:
+        return 84.0
+    if rr >= 1.3:
+        return 78.0
+    if rr >= 1.15:
+        return 74.0
+    if rr >= 1.0:
+        return 68.0
+    return 52.0
+
+
+def _standard_rr_quality(rr: float) -> float:
+    rr = _f(rr, 0.0)
+    if rr <= 0:
+        return 35.0
+    if rr < 1.3:
+        return 55.0
+    if rr < 1.6:
+        return 68.0
+    if rr < 1.8:
+        return 74.0
+    if rr <= 3.0:
+        return 92.0
+    if rr <= 3.5:
+        return 82.0
+    return 62.0
+
+
+def _universal_parallel_guards(
+    levels: Mapping[str, Any],
+    *,
+    direction: str,
+    native_stage: str = "PUBLICATION_GATE",
+) -> Dict[str, Any]:
+    l = dict(levels or {})
+    risk_control = dict(l.get("risk_control") or {})
+    entry = _f(l.get("entry"), 0.0)
+    sl = _f(l.get("stop_loss"), 0.0)
+    tp = _f(l.get("take_profit"), 0.0)
+    legacy_safety = _f(l.get("execution_safety"), 0.0)
+    planned_sl_loss = _f(
+        risk_control.get("estimated_sl_loss_pct_margin"),
+        abs(_f(l.get("roi_sl"), 0.0)),
+    )
+    atr_stress = _f(risk_control.get("estimated_atr_stress_loss_pct_margin"), 0.0)
+    market_synthetic = bool(l.get("market_data_is_synthetic"))
+    codes = []
+
+    if direction not in {"BULLISH", "BEARISH"}:
+        codes.append("DIRECTION_UNDEFINED")
+    geometry_ok = bool(
+        entry > 0 and sl > 0 and tp > 0
+        and ((direction == "BULLISH" and sl < entry < tp) or
+             (direction == "BEARISH" and tp < entry < sl))
+    )
+    if not geometry_ok:
+        codes.append("INVALID_ENTRY_SL_TP")
+    if legacy_safety < PARALLEL_OPERATIONAL_SAFETY_FLOOR:
+        codes.append("OPERATIONAL_SAFETY_BELOW_65")
+    if planned_sl_loss > PARALLEL_MAX_SL_LOSS_PCT:
+        codes.append("LOSS_AT_SL")
+    if not (0 < atr_stress <= PARALLEL_MAX_ATR_STRESS_PCT):
+        codes.append("ATR_STRESS")
+    if market_synthetic:
+        codes.append("SYNTHETIC_MARKET_DATA")
+    if str(native_stage or "").upper() != "PUBLICATION_GATE":
+        codes.append("PRE_GATE_REJECTION")
+
+    return {
+        "passed": not codes,
+        "codes": codes,
+        "geometry_valid": geometry_ok,
+        "legacy_execution_safety": round(legacy_safety, 2),
+        "loss_at_sl_pct": round(planned_sl_loss, 3),
+        "atr_stress_pct": round(atr_stress, 3),
+        "stage": str(native_stage or "").upper(),
+    }
+
+
+def evaluate_parallel_quality_filters(
+    levels: Mapping[str, Any] | None,
+    trend: Mapping[str, Any] | None,
+    momentum: Mapping[str, Any] | None,
+    volatility: Mapping[str, Any] | None,
+    structure: Mapping[str, Any] | None,
+    timeframe: str,
+    symbol: str,
+    action: str,
+    q: Mapping[str, Any],
+    context_groups: Mapping[str, Any] | None = None,
+    market_type: str = "futures",
+    native_stage: str = "PUBLICATION_GATE",
+) -> Dict[str, Any]:
+    """Evaluate Q1..Q10 in parallel and confirm when ONE filter is >=75.
+
+    The existing q1..q9 dimensions are preserved. Each parallel filter is a
+    contextual composition of those dimensions plus the existing Entry/SL/TP
+    committee outputs. The R/R value contributes softly; it is not a universal
+    veto. The universal guards remain hard: valid geometry, operational Safety
+    floor, loss-at-SL, ATR stress, real data, and no pre-gate rejection.
+    """
+    l = dict(levels or {})
+    t = dict(trend or {})
+    m = dict(momentum or {})
+    v = dict(volatility or {})
+    s = dict(structure or {})
+    qv = {f"Q{i}": _f((q.get("quality") or {}).get(f"Q{i}"), 0.0) for i in range(1, 10)}
+    direction = _dir(action or l.get("action") or l.get("direction"))
+    ctx = dict(context_groups or {})
+    ctx_score = _f(ctx.get("group_score"), 55.0) or 55.0
+    matched = [str(x) for x in (ctx.get("matched_groups") or [])]
+    alignment = _alignment(direction, t, m, s)
+    contradictions = _contradiction_count(direction, t, m, s)
+    family = _family_from_context(l)
+    regime = _regime(l, t)
+    vol_state = _vol_state(l, v)
+    tf = str(timeframe or "").strip()
+    rr = _f(l.get("risk_reward"), 0.0)
+    committee_fast = tf in {"30m", "1h"} or "FAST_STABLE_CONTINUATION" in matched or "VOLATILITY_PULLBACK" in matched
+    committee = _execution_committee_score(l, fast=committee_fast)
+    fast_exit = _clip(
+        0.42 * _f(l.get("tp_quality_score"), 0.0)
+        + 0.33 * _f(l.get("sl_reliability"), 0.0) * (100.0 if _f(l.get("sl_reliability"), 0.0) <= 1.0 else 1.0)
+        + 0.20 * _f(l.get("entry_score") or l.get("entry_quality_score"), 0.0)
+        + 0.05 * _fast_rr_quality(rr)
+    )
+    standard_exit = _clip(
+        0.34 * _f(l.get("tp_quality_score"), 0.0)
+        + 0.34 * _f(l.get("sl_reliability"), 0.0) * (100.0 if _f(l.get("sl_reliability"), 0.0) <= 1.0 else 1.0)
+        + 0.17 * _f(l.get("entry_score") or l.get("entry_quality_score"), 0.0)
+        + 0.15 * _standard_rr_quality(rr)
+    )
+    legacy_safety = _f(l.get("execution_safety"), 0.0)
+    safety_component = _clip(
+        0.45 * legacy_safety
+        + 0.35 * committee
+        + 0.20 * ctx_score
+    )
+
+    contextual = max(ctx_score, 55.0)
+    profile_map = {
+        "Q1": (0.60, 0.15, 0.10, 0.15),
+        "Q2": (0.58, 0.12, 0.12, 0.18),
+        "Q3": (0.62, 0.14, 0.08, 0.16),
+        "Q4": (0.52, 0.10, 0.08, 0.30),
+        "Q5": (0.56, 0.10, 0.08, 0.26),
+        "Q6": (0.52, 0.10, 0.18, 0.20),
+        "Q7": (0.30, 0.08, 0.42, 0.20),
+        "Q8": (0.56, 0.14, 0.08, 0.22),
+        "Q9": (0.62, 0.08, 0.06, 0.24),
+        "Q10": (0.00, 0.00, 0.80, 0.20),
+    }
+
+    evidence = {
+        "Q1": alignment >= 2 and contradictions == 0,
+        "Q2": bool(_has_sweep_mss_poi(l, s)[0] and _has_sweep_mss_poi(l, s)[1]) or bool(_has_sweep_mss_poi(l, s)[2] and qv["Q2"] >= 70),
+        "Q3": bool(_unique_tf_count(l, timeframe) >= 2 or _truth(l.get("mtf_aligned"))),
+        "Q4": bool(matched or family not in {"", "UNKNOWN"}),
+        "Q5": bool(l.get("volume_ratio") or l.get("relative_volume") or l.get("volume") or l.get("flow") or l.get("market_microstructure")),
+        "Q6": _f(l.get("entry_score") or l.get("entry_quality_score"), 0) >= 60 and (_f(l.get("entry_reachability") or l.get("entry_reachability_score"), 0) >= 0 or _f(l.get("entry_score"), 0) >= 70),
+        "Q7": _f(l.get("tp_quality_score"), 0) > 0 and _f(l.get("sl_reliability"), 0) > 0,
+        "Q8": bool(_f(v.get("atr_pct") or l.get("atr_pct"), 0) > 0 or vol_state),
+        "Q9": qv["Q9"] >= MIN_Q9_EVIDENCE,
+        "Q10": legacy_safety >= PARALLEL_OPERATIONAL_SAFETY_FLOOR,
+    }
+
+    filters = []
+    for name in [f"Q{i}" for i in range(1, 10)]:
+        a, b, c, d = profile_map[name]
+        context_fit = _clip(0.70 * contextual + 0.30 * qv[name])
+        score = _clip(a * qv[name] + b * committee + c * standard_exit + d * context_fit)
+        if name == "Q4" and matched:
+            score = _clip(score + min(5.0, 1.5 * len(matched)))
+        if name == "Q8" and (vol_state in {"LOW", "NORMAL", "COMPRESSION", "EXPANSION", "HIGH"} or regime):
+            score = _clip(score + 3.0)
+        if name == "Q5" and (_f(l.get("volume_ratio") or v.get("volume_ratio"), 0) >= 0.8):
+            score = _clip(score + 3.0)
+        passed = bool(evidence[name] and score >= PARALLEL_FILTER_MIN_SCORE)
+        filters.append({
+            "filter": name,
+            "name": _PARALLEL_FILTER_NAMES[name],
+            "score": round(score, 2),
+            "passed": passed,
+            "evidence": bool(evidence[name]),
+        })
+
+    q10_score = _clip(
+        0.50 * safety_component
+        + 0.25 * committee
+        + 0.15 * contextual
+        + 0.10 * fast_exit
+    )
+    filters.append({
+        "filter": "Q10",
+        "name": _PARALLEL_FILTER_NAMES["Q10"],
+        "score": round(q10_score, 2),
+        "passed": bool(evidence["Q10"] and q10_score >= PARALLEL_FILTER_MIN_SCORE),
+        "evidence": bool(evidence["Q10"]),
+    })
+
+    passed = [row for row in filters if row.get("passed")]
+    passed.sort(key=lambda row: (-float(row.get("score") or 0), str(row.get("filter") or "")))
+    guards = _universal_parallel_guards(
+        l,
+        direction=direction,
+        native_stage=native_stage,
+    )
+    if contradictions > 0:
+        guards["codes"] = list(guards.get("codes") or []) + ["DIRECTIONAL_CONTRADICTION"]
+        guards["passed"] = False
+    confirmed = bool(passed and guards.get("passed"))
+    selected = passed[0] if passed else max(filters, key=lambda row: float(row.get("score") or 0))
+    scores = {str(row["filter"]): round(float(row.get("score") or 0), 2) for row in filters}
+    passed_names = [str(row["filter"]) for row in passed]
+    summary = " · ".join(f"{k} {scores[k]:.0f}" + ("✓" if k in passed_names else "") for k in [f"Q{i}" for i in range(1,11)])
+
+    return {
+        "version": PARALLEL_FILTERS_VERSION,
+        "threshold": PARALLEL_FILTER_MIN_SCORE,
+        "filters": filters,
+        "filter_scores": scores,
+        "passed_filters": passed_names,
+        "selected_filter": str(selected.get("filter") or "NONE"),
+        "selected_filter_name": str(selected.get("name") or ""),
+        "selected_filter_score": round(float(selected.get("score") or 0), 2),
+        "selected_filter_passed": bool(selected.get("passed")),
+        "confirmed_one_of_ten": confirmed,
+        "publication_candidate": confirmed,
+        "q10_required": False,
+        "legacy_q10_gate_eligible": False,
+        "legacy_publication_blockers": [],
+        "universal_guards": guards,
+        "execution_committee_score": round(committee, 2),
+        "safety_authority_score": round(safety_component, 2),
+        "fast_operation_mode": bool(committee_fast),
+        "rr_role": "SOFT_QUALITY_INPUT" if committee_fast else "QUALITY_INPUT",
+        "dedupe_key": f"{_u(symbol)}|{tf}",
+        "dedupe_policy": "ONE_SIGNAL_PER_MARKET_CELL_HIGHER_FILTER_SCORE_WINS",
+        "summary": summary,
+        "market_type": str(market_type or "futures"),
+        "direction": direction,
+        "context_groups": matched,
+    }
+
 def _count_direction_support(levels: Mapping[str, Any], direction: str) -> int:
     """Read already-computed vote/worker summaries without creating votes."""
     candidates = (
@@ -709,8 +1005,16 @@ def evaluate(
         and execution_floor >= MIN_EXECUTION_Q6_Q7
         and q9_ok
     )
-    quality_ready = bool(generic_quality_ready or context_quality_ready)
     composite = adjusted_composite
+    parallel_quality_filters = evaluate_parallel_quality_filters(
+        l, t, m, v, s, timeframe, symbol, action,
+        q={"quality": q, "composite": composite, "context_quality_groups": context_groups},
+        context_groups=context_groups,
+        market_type=str(market_type or "futures"),
+        native_stage=str(l.get("futures_filter_stage") or "PUBLICATION_GATE"),
+    )
+    parallel_quality_ready = bool(parallel_quality_filters.get("publication_candidate"))
+    quality_ready = bool(generic_quality_ready or context_quality_ready or parallel_quality_ready)
     return {
         "version": VERSION,
         "model": MODEL,
@@ -723,6 +1027,8 @@ def evaluate(
         "context_group_score": round(group_score, 2),
         "context_quality_groups": context_groups,
         "context_quality_authority": bool(context_quality_ready),
+        "parallel_quality_filters": parallel_quality_filters,
+        "parallel_quality_ready": bool(parallel_quality_ready),
         "generic_quality_ready": bool(generic_quality_ready),
         "structural_floor": round(structural_floor, 2),
         "execution_floor": round(execution_floor, 2),
@@ -748,6 +1054,9 @@ def evaluate(
             "uses_live_outcomes_for_fitting": False,
             "adds_network_calls": False,
             "changes_q10_safety": False,
+            "q10_is_mandatory": False,
+            "parallel_confirmation_min_filters": 1,
+            "parallel_confirmation_threshold": PARALLEL_FILTER_MIN_SCORE,
         },
     }
 
