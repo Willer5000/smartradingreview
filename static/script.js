@@ -2537,7 +2537,9 @@ window.confirmSaveSignal = async function() {
         investment_usdt: investment,
         notes: notes,
         entry_at: entryAtISO,
-        candle_timestamp: source.candle_timestamp || new Date().toISOString()
+        candle_timestamp: source.candle_timestamp || new Date().toISOString(),
+        market: source.market || (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures'),
+        market_type: source.market_type || source.market || (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures')
     };
 
     console.log('📤 Payload:', payload);
