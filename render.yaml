@@ -1,10 +1,10 @@
-# COMMIT20.2.1-STABILITY — baseline boot chain retained from Commit 20.2.
+# COMMIT22 — keep one free worker, bounded request timeout, proactive worker recycling.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit20_2_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn commit20_2_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -44,6 +44,10 @@ services:
         value: "1"
       - key: FREE_PLAN_LOCKDOWN
         value: "1"
+      # Commit 22 runtime safety: a genuinely stuck request is allowed to kill/recycle
+      # the single worker instead of leaving the UI in a permanent loading state.
+      - key: COMMIT22_WORKER_RESTART_POLICY
+        value: "TIMEOUT_120S_MAX_REQUESTS_80"
       # Commit 20 — Premium Path Expansion. Bounded to two alternate routes;
       # no extra workers, polling or market-data requests.
       - key: PPE_ENABLED

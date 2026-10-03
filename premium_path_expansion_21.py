@@ -1,4 +1,4 @@
-"""Commit 21 — Quality Path Expansion built from stable Commit 20.2.1.
+"""Commit 22 — Quality Path Expansion built from stable Commit 20.2.1 + Q1-Q9 context groups.
 
 The stable 20.2.1 runtime remains the base. This overlay changes only how the
 already-bounded alternative geometries are compared: Q1..Q9 select the route
@@ -13,7 +13,7 @@ from typing import Any, Dict, Mapping
 
 import quality_9q_engine_21 as q9
 
-VERSION = "COMMIT21_2_Q9_QUALITY_AUTHORITY_V1"
+VERSION = "COMMIT22_CONTEXT_QUALITY_AUTHORITY_V1"
 MAX_ALTERNATIVE_ROUTES = 2
 
 
@@ -43,8 +43,21 @@ def _context_levels(levels: Mapping[str, Any], trend: Mapping[str, Any], momentu
     return out
 
 
-def _evaluate(levels: Mapping[str, Any], trend: Mapping[str, Any], momentum: Mapping[str, Any], volatility: Mapping[str, Any], structure: Mapping[str, Any], symbol: str, timeframe: str, action: str) -> Dict[str, Any]:
-    return q9.evaluate(levels, trend, momentum, volatility, structure, timeframe, symbol, action)
+def _market_type(symbol: str, levels: Mapping[str, Any] | None = None) -> str:
+    l = dict(levels or {})
+    raw = str(l.get("market_type") or l.get("market") or "").strip().lower()
+    if raw in {"multiasset", "multi-asset", "multi"}:
+        return "multiasset"
+    try:
+        from premium_path_expansion_20 import _market_type_for_symbol
+        return str(_market_type_for_symbol(symbol) or "futures")
+    except Exception:
+        return "futures"
+
+
+def _evaluate(levels: Mapping[str, Any], trend: Mapping[str, Any], momentum: Mapping[str, Any], volatility: Mapping[str, Any], structure: Mapping[str, Any], symbol: str, timeframe: str, action: str, market_type: str | None = None) -> Dict[str, Any]:
+    resolved = str(market_type or _market_type(symbol, levels) or "futures")
+    return q9.evaluate(levels, trend, momentum, volatility, structure, timeframe, symbol, action, market_type=resolved)
 
 
 def _q10_hard_violation_codes(levels: Mapping[str, Any], timeframe: str = "") -> list[str]:
@@ -158,7 +171,7 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                 baseline["commit21_9q_route_selection"] = False
                 return baseline
             if not _needs_route_expansion(baseline):
-                q = _evaluate(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision)
+                q = _evaluate(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision, market_type=market_type)
                 baseline = _context_levels(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision)
                 baseline["commit21_9q_version"] = VERSION
                 baseline["commit21_9q_route_selection"] = False
@@ -179,7 +192,7 @@ def install_quality_geometry_router() -> Dict[str, Any]:
             )[:max_routes]
 
             candidates = []
-            baseline_q = _evaluate(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision)
+            baseline_q = _evaluate(baseline, trend, momentum, volatility, structure, symbol, timeframe, decision, market_type=market_type)
             candidates.append({
                 "route": setup or "BASELINE",
                 "levels": baseline,
@@ -199,7 +212,7 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                         continue
                     if not (_f(alt_levels.get("entry")) > 0 and _f(alt_levels.get("stop_loss")) > 0 and _f(alt_levels.get("take_profit")) > 0 and _f(alt_levels.get("risk_reward")) > 0):
                         continue
-                    quality = _evaluate(alt_levels, trend, momentum, volatility, alt_structure, symbol, timeframe, decision)
+                    quality = _evaluate(alt_levels, trend, momentum, volatility, alt_structure, symbol, timeframe, decision, market_type=market_type)
                     geometry_score = _route_geometry_score(alt_levels)
                     candidates.append({"route": route, "levels": alt_levels, "geometry_score": geometry_score, "quality": quality})
                     meta.append({
@@ -275,8 +288,9 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                 momentum = ctx.get("momentum") or getattr(self, "_last_momentum", {}) or {}
                 volatility = ctx.get("volatility") or getattr(self, "_last_volatility", {}) or {}
                 structure = ctx.get("structure") or getattr(self, "_last_structure", {}) or {}
-                q = _evaluate(lv, trend, momentum, volatility, structure, symbol, timeframe, action)
+                q = _evaluate(lv, trend, momentum, volatility, structure, symbol, timeframe, action, market_type=_market_type(symbol, lv))
                 q10 = q9.q10_safety_snapshot(out, lv)
+                context_groups = dict(q.get("context_quality_groups") or {})
                 gate = dict(out.get("futures_publication_gate") or {})
                 legacy_safety = float(q10.get("execution_safety") or 0.0)
                 reasons = [str(x).upper() for x in (gate.get("reason_codes") or [])]
@@ -328,6 +342,8 @@ def install_quality_gate_contract() -> Dict[str, Any]:
 
                 gate["commit21_9q"] = q
                 gate["q10_safety"] = q10
+                gate["context_quality_groups"] = context_groups
+                gate["context_quality_group_authority"] = bool(q.get("context_quality_authority"))
                 gate["quality_model"] = q9.MODEL
                 gate["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
                 gate["legacy_execution_safety"] = round(legacy_safety, 2)
@@ -336,11 +352,13 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                 out["futures_publication_gate"] = gate
                 out["quality_9q"] = q
                 out["q10_safety"] = q10
-                out["quality_authority"] = "Q1_Q9_DEEP_QUALITY_PLUS_Q10_HARD_SAFETY"
+                out["context_quality_groups"] = context_groups
+                out["quality_authority"] = "Q1_Q9_PLUS_CONTEXT_GROUPS_PLUS_Q10_HARD_SAFETY"
                 out["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
                 if isinstance(out.get("levels"), dict):
                     out["levels"]["quality_9q"] = q
                     out["levels"]["q10_safety"] = q10
+                    out["levels"]["context_quality_groups"] = context_groups
                     out["levels"]["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
                     out["levels"].pop("_commit21_quality_context", None)
                 out["premium_blocker_stage_21"] = (
@@ -364,19 +382,24 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                         return out
                     lv = dict(out.get("levels") or levels or {})
                     ctx = lv.get("_commit21_quality_context") if isinstance(lv.get("_commit21_quality_context"), dict) else {}
-                    q = _evaluate(lv, ctx.get("trend") or {}, ctx.get("momentum") or {}, ctx.get("volatility") or {}, ctx.get("structure") or {}, symbol, timeframe, action)
+                    q = _evaluate(lv, ctx.get("trend") or {}, ctx.get("momentum") or {}, ctx.get("volatility") or {}, ctx.get("structure") or {}, symbol, timeframe, action, market_type=_market_type(symbol, lv))
                     q10 = q9.q10_safety_snapshot(out, lv)
+                    context_groups = dict(q.get("context_quality_groups") or {})
                     gate = dict(out.get("futures_publication_gate") or {})
                     gate["commit21_9q"] = q
                     gate["q10_safety"] = q10
+                    gate["context_quality_groups"] = context_groups
+                    gate["context_quality_group_authority"] = bool(q.get("context_quality_authority"))
                     gate["quality_model"] = q9.MODEL
                     out["futures_publication_gate"] = gate
                     out["quality_9q"] = q
                     out["q10_safety"] = q10
-                    out["quality_authority"] = "9Q_DEEP_QUALITY_PLUS_Q10_HARD_SAFETY"
+                    out["context_quality_groups"] = context_groups
+                    out["quality_authority"] = "Q1_Q9_PLUS_CONTEXT_GROUPS_PLUS_Q10_HARD_SAFETY"
                     if isinstance(out.get("levels"), dict):
                         out["levels"]["quality_9q"] = q
                         out["levels"]["q10_safety"] = q10
+                        out["levels"]["context_quality_groups"] = context_groups
                         out["levels"].pop("_commit21_quality_context", None)
                     return out
                 multi_wrapped._commit21_9q_gate = True
@@ -410,11 +433,18 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
                 "version": VERSION,
                 "quality_engine": q9.VERSION,
                 "quality_model": q9.MODEL,
+                "context_quality_groups": "COMMIT22_CONTEXT_QUALITY_GROUPS_V1",
                 "q10_safety_unchanged": True,
                 "base_runtime": "COMMIT20_2_1_STABILITY_FIX_V1",
                 "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
                 "new_network_calls": False,
                 "new_threads": False,
+                "runtime_recovery": {
+                    "request_timeout_seconds": 120,
+                    "worker_recycle_max_requests": 80,
+                    "worker_recycle_jitter": 20,
+                    "policy": "RESTART_OVER_PERMANENT_HANG",
+                },
             }
             return jsonify(payload)
         wrapped._commit21_9q_health = True

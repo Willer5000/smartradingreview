@@ -1,4 +1,4 @@
-"""Commit 21 — Nine-Quality Engine + independent Q10 safety contract.
+"""Commit 22 — Nine-Quality Engine + context groups + independent Q10 safety contract.
 
 Q1..Q9 evaluate *quality of an already selected directional thesis and its
 execution package*. They do not create direction, change Entry/SL/TP, add
@@ -13,8 +13,8 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Iterable
 
-VERSION = "COMMIT21_9Q_ENGINE_V2_SAFETY_AUTHORITY"
-MODEL = "Q1-Q9_QUALITY_PLUS_Q10_SAFETY"
+VERSION = "COMMIT22_9Q_ENGINE_V3_CONTEXT_GROUPS"
+MODEL = "Q1-Q9_QUALITY_PLUS_CONTEXT_GROUPS_PLUS_Q10_SAFETY"
 
 # These are inherited from the established CPQE research contract. They are not
 # fitted on live outcomes in Commit 21.
@@ -23,6 +23,16 @@ MIN_STRUCTURAL_FLOOR = 64.0
 MIN_EXECUTION_Q6_Q7 = 70.0
 MIN_Q9_EVIDENCE = 55.0
 MIN_DEEP_QUALITY_SAFETY_UPGRADE = 76.0
+MAX_GROUPS = 2
+MAX_BONUS = 5.0
+MAX_GROUP_BONUS = 5.0
+CONTEXT_GROUPS_VERSION = "COMMIT22_CONTEXT_QUALITY_GROUPS_V1"
+
+# Commit 22 — context groups never lower the global quality contract. They only
+# provide a bounded quality contribution when an existing context is strong.
+MIN_CONTEXT_GROUP_BASE_COMPOSITE = 70.0
+MIN_CONTEXT_GROUP_ADJUSTED_COMPOSITE = 76.0
+MAX_CONTEXT_GROUP_BONUS = 5.0
 
 # Q10 = unchanged production safety/economic publication contract.
 Q10_MIN_SAFETY = 75.0
@@ -77,6 +87,312 @@ def _truth(value: Any) -> bool:
 
 def _blob(*items: Any) -> str:
     return " ".join(str(x or "") for x in items if x is not None).upper()
+
+
+# ---------------------------------------------------------------------------
+# COMMIT 22 — CONTEXT QUALITY GROUPS
+# ---------------------------------------------------------------------------
+# Each group is an evidence-conditioned quality lens over the existing Q1..Q9.
+# It never creates direction and never touches Entry/SL/TP or Q10 thresholds.
+_GROUP_PROFILES = {
+    "FAST_STABLE_CONTINUATION": {"Q1": .14, "Q2": .08, "Q3": .12, "Q4": .10, "Q5": .07, "Q6": .17, "Q7": .17, "Q8": .10, "Q9": .05},
+    "RANGE_REVERSION_SELECTIVE": {"Q1": .11, "Q2": .07, "Q3": .10, "Q4": .15, "Q5": .07, "Q6": .18, "Q7": .18, "Q8": .09, "Q9": .05},
+    "SWEEP_MSS_RECLAIM": {"Q1": .13, "Q2": .18, "Q3": .12, "Q4": .11, "Q5": .07, "Q6": .15, "Q7": .14, "Q8": .05, "Q9": .05},
+    "COMPRESSION_EXPANSION_RETEST": {"Q1": .12, "Q2": .10, "Q3": .10, "Q4": .12, "Q5": .12, "Q6": .14, "Q7": .14, "Q8": .11, "Q9": .05},
+    "VOLATILITY_PULLBACK": {"Q1": .13, "Q2": .12, "Q3": .12, "Q4": .09, "Q5": .07, "Q6": .15, "Q7": .17, "Q8": .10, "Q9": .05},
+    "MULTIASSET_SESSION_EXECUTION": {"Q1": .11, "Q2": .08, "Q3": .15, "Q4": .11, "Q5": .12, "Q6": .14, "Q7": .14, "Q8": .10, "Q9": .05},
+}
+
+
+def _profile(group: str) -> Dict[str, float]:
+    return dict(_GROUP_PROFILES.get(group) or {})
+
+def _group_direction(value: Any) -> str:
+    s = _u(value)
+    if s in {"LONG", "BUY", "BULLISH", "UP", "TREND_UP", "COMPRA_SPOT"}:
+        return "BULLISH"
+    if s in {"SHORT", "SELL", "BEARISH", "DOWN", "TREND_DOWN", "VENTA_SPOT"}:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def _alignment(direction: str, trend: Mapping[str, Any], momentum: Mapping[str, Any], structure: Mapping[str, Any]) -> int:
+    if direction == "NEUTRAL":
+        return 0
+    values = (
+        _group_direction(trend.get("direction")),
+        _group_direction(momentum.get("direction")),
+        _group_direction(structure.get("direction") or structure.get("structure_direction")),
+    )
+    return sum(v == direction for v in values)
+
+
+def _contradiction_count(direction: str, trend, momentum, structure) -> int:
+    if direction == "NEUTRAL":
+        return 0
+    values = (
+        _group_direction(trend.get("direction")),
+        _group_direction(momentum.get("direction")),
+        _group_direction(structure.get("direction") or structure.get("structure_direction")),
+    )
+    return sum(v not in {direction, "NEUTRAL"} for v in values)
+
+
+def _regime(levels: Mapping[str, Any], trend: Mapping[str, Any]) -> str:
+    return _u(levels.get("regime") or levels.get("market_regime") or trend.get("regime"))
+
+
+def _vol_state(levels: Mapping[str, Any], volatility: Mapping[str, Any]) -> str:
+    return _u(
+        volatility.get("state")
+        or volatility.get("volatility_state")
+        or levels.get("volatility_state")
+        or levels.get("volatility_regime")
+    )
+
+
+def _has_sweep_mss_poi(levels, structure) -> tuple[bool, bool, bool]:
+    sweep = _truth(
+        structure.get("liquidity_sweep")
+        or structure.get("liquidity_sweeps")
+        or structure.get("sweep")
+        or levels.get("entry_sweep_confirmed")
+    )
+    mss = _truth(
+        structure.get("mss")
+        or structure.get("bos")
+        or structure.get("market_structure_shift")
+        or levels.get("entry_mss_bos_confirmed")
+    )
+    poi = _truth(
+        structure.get("order_blocks")
+        or structure.get("fair_value_gaps")
+        or structure.get("fvg")
+        or structure.get("entry_source")
+        or structure.get("entry_poi_confirmed")
+        or levels.get("entry_poi_confirmed")
+    )
+    return sweep, mss, poi
+
+
+def evaluate_context_quality_groups(
+    levels: Mapping[str, Any] | None,
+    trend: Mapping[str, Any] | None,
+    momentum: Mapping[str, Any] | None,
+    volatility: Mapping[str, Any] | None,
+    structure: Mapping[str, Any] | None,
+    timeframe: str,
+    symbol: str,
+    action: str,
+    market_type: str = "futures",
+) -> Dict[str, Any]:
+    """Score only context compatibility of an existing directional thesis.
+
+    Each group is evidence-driven. A group must have a clean directional context
+    and a minimum amount of explicit evidence before it can contribute any
+    bonus. This is deliberately independent from the Q10 hard economic gate.
+    """
+    l = dict(levels or {})
+    t = dict(trend or {})
+    m = dict(momentum or {})
+    v = dict(volatility or {})
+    s = dict(structure or {})
+
+    direction = _group_direction(action or l.get("action") or l.get("direction"))
+    tf = str(timeframe or "").strip()
+    adx = _f(t.get("adx") or l.get("adx"), 0.0)
+    atr_pct = _f(v.get("atr_pct") or l.get("atr_pct"), 0.0)
+    rsi = _f(m.get("rsi") or l.get("rsi"), 50.0)
+    volume_ratio = _f(
+        l.get("volume_ratio")
+        or l.get("relative_volume")
+        or v.get("volume_ratio")
+        or v.get("relative_volume")
+        or l.get("volume_multiple"),
+        0.0,
+    )
+    distance_atr = _f(l.get("entry_distance_atr") or l.get("distance_to_entry_atr"), 0.0)
+    reachability = _f(l.get("entry_reachability") or l.get("entry_reachability_score") or l.get("reachability_score"), 0.0)
+    if 0 < reachability <= 1.0:
+        reachability *= 100.0
+    regime = _regime(l, t)
+    vol_state = _vol_state(l, v)
+    session = _u(l.get("market_session") or l.get("session") or v.get("session"))
+    alignment = _alignment(direction, t, m, s)
+    contradictions = _contradiction_count(direction, t, m, s)
+    sweep, mss, poi = _has_sweep_mss_poi(l, s)
+    structure_blob = _blob(s, l)
+    vol_blob = _blob(v, l)
+    family_blob = _blob(l.get("strategy_family"), l.get("setup_family"), l.get("execution_family"), l.get("ppe_selected_route"))
+
+    groups = []
+
+    # 1) FAST_STABLE_CONTINUATION
+    evidence = []
+    if tf in {"30m", "1h"}:
+        evidence.append("FAST_TF")
+    if adx >= 25:
+        evidence.append("ADX_TREND")
+    if alignment >= 2:
+        evidence.append("DIRECTIONAL_ALIGNMENT")
+    if vol_state in {"LOW", "NORMAL", "COMPRESSION", "QUIET"} or (0 < atr_pct < 2.5):
+        evidence.append("STABLE_VOLATILITY")
+    if (distance_atr and distance_atr <= 2.0) or reachability >= 70:
+        evidence.append("REACHABLE_ENTRY")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    ready = tf in {"30m", "1h"} and adx >= 25 and alignment >= 2 and contradictions == 0 and len(evidence) >= 4
+    if ready:
+        groups.append({"group": "FAST_STABLE_CONTINUATION", "weights": _profile("FAST_STABLE_CONTINUATION"), "score": 94.0, "bonus": 4.0, "evidence": evidence[:6]})
+
+    # 2) RANGE_REVERSION_SELECTIVE
+    evidence = []
+    if tf in {"30m", "1h"}:
+        evidence.append("FAST_TF")
+    if adx and adx < 20:
+        evidence.append("RANGE_ADX")
+    if regime in {"RANGING", "RANGE", "BALANCE", "TRANSITION"}:
+        evidence.append("RANGE_REGIME")
+    if (direction == "BULLISH" and rsi <= 35) or (direction == "BEARISH" and rsi >= 65):
+        evidence.append("MOMENTUM_EXTREME")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    if "MEAN_REVERSION" in family_blob or "RANGE" in structure_blob:
+        evidence.append("FAMILY_OR_STRUCTURE_FIT")
+    ready = tf in {"30m", "1h"} and adx and adx < 20 and len(evidence) >= 4
+    if ready:
+        groups.append({"group": "RANGE_REVERSION_SELECTIVE", "weights": _profile("RANGE_REVERSION_SELECTIVE"), "score": 92.0, "bonus": 3.5, "evidence": evidence[:6]})
+
+    # 3) SWEEP_MSS_RECLAIM
+    evidence = []
+    if sweep:
+        evidence.append("LIQUIDITY_SWEEP")
+    if mss:
+        evidence.append("MSS_BOS")
+    if poi:
+        evidence.append("POI")
+    if alignment >= 1:
+        evidence.append("DIRECTIONAL_SUPPORT")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    if tf in {"30m", "1h", "2h", "4h"}:
+        evidence.append("EXECUTION_TF")
+    ready = sweep and mss and poi and contradictions == 0 and len(evidence) >= 4
+    if ready:
+        groups.append({"group": "SWEEP_MSS_RECLAIM", "weights": _profile("SWEEP_MSS_RECLAIM"), "score": 96.0, "bonus": 4.0, "evidence": evidence[:6]})
+
+    # 4) COMPRESSION_EXPANSION_RETEST
+    evidence = []
+    if any(token in vol_blob for token in ("SQUEEZE", "COMPRESSION", "EXPANSION")):
+        evidence.append("COMPRESSION_SIGNAL")
+    if _truth(v.get("squeeze_on") or l.get("squeeze_on") or s.get("compression")):
+        evidence.append("SQUEEZE_STATE")
+    if volume_ratio >= 0.9:
+        evidence.append("VOLUME_CONFIRMED")
+    if _truth(s.get("displacement") or s.get("displacement_confirmed") or l.get("entry_displacement_confirmed")):
+        evidence.append("DISPLACEMENT")
+    if tf in {"30m", "1h", "2h", "4h"}:
+        evidence.append("EXECUTION_TF")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    ready = any(e in evidence for e in ("COMPRESSION_SIGNAL", "SQUEEZE_STATE")) and len(evidence) >= 4 and contradictions == 0
+    if ready:
+        groups.append({"group": "COMPRESSION_EXPANSION_RETEST", "weights": _profile("COMPRESSION_EXPANSION_RETEST"), "score": 93.0, "bonus": 3.5, "evidence": evidence[:6]})
+
+    # 5) VOLATILITY_PULLBACK
+    evidence = []
+    if vol_state in {"HIGH", "EXPANSION", "ELEVATED"} or atr_pct >= 2.5:
+        evidence.append("ELEVATED_VOLATILITY")
+    if alignment >= 2:
+        evidence.append("DIRECTIONAL_ALIGNMENT")
+    if _truth(s.get("displacement") or s.get("displacement_confirmed") or l.get("entry_displacement_confirmed")):
+        evidence.append("DISPLACEMENT")
+    if _truth(l.get("pullback") or l.get("retest") or s.get("retest") or s.get("pullback")):
+        evidence.append("RETEST_PULLBACK")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    if tf in {"30m", "1h", "2h", "4h"}:
+        evidence.append("EXECUTION_TF")
+    ready = (vol_state in {"HIGH", "EXPANSION", "ELEVATED"} or atr_pct >= 2.5) and alignment >= 2 and contradictions == 0 and len(evidence) >= 4
+    if ready:
+        groups.append({"group": "VOLATILITY_PULLBACK", "weights": _profile("VOLATILITY_PULLBACK"), "score": 91.0, "bonus": 3.0, "evidence": evidence[:6]})
+
+    # 6) MULTIASSET_SESSION_EXECUTION
+    market_upper = _u(market_type)
+    evidence = []
+    if "MULTI" in market_upper:
+        evidence.append("MULTI_ASSET")
+    if session not in {"", "UNKNOWN", "NONE", "OFFHOURS", "UNDERLYING_CLOSED_OR_OFFHOURS"}:
+        evidence.append("ACTIVE_SESSION")
+    if alignment >= 2:
+        evidence.append("DIRECTIONAL_ALIGNMENT")
+    if contradictions == 0:
+        evidence.append("NO_CONTRADICTION")
+    if tf in {"1h", "4h"}:
+        evidence.append("EXECUTION_TF")
+    if volume_ratio >= 0.8:
+        evidence.append("VOLUME_OK")
+    ready = "MULTI" in market_upper and session not in {"", "UNKNOWN", "OFFHOURS", "UNDERLYING_CLOSED_OR_OFFHOURS"} and alignment >= 2 and contradictions == 0 and len(evidence) >= 4
+    if ready:
+        groups.append({"group": "MULTIASSET_SESSION_EXECUTION", "weights": _profile("MULTIASSET_SESSION_EXECUTION"), "score": 90.0, "bonus": 3.0, "evidence": evidence[:6]})
+
+    groups.sort(key=lambda x: (-float(x.get("score") or 0), -float(x.get("bonus") or 0), str(x.get("group") or "")))
+    selected = groups[:MAX_GROUPS]
+    bonus = min(MAX_BONUS, sum(_f(g.get("bonus"), 0.0) for g in selected))
+
+    # A hard contradiction blocks contextual authority even if individual
+    # evidence tokens exist. The groups can describe quality, but cannot
+    # override a conflicting directional structure.
+    authority_ready = bool(selected and contradictions == 0 and direction in {"BULLISH", "BEARISH"})
+
+    return {
+        "version": CONTEXT_GROUPS_VERSION,
+        "primary_group": selected[0]["group"] if selected else "NONE",
+        "matched_groups": [g["group"] for g in selected],
+        "groups": selected,
+        "group_bonus": round(bonus, 2),
+        "group_score": round(float(selected[0]["score"]), 2) if selected else 0.0,
+        "authority_ready": authority_ready,
+        "evidence_count": sum(len(g.get("evidence") or []) for g in selected),
+        "context": {
+            "timeframe": tf,
+            "symbol": str(symbol or ""),
+            "direction": direction,
+            "adx": round(adx, 3),
+            "atr_pct": round(atr_pct, 4),
+            "rsi": round(rsi, 3),
+            "volume_ratio": round(volume_ratio, 3),
+            "regime": regime,
+            "volatility_state": vol_state,
+            "session": session,
+            "alignment": alignment,
+            "contradictions": contradictions,
+        },
+        "policy": {
+            "creates_direction": False,
+            "changes_entry": False,
+            "changes_sl": False,
+            "changes_tp": False,
+            "lowers_q10_thresholds": False,
+            "adds_network_calls": False,
+            "adds_threads": False,
+            "uses_live_outcomes_for_fitting": False,
+        },
+    }
+
+
+
+def _clip(value: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, float(value)))
+
+
+def _dir(value: Any) -> str:
+    s = _u(value)
+    if s in {"LONG", "BUY", "BULLISH", "UP", "TREND_UP", "COMPRA_SPOT"}:
+        return "BULLISH"
+    if s in {"SHORT", "SELL", "BEARISH", "DOWN", "TREND_DOWN", "VENTA_SPOT"}:
+        return "BEARISH"
+    return "NEUTRAL"
 
 
 def _count_direction_support(levels: Mapping[str, Any], direction: str) -> int:
@@ -162,6 +478,7 @@ def evaluate(
     timeframe: str,
     symbol: str,
     action: str,
+    market_type: str = "futures",
 ) -> Dict[str, Any]:
     l = dict(levels or {})
     t = dict(trend or {})
@@ -198,7 +515,11 @@ def evaluate(
     mtf_block = l.get("multi_timeframe") or l.get("multiframe_context") or l.get("mtf_context") or l.get("mtf_alignment") or {}
     mtf_blob = _blob(mtf_block)
     unique_tf = _unique_tf_count(l, timeframe)
-    aligned_hint = _truth(l.get("mtf_aligned") or l.get("mtf_alignment") in {"ALIGNED", "SUPPORTIVE"})
+    mtf_alignment_raw = l.get("mtf_alignment")
+    aligned_hint = _truth(
+        l.get("mtf_aligned")
+        or (mtf_alignment_raw if isinstance(mtf_alignment_raw, str) and mtf_alignment_raw.upper() in {"ALIGNED", "SUPPORTIVE"} else False)
+    )
     conflict_hint = "CONFLICT" in mtf_blob or "OPPOSE" in mtf_blob or "CONTRADICT" in mtf_blob
     q3 = 56.0 + min(18.0, max(0, unique_tf - 1) * 5.0) + (18.0 if aligned_hint else 0.0) - (20.0 if conflict_hint else 0.0)
     if trend_dir == structure_dir == direction and direction != "NEUTRAL":
@@ -308,28 +629,108 @@ def evaluate(
         "Q4": round(_clip(q4), 2), "Q5": round(_clip(q5), 2), "Q6": round(_clip(q6), 2),
         "Q7": round(_clip(q7), 2), "Q8": round(_clip(q8), 2), "Q9": round(_clip(q9), 2),
     }
-    composite = sum(q[k] * Q_WEIGHTS[k] for k in Q_WEIGHTS)
+    base_composite = sum(q[k] * Q_WEIGHTS[k] for k in Q_WEIGHTS)
+
+    # Commit 22 — add a context-conditioned quality group without replacing the
+    # established Q1..Q9 dimensions. This is a bounded, deterministic overlay:
+    # strong contextual evidence can help a good candidate cross the existing
+    # global quality threshold, but weak/contradictory candidates receive no
+    # bonus. The Q10 hard contract remains untouched.
+    try:
+        context_groups = evaluate_context_quality_groups(
+            l, t, m, v, s, timeframe, symbol, action,
+            market_type=str(market_type or "futures"),
+        )
+    except Exception as exc:
+        context_groups = {
+            "version": "COMMIT22_CONTEXT_QUALITY_GROUPS_UNAVAILABLE",
+            "primary_group": "NONE",
+            "matched_groups": [],
+            "group_bonus": 0.0,
+            "group_score": 0.0,
+            "authority_ready": False,
+            "evidence_count": 0,
+            "context": {},
+            "error": type(exc).__name__,
+        }
+
+    group_authority = bool(context_groups.get("authority_ready"))
+    selected_groups = context_groups.get("groups") or []
+    primary_group_row = selected_groups[0] if isinstance(selected_groups, list) and selected_groups and isinstance(selected_groups[0], Mapping) else {}
+    profile = primary_group_row.get("weights") if isinstance(primary_group_row.get("weights"), Mapping) else {}
+    group_weighted_quality = base_composite
+    if profile and all(k in profile for k in q):
+        try:
+            group_weighted_quality = sum(q[k] * float(profile[k]) for k in q)
+        except Exception:
+            group_weighted_quality = base_composite
+
+    group_score = _f(context_groups.get("group_score"), 0.0)
+    if group_authority and group_score > 0.0:
+        # 15% of the contextual group score is allowed to complement the
+        # re-weighted Q1..Q9 profile. The group score itself is evidence-only
+        # and bounded (the group engine has no market-data access).
+        group_composite_raw = 0.85 * group_weighted_quality + 0.15 * group_score
+    else:
+        group_composite_raw = base_composite
+
+    # Group scoring is an alternative lens, not a second vote. It can help a
+    # context-fit candidate recover at most +5 points over the generic score.
+    # The global threshold remains 76 and all structural/execution/Q9 floors
+    # remain mandatory.
+    context_group_delta = max(0.0, min(MAX_CONTEXT_GROUP_BONUS, group_composite_raw - base_composite))
+    group_composite = min(100.0, base_composite + context_group_delta)
+    adjusted_composite = max(base_composite, group_composite)
+    group_bonus = context_group_delta
+
     structural_floor = min(q[k] for k in ("Q1", "Q2", "Q3", "Q4"))
     execution_floor = min(q["Q6"], q["Q7"])
     q9_ok = q["Q9"] >= MIN_Q9_EVIDENCE and state not in {"RETIRED", "RETIRED_ALPHA_DECAY"}
-    quality_ready = bool(
+
+    generic_quality_ready = bool(
         direction in {"BULLISH", "BEARISH"}
-        and composite >= MIN_COMPOSITE
+        and base_composite >= MIN_COMPOSITE
         and structural_floor >= MIN_STRUCTURAL_FLOOR
         and execution_floor >= MIN_EXECUTION_Q6_Q7
         and q9_ok
     )
+
+    # Context recovery path: the global threshold is still 76. A candidate that
+    # has a clean, explicit context group may use up to +4 points to cross that
+    # same threshold, but only from a base score >=72 and only with the same
+    # structural/execution/evidence floors. Thus this is not a threshold cut.
+    context_quality_ready = bool(
+        direction in {"BULLISH", "BEARISH"}
+        and group_authority
+        and base_composite >= MIN_CONTEXT_GROUP_BASE_COMPOSITE
+        and group_composite >= MIN_CONTEXT_GROUP_ADJUSTED_COMPOSITE
+        and context_group_delta > 0.0
+        and structural_floor >= MIN_STRUCTURAL_FLOOR
+        and execution_floor >= MIN_EXECUTION_Q6_Q7
+        and q9_ok
+    )
+    quality_ready = bool(generic_quality_ready or context_quality_ready)
+    composite = adjusted_composite
     return {
         "version": VERSION,
         "model": MODEL,
         "quality": q,
         "composite": round(composite, 2),
+        "base_composite": round(base_composite, 2),
+        "context_group_bonus": round(group_bonus, 2),
+        "context_group_composite": round(group_composite, 2),
+        "context_group_weighted_q1_q9": round(group_weighted_quality, 2),
+        "context_group_score": round(group_score, 2),
+        "context_quality_groups": context_groups,
+        "context_quality_authority": bool(context_quality_ready),
+        "generic_quality_ready": bool(generic_quality_ready),
         "structural_floor": round(structural_floor, 2),
         "execution_floor": round(execution_floor, 2),
         "quality_ready": quality_ready,
         "route_family": family,
         "evidence_state": state,
         "direction": direction,
+        "market_type": str(market_type or "futures"),
         "diagnostics": {
             "agreements": agreements,
             "contradictions": contradictions,
