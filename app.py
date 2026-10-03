@@ -30124,7 +30124,7 @@ def health():
         'status': 'ok',
         'timestamp': datetime.now(bolivia_tz).isoformat(),
         'system': 'Crypto Trader Analyst Pro',
-        'version': '21.2',
+        'version': '21.3',
         'route_engine_version': str(overlay.get('version') or ''),
         'cpqe_version': cpqe_version,
         'memory_policy': {
@@ -44206,6 +44206,17 @@ def _memory_cleanup_after_analytics(response):
                     response.headers.pop('Content-Length', None)
     except Exception as _rc9_info_error:
         print(f"⚠️ RC9 info widget omitido: {_rc9_info_error}")
+
+    # COMMIT 21.3: el HTML de las páginas operativas nunca conserva una
+    # versión vieja de index.html/los query-bust de JS. Esto evita que un
+    # navegador siga cargando 21.1 mientras el backend ya está en 21.3.
+    try:
+        if request.path in {'/', '/futures', '/multiasset'} and response.status_code == 200:
+            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
+    except Exception:
+        pass
 
     # RC9.8.7: comprimir al final, después de cualquier inyección HTML.
     return _rc987_compress_text_response(response)

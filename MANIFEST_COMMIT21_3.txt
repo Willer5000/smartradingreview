@@ -1,0 +1,21 @@
+COMMIT21_3 Fix replacement package
+Core replacements:
+app.py
+commit21_3_main_entrypoint.py
+cpqe_19_2_4.py
+macro_context.py
+premium_path_expansion_20.py
+render.yaml
+Procfile
+static/script.js
+static/futures.js
+templates/index.html
+QA/docs:
+test_commit21_3_fix.py
+INSTRUCCIONES_IMPLEMENTACION_COMMIT21_3.md
+PROMPT_MAESTRO_CONTINUIDAD_COMMIT21_3.md
+COMMIT21_3_ROOT_CAUSE_AUDIT.md
+COMMIT21_3_CHANGESET.md
+COMMIT21_3_OVERFITTING_POLICY.md
+INFORME_21_3_VALIDACION.md
+README_COMMIT21_3.txt

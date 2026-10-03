@@ -10632,53 +10632,107 @@ window.updateActiveSignals = function updateActiveSignals() {
 // endpoint before launching the heavy 9-trader analysis. This removes the
 // perception of infinite loading and lets the user inspect the chart while the
 // full analysis continues in the background.
+window.__SMARTTRADING_LIGHT_VISUAL_STATE__ = window.__SMARTTRADING_LIGHT_VISUAL_STATE__ || {
+    inflight: null,
+    inflightKey: '',
+    cache: Object.create(null),
+    lastKey: ''
+};
+
+// COMMIT 21.3 — el carril visual tiene single-flight + TTL corto. Los cambios
+// de selección y changeToSignal ya no pueden disparar varias descargas de OHLCV
+// simultáneas ni hacer que el gráfico compita con el análisis pesado.
 window.loadLightVisualsForSignal = async function(symbol, timeframe) {
     const market = window.IS_MULTI_ASSET_PAGE ? 'multiasset' : (window.IS_FUTURES_PAGE ? 'futures' : 'spot');
+    const state = window.__SMARTTRADING_LIGHT_VISUAL_STATE__;
+    const sym = String(symbol || '').toUpperCase();
+    const tf = String(timeframe || '');
+    const key = `${market}|${sym}|${tf}`;
+
+    const cached = state.cache[key];
+    if (cached && (Date.now() - Number(cached.ts || 0)) < 45000 && cached.payload?.df?.time?.length) {
+        window.currentAnalysis = cached.payload;
+        try { window.updateCandleChart?.(cached.payload); } catch (_) {}
+        try { window.updateRSIChart?.(cached.payload); } catch (_) {}
+        try { window.updateMACDChart?.(cached.payload); } catch (_) {}
+        return cached.payload;
+    }
+
+    if (state.inflight && state.inflightKey === key) return state.inflight;
+    if (state.inflight && state.inflightKey !== key) {
+        // Do not abort the old request globally: a server-side request may still
+        // be using the same cache. The client simply ignores its result if the
+        // selected key changed.
+    }
+
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), 5000);
-    try {
-        const params = new URLSearchParams({
-            symbol: String(symbol || '').toUpperCase(),
-            timeframe: String(timeframe || ''),
-            market,
-            _ts: String(Date.now())
-        });
-        const response = await fetch(`/api/futures/visuals?${params.toString()}`, {
-            method: 'GET',
-            credentials: 'same-origin',
-            cache: 'no-store',
-            signal: controller.signal
-        });
-        const payload = await response.json();
-        if (!response.ok || !payload?.success || !payload?.df?.time?.length) {
-            throw new Error(payload?.error || `HTTP ${response.status}`);
-        }
-        window.currentAnalysis = payload;
-        const safeRender = (fn, label) => {
-            try {
-                if (typeof fn === 'function') fn(payload);
-            } catch (error) {
-                console.warn(`⚠️ Visual ${label} diferido:`, error);
+    const requestKey = key;
+
+    const task = (async () => {
+        try {
+            const params = new URLSearchParams({
+                symbol: sym,
+                timeframe: tf,
+                market,
+                _ts: String(Date.now())
+            });
+            const response = await fetch(`/api/futures/visuals?${params.toString()}`, {
+                method: 'GET',
+                credentials: 'same-origin',
+                cache: 'no-store',
+                signal: controller.signal
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload?.success || !payload?.df?.time?.length) {
+                throw new Error(payload?.error || `HTTP ${response.status}`);
             }
-        };
-        safeRender(window.updateCandleChart, 'candles');
-        safeRender(window.updateRSIChart, 'RSI');
-        safeRender(window.updateMACDChart, 'MACD');
-        safeRender(window.updateStochasticChart, 'Stochastic');
-        safeRender(window.updateVolumeChart, 'Volume');
-        safeRender(window.updateBollingerChart, 'Bollinger');
-        safeRender(window.updateATRChart, 'ATR');
-        safeRender(window.updateSuperTrendChart, 'SuperTrend');
-        safeRender(window.updateWilliamsCCIChart, 'Williams/CCI');
-        safeRender(window.updateMFIForceChart, 'MFI/Force');
-        window._commit21_1_light_visuals_at = Date.now();
-        return payload;
-    } catch (error) {
-        console.warn('⚠️ Commit 21.1 visualización ligera:', error);
-        return null;
-    } finally {
-        window.clearTimeout(timeoutId);
-    }
+
+            state.cache[requestKey] = {ts: Date.now(), payload};
+            state.lastKey = requestKey;
+            window.currentAnalysis = payload;
+
+            // Render only if the user is still looking at the same cell.
+            const currentKey = `${market}|${String(document.getElementById('symbol-select')?.value || '').toUpperCase()}|${String(document.getElementById('interval-select')?.value || '')}`;
+            if (currentKey !== requestKey) return payload;
+
+            const safeRender = (fn, label) => {
+                try {
+                    if (typeof fn === 'function') fn(payload);
+                } catch (error) {
+                    console.warn(`⚠️ Visual ${label} diferido:`, error);
+                }
+            };
+            safeRender(window.updateCandleChart, 'candles');
+            safeRender(window.updateRSIChart, 'RSI');
+            safeRender(window.updateMACDChart, 'MACD');
+            safeRender(window.updateStochasticChart, 'Stochastic');
+            safeRender(window.updateVolumeChart, 'Volume');
+            safeRender(window.updateBollingerChart, 'Bollinger');
+            safeRender(window.updateATRChart, 'ATR');
+            safeRender(window.updateSuperTrendChart, 'SuperTrend');
+            safeRender(window.updateWilliamsCCIChart, 'Williams/CCI');
+            safeRender(window.updateMFIForceChart, 'MFI/Force');
+            window._commit21_3_light_visuals_at = Date.now();
+            return payload;
+        } catch (error) {
+            if (error?.name === 'AbortError') {
+                console.debug(`⏱️ [21.3] Visuales ${sym} ${tf}: timeout acotado; no bloquea el análisis.`);
+            } else {
+                console.debug(`⚠️ [21.3] Visuales ${sym} ${tf}: ${error?.message || error}`);
+            }
+            return null;
+        } finally {
+            window.clearTimeout(timeoutId);
+            if (state.inflightKey === requestKey) {
+                state.inflight = null;
+                state.inflightKey = '';
+            }
+        }
+    })();
+    state.inflightKey = requestKey;
+    state.inflight = task;
+    return task;
 };
 
 // ============ FUNCIÓN PARA CAMBIAR A UNA SEÑAL ============
