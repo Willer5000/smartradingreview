@@ -1,7 +1,5 @@
-// COMMIT 21.3 — UI transport governor. Read requests are bounded and
-// repeated lane failures enter a short cooldown instead of creating a
-// request storm that competes with the single Render heavy-analysis slot.
-async function _futFetchBounded(url, options = {}, timeoutMs = 8000) {
+// 17.5.11: bound read requests including body, release loading flags via existing finally.
+async function _futFetchBounded(url, options = {}, timeoutMs = 15000) {
     // Write actions retain their existing transport/confirmation behavior.
     if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase())) return fetch(url, options);
     const controller = new AbortController();
@@ -19,7 +17,7 @@ async function _futFetchBounded(url, options = {}, timeoutMs = 8000) {
                     {status:response.status, statusText:response.statusText, headers:response.headers});
             })(),
             new Promise((_, reject) => { timer = setTimeout(() => {
-                controller.abort(); reject(new Error('La consulta excedió el límite de tiempo; vuelve a intentarlo cuando el carril se estabilice.'));
+                controller.abort(); reject(new Error('La consulta excedió 15 segundos; vuelve a intentarlo.'));
             }, timeoutMs); })
         ]);
     } finally {
@@ -33,7 +31,7 @@ async function _futFetchBounded(url, options = {}, timeoutMs = 8000) {
 // solo los endpoints /api/futures/* con los símbolos y timeframes de futuros.
 // También añade el panel del ReviewTrader y adapta la correlación.
 
-console.log(`🚀 futures.js cargado - modo ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'} activo · COMMIT21.3`);
+console.log(`🚀 futures.js cargado - modo ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'} activo`);
 
 const DERIV_API_BASE = window.DERIV_API_BASE || (window.IS_MULTI_ASSET_PAGE ? '/api/multiasset' : '/api/futures');
 const DERIV_MARKET_LABEL = window.IS_MULTI_ASSET_PAGE ? 'derivados Multi-Activo' : 'Futures';
@@ -55,49 +53,8 @@ window._futuresSignalsState = {
     activeLoading: false,
     previousLoading: false,
     activeTimer: null,
-    previousTimer: null,
-    activeCooldownUntil: 0,
-    previousCooldownUntil: 0,
-    opportunityLoading: false,
-    opportunityCooldownUntil: 0,
-    riskCooldownUntil: 0,
-    bootStartedAt: Date.now(),
-    laneFailureCount: {active: 0, previous: 0, opportunity: 0, risk: 0}
+    previousTimer: null
 };
-
-function _futLaneState() {
-    if (!window._futuresSignalsState) {
-        window._futuresSignalsState = {
-            activeLoading: false, previousLoading: false, activeTimer: null,
-            previousTimer: null, activeCooldownUntil: 0,
-            previousCooldownUntil: 0, opportunityLoading: false,
-            opportunityCooldownUntil: 0, riskCooldownUntil: 0,
-            bootStartedAt: Date.now(),
-            laneFailureCount: {active: 0, previous: 0, opportunity: 0, risk: 0}
-        };
-    }
-    return window._futuresSignalsState;
-}
-
-function _futLaneInCooldown(kind) {
-    const st = _futLaneState();
-    const key = `${kind}CooldownUntil`;
-    return Number(st[key] || 0) > Date.now();
-}
-
-function _futLaneCooldown(kind, ms = 20000) {
-    const st = _futLaneState();
-    const key = `${kind}CooldownUntil`;
-    st[key] = Date.now() + Math.max(1000, ms);
-    st.laneFailureCount[kind] = Number(st.laneFailureCount[kind] || 0) + 1;
-}
-
-function _futLaneRecover(kind) {
-    const st = _futLaneState();
-    const key = `${kind}CooldownUntil`;
-    st[key] = 0;
-    st.laneFailureCount[kind] = 0;
-}
 // Helper global: nunca mostrar confianza > 100% (defensa contra datos viejos).
 function fmtConfidence(c) {
     const n = Number(c) || 0;
@@ -811,14 +768,8 @@ window.updateActiveSignals = async function() {
         return;
     }
 
-    // COMMIT 21.3: después de un timeout no reabrir el mismo endpoint
-    // inmediatamente. El carril sigue disponible en el siguiente intento
-    // manual o cuando expire el cooldown.
+    // Si ya hay una petición, no crear otra.
     if (window._futuresSignalsState.activeLoading) return;
-    if (_futLaneInCooldown('active')) {
-        console.debug('⏸️ [21.3] ACTIVE cooldown: se evita una nueva consulta mientras el backend se recupera.');
-        return;
-    }
 
     window._futuresSignalsState.activeLoading = true;
 
@@ -878,7 +829,6 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (!json.success) {
 
-            _futLaneCooldown('active', 20000);
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-danger text-center py-3">
 
@@ -901,7 +851,6 @@ window.updateActiveSignals = async function() {
             return;
         }
 
-        _futLaneRecover('active');
         const allSignals = Array.isArray(json.signals)
             ? json.signals
             : [];
@@ -1254,7 +1203,6 @@ window.updateActiveSignals = async function() {
 
     } catch (err) {
 
-        _futLaneCooldown('active', 25000);
         console.error(
             '❌ ACTIVE FETCH:',
             err
@@ -1391,7 +1339,14 @@ window.updatePreviousSignals = async function() {
     // futures.js solo se carga en /futures.
     console.log('🟣 PREVIOUS: función llamada');
 
-    _futLaneState();
+    if (!window._futuresSignalsState) {
+        window._futuresSignalsState = {
+            activeLoading: false,
+            previousLoading: false,
+            activeTimer: null,
+            previousTimer: null
+        };
+    }
 
     const signalsList =
         document.getElementById(
@@ -1427,16 +1382,22 @@ window.updatePreviousSignals = async function() {
         return;
     }
 
-    if (window._futuresSignalsState.previousLoading) {
-        console.warn('⚠️ PREVIOUS: petición anterior sigue activa; se descarta la duplicada.');
-        return;
-    }
-    if (_futLaneInCooldown('previous')) {
-        console.debug('⏸️ [21.3] PREVIOUS cooldown: se evita una nueva consulta mientras el backend se recupera.');
-        return;
+    if (
+        window._futuresSignalsState
+            .previousLoading
+    ) {
+
+        console.warn(
+            '⚠️ PREVIOUS: petición anterior marcada como activa.'
+        );
+
+        // Evitar bloqueo permanente.
+        window._futuresSignalsState
+            .previousLoading = false;
     }
 
-    window._futuresSignalsState.previousLoading = true;
+    window._futuresSignalsState
+        .previousLoading = true;
 
     console.log(
         '🚀 PREVIOUS: iniciando consulta...'
@@ -1507,7 +1468,7 @@ window.updatePreviousSignals = async function() {
         );
 
         if (!json.success) {
-            _futLaneCooldown('previous', 20000);
+
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-danger text-center py-3">
 
@@ -1535,8 +1496,6 @@ window.updatePreviousSignals = async function() {
 
             return;
         }
-
-        _futLaneRecover('previous');
 
         const allSignals =
             Array.isArray(json.signals)
@@ -1889,7 +1848,6 @@ window.updatePreviousSignals = async function() {
 
     } catch (err) {
 
-        _futLaneCooldown('previous', 25000);
         console.error(
             '❌ PREVIOUS FETCH:',
             err
@@ -2945,16 +2903,9 @@ function _fut96EnsureOpportunityPanel() {
 }
 
 window.loadFuturesOpportunities96 = async function() {
-    const st = _futLaneState();
-    if (st.opportunityLoading) return;
-    if (_futLaneInCooldown('opportunity')) {
-        console.debug('⏸️ [21.3] OPPORTUNITY cooldown: se evita nueva consulta.');
-        return;
-    }
     const panel = _fut96EnsureOpportunityPanel();
     const countEl = document.getElementById('current-active-signals-count');
     if (!panel) return;
-    st.opportunityLoading = true;
 
     panel.innerHTML = `
         <div class="list-group-item bg-dark text-info text-center py-3">
@@ -2979,7 +2930,7 @@ window.loadFuturesOpportunities96 = async function() {
             timeframe: selectedTimeframe,
             _ts: String(Date.now())
         });
-        const response = await _futFetchBounded(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'}, 6000);
+        const response = await _futFetchBounded(`${DERIV_API_BASE}/opportunities?${params.toString()}`, {cache:'no-store'});
         if (!response.ok) {
             const body = await response.text();
             throw new Error(`HTTP ${response.status}: ${String(body || '').slice(0, 180)}`);
@@ -3072,7 +3023,6 @@ window.loadFuturesOpportunities96 = async function() {
             at: Date.now()
         };
     } catch (error) {
-        _futLaneCooldown('opportunity', 20000);
         console.warn('Opportunity lane read deferred:', error);
         const last = window._lastDerivOpportunityView || null;
         const sameMarket = last && last.market === (window.IS_MULTI_ASSET_PAGE ? 'multiasset' : 'futures');
@@ -3096,8 +3046,6 @@ window.loadFuturesOpportunities96 = async function() {
                     <br><small>El scheduler continúa en segundo plano; no se fuerza una consulta pesada desde el navegador.</small>
                 </div>`;
         }
-    } finally {
-        st.opportunityLoading = false;
     }
 };
 
@@ -3143,21 +3091,8 @@ document.addEventListener('DOMContentLoaded', function() {
     const _fut96SymbolSelect = document.getElementById('symbol-select');
     _fut96SymbolSelect?.addEventListener('change', (event) => {
         _fut96ApplyTimeframes(event.target.value);
-        window.setTimeout(() => {
-            const tf = document.getElementById('interval-select')?.value || '1h';
-            window.loadLightVisualsForSignal?.(event.target.value, tf)?.catch?.(() => null);
-        }, 100);
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
-    // Commit 21.3: prime the chart/indicator lane without waiting for
-    // the heavy 9-trader analysis. Exactly one light request at page boot.
-    setTimeout(() => {
-        if (!document.hidden && window.IS_FUTURES_PAGE && typeof window.loadLightVisualsForSignal === 'function') {
-            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            const timeframe = document.getElementById('interval-select')?.value || '1h';
-            window.loadLightVisualsForSignal(symbol, timeframe).catch(() => null);
-        }
-    }, 350);
     // RC9.8.1 — Activas intrabar: el polling debe ser menor que el TTL más
     // corto del preview para evitar huecos falsos de 0 entre refrescos.
     setInterval(() => {
@@ -3272,21 +3207,21 @@ document.addEventListener('DOMContentLoaded', function() {
     // loadFuturesOpportunities96 es la Activa intrabar de vela abierta.
     setTimeout(() => {
         if (typeof window.updateActiveSignals === 'function') {
-            console.log(`🚀 [21.3] ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Vigentes (prioridad 1)`);
+            console.log(`🚀 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Vigentes (prioridad 1)`);
             window.updateActiveSignals();
         }
         setTimeout(() => {
             if (typeof window.updatePreviousSignals === 'function') {
-                console.log(`📜 [21.3] ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Confirmadas (prioridad 2)`);
+                console.log(`📜 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Confirmadas (prioridad 2)`);
                 window.updatePreviousSignals();
             }
-        }, 2500);
+        }, 500);
         setTimeout(() => {
-            console.log(`🟢 [21.3] ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Activas (prioridad 3)`);
+            console.log(`🟢 ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futures'}: cargando Activas (prioridad 3)`);
             window.loadFuturesOpportunities96?.();
-        }, 5000);
-        setTimeout(() => window.prioritizeFuturesSignalLanes?.(), 6500);
-    }, 1500);
+        }, 1600);
+        setTimeout(() => window.prioritizeFuturesSignalLanes?.(), 2200);
+    }, 1200);
     
     // Refrescar señales activas cada 2 min (v15: reduce carga)
     setInterval(() => {
@@ -3303,16 +3238,11 @@ document.addEventListener('DOMContentLoaded', function() {
         if (typeof window.updateCorrelationInfo === 'function') {
             window.updateCorrelationInfo({});
         }
-    }, 9000);
+    }, 1500);
     
     // Refrescar contexto cuando cambia temporalidad O símbolo.
     const refreshFuturesContext = () => {
         setTimeout(() => {
-            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
-            const timeframe = document.getElementById('interval-select')?.value || '1h';
-            if (typeof window.loadLightVisualsForSignal === 'function') {
-                window.loadLightVisualsForSignal(symbol, timeframe).catch(() => null);
-            }
             if (typeof window.updateCorrelationInfo === 'function') {
                 window.updateCorrelationInfo({});
             }
@@ -5740,14 +5670,12 @@ if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
     };
 
     window.loadFuturesRiskProfile = async function({silent = false} = {}) {
-        _futLaneState();
-        if (_futLaneInCooldown('risk')) return false;
         try {
             const response = await _futFetchBounded('/api/user/futures-risk-profile', {
                 method: 'GET',
                 credentials: 'same-origin',
                 cache: 'no-store',
-            }, 4000);
+            });
             let data = {};
             try { data = await response.json(); } catch (_) {}
 
@@ -5759,14 +5687,12 @@ if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
                 throw new Error(data.error || `HTTP ${response.status}`);
             }
 
-            _futLaneRecover('risk');
             renderProfile(data.profile || {}, data.user || null);
             if (!silent && typeof window.showToast === 'function') {
                 window.showToast(`Perfil ${DERIV_MARKET_LABEL} actualizado`, 'success');
             }
             return true;
         } catch (error) {
-            _futLaneCooldown('risk', 30000);
             console.error('❌ loadFuturesRiskProfile:', error);
             renderMessage(`No se pudo cargar el perfil ${DERIV_MARKET_LABEL}: ${error.message}`, 'danger');
             return false;
@@ -5838,7 +5764,7 @@ if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
                 futures_personal_max_leverage: nullableNumber('futures-risk-max-leverage'),
             }, currentUser && currentUser !== '—' ? currentUser : null);
         });
-        window.setTimeout(() => window.loadFuturesRiskProfile({silent: true}), 8000);
+        window.setTimeout(() => window.loadFuturesRiskProfile({silent: true}), 2200);
     };
 
     if (document.readyState === 'loading') {

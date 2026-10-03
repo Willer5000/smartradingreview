@@ -21707,51 +21707,21 @@ class TradingExpertSystem:
                                 )
                             except Exception:
                                 _manual_levels = levels
-
-                            # Commit 21.1: a PRECAUCION/ESPERAR thesis may be
-                            # re-routed through the frozen Strategy Bank. If the
-                            # real execution pipeline itself returns PREMIUM,
-                            # preserve that result instead of overwriting it with
-                            # the manual fallback lane. This does not create a
-                            # direction: _manual_action came from the already
-                            # computed operational thesis / vote record.
-                            _manual_gate = dict((_manual_levels or {}).get('futures_publication_gate') or {})
-                            _manual_route_promoted = bool(
-                                isinstance(_manual_levels, dict)
-                                and _manual_levels.get('premium_route_promoted')
-                                and _manual_gate.get('eligible')
-                                and str(_manual_gate.get('tier') or '').upper() == 'PREMIUM'
+                            levels = self._guaranteed_manual_geometry_175113(
+                                _manual_action, trend, momentum, volatility,
+                                structure, symbol, timeframe,
+                                liquidation=liquidation_data,
+                                existing_levels=_manual_levels,
                             )
-                            if _manual_route_promoted:
-                                levels = dict(_manual_levels)
-                                accion_consenso = _manual_action
-                                niveles_originales = levels.get('premium_route_promoted_from') or 'PRECAUCION'
-                                levels['manual_route_recovered_to_premium'] = True
-                                levels['manual_route_recovered_from'] = str(niveles_originales)
-                                levels['manual_observation_action'] = _manual_action
-                                levels['manual_observation_geometry'] = False
-                                levels['pipeline_generation'] = 'COMMIT21.1_PREMIUM_ROUTE_RECOVERY'
-                                print(
-                                    f"✅ [21.1] Thesis recovery → PREMIUM | "
-                                    f"{symbol} {timeframe} {_manual_action} | "
-                                    f"route={levels.get('strategy_route_family') or levels.get('setup_family')}"
-                                )
-                            else:
-                                levels = self._guaranteed_manual_geometry_175113(
-                                    _manual_action, trend, momentum, volatility,
-                                    structure, symbol, timeframe,
-                                    liquidation=liquidation_data,
-                                    existing_levels=_manual_levels,
-                                )
-                                levels.update({
-                                    'pipeline_generation': '17.5.11R.3',
-                                    'is_rejected': True,
-                                    'is_executable': False,
-                                    'publication_status': 'ANALYSIS_ONLY',
-                                    'manual_observation_geometry': True,
-                                    'manual_observation_action': _manual_action,
-                                    'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
-                                })
+                            levels.update({
+                                'pipeline_generation': '17.5.11R.3',
+                                'is_rejected': True,
+                                'is_executable': False,
+                                'publication_status': 'ANALYSIS_ONLY',
+                                'manual_observation_geometry': True,
+                                'manual_observation_action': _manual_action,
+                                'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
+                            })
                     except Exception as _manual_geometry_error:
                         levels['manual_observation_geometry'] = False
                         levels['manual_observation_error'] = type(_manual_geometry_error).__name__
@@ -21934,11 +21904,8 @@ class TradingExpertSystem:
             if str(accion_consenso or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
                 try:
                     from operational_intelligence import execution_setup_guard
-                    _promoted_family = str((levels or {}).get('strategy_route_family') or '').strip()
                     _setup_family_for_guard = (
-                        _promoted_family
-                        if (levels or {}).get('premium_route_promoted') and _promoted_family
-                        else (contingency_playbook or {}).get('setup_family')
+                        (contingency_playbook or {}).get('setup_family')
                         or ((operational_intelligence or {}).get('default_strategy') or {}).get('family')
                     )
                     operational_execution = execution_setup_guard(
@@ -30114,105 +30081,16 @@ def analytics_page():
 @app.route('/health')
 def health():
     """Health check para Render + telemetría de memoria no sensible."""
-    overlay = globals().get('_COMMIT20_2_AUTOINSTALL') or {}
-    try:
-        import cpqe_19_2_4 as _cpqe_mod
-        cpqe_version = getattr(_cpqe_mod, 'VERSION', 'UNKNOWN')
-    except Exception:
-        cpqe_version = 'UNAVAILABLE'
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now(bolivia_tz).isoformat(),
         'system': 'Crypto Trader Analyst Pro',
-        'version': '21.3',
-        'route_engine_version': str(overlay.get('version') or ''),
-        'cpqe_version': cpqe_version,
-        'memory_policy': {
-            'job_start_limit_mb': float(globals().get('_MEMORY_JOB_START_LIMIT_MB', 0) or 0),
-            'soft_limit_mb': float(globals().get('_MEMORY_SOFT_LIMIT_MB', 0) or 0),
-            'hard_limit_mb': float(globals().get('_MEMORY_HARD_LIMIT_MB', 0) or 0),
-        },
+        'version': '2.0',
         'memory': _memory_runtime_state()
     })
 
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
-
-@app.route('/api/futures/visuals')
-def api_futures_visuals():
-    """Commit 21.1 — lightweight visual payload, no trader analysis.
-
-    The page must be able to render candles/indicators immediately even when
-    the heavy 9-trader analysis is waiting on the single Render heavy slot.
-    Existing market-data providers/caches are reused; no new provider is added.
-    """
-    try:
-        symbol = str(request.args.get('symbol') or 'BTC-USDT').strip().upper().replace('/', '-')
-        timeframe = str(request.args.get('timeframe') or '1h').strip()
-        market = str(request.args.get('market') or 'futures').strip().lower()
-        if market not in {'futures', 'multiasset', 'spot'}:
-            market = 'futures'
-
-        # Prefer already-computed compact UI/runtime snapshots because they can
-        # include structure/levels without re-running analysis.
-        cached = None
-        if market == 'futures':
-            cached = _get_futures_ui_cached(symbol, timeframe) or _get_futures_runtime_cached(symbol, timeframe)
-        elif market == 'multiasset':
-            try:
-                _multiasset_restore_local_snapshot_once()
-                with _MULTI_ASSET_CACHE['lock']:
-                    cached = dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol, timeframe)) or {})
-            except Exception:
-                cached = None
-
-        df = None
-        if isinstance(cached, dict) and isinstance(cached.get('df'), dict) and cached['df'].get('time'):
-            df = cached['df']
-        else:
-            if market == 'futures':
-                engine = _get_futures_system()
-                df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
-            elif market == 'multiasset':
-                engine = _get_multiasset_system()
-                df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
-            else:
-                from kucoin_cache import fetch_kucoin_candles
-                df_obj = fetch_kucoin_candles(symbol, timeframe, timeout=8)
-            if df_obj is None or getattr(df_obj, 'empty', True):
-                return jsonify({'success': False, 'error': 'Sin datos OHLCV', 'symbol': symbol, 'timeframe': timeframe, 'market': market}), 503
-            work = df_obj.tail(120).copy().reset_index(drop=True)
-            time_col = 'time' if 'time' in work.columns else ('timestamp' if 'timestamp' in work.columns else None)
-            if time_col is None:
-                return jsonify({'success': False, 'error': 'OHLC_SCHEMA_INVALID', 'symbol': symbol, 'timeframe': timeframe}), 503
-            df = {
-                'time': [str(x) for x in work[time_col].astype(str).tolist()],
-                'open': [float(x) for x in work['open'].tolist()],
-                'high': [float(x) for x in work['high'].tolist()],
-                'low': [float(x) for x in work['low'].tolist()],
-                'close': [float(x) for x in work['close'].tolist()],
-                'volume': [float(x) for x in work['volume'].tolist()] if 'volume' in work.columns else [0.0] * len(work),
-            }
-            del df_obj
-
-        payload = {
-            'success': True,
-            'source': 'COMMIT21_1_LIGHT_VISUALS',
-            'symbol': symbol,
-            'timeframe': timeframe,
-            'market': market,
-            'system_type': 'futures' if market == 'futures' else market,
-            'df': df,
-        }
-        # Preserve only lightweight analysis branches that chart renderers use.
-        if isinstance(cached, dict):
-            for key in ('levels', 'structure', 'trend', 'momentum', 'volume', 'volatility', 'correlation', 'sentiment', 'decision'):
-                if key in cached and key != 'df':
-                    payload[key] = cached.get(key)
-        return jsonify(payload), 200
-    except Exception as exc:
-        return jsonify({'success': False, 'error': f'{type(exc).__name__}: {str(exc)[:180]}'}), 500
-
 
 @app.route('/api/price')
 def api_price():
@@ -31200,12 +31078,9 @@ if _LOW_MEMORY_MODE:
     # Commit 18.1.1: preserve ~200 MB headroom for pandas/numpy/Plotly
     # transient allocations on Render Free (512 MB cgroup). The previous
     # 250/340/240 thresholds reacted too late to sudden analysis spikes.
-    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 235.0)
+    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 220.0)
     _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 300.0)
-    # Commit 21.2: keep a 225 MB start budget with a single heavy-lock +
-    # 300 MB hard guard. Route Engine 21.2 has its own post-shed <=222 MB
-    # alternative budget and will skip alternatives rather than risk the cgroup.
-    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 225.0)
+    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 200.0)
     _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
 
@@ -44206,17 +44081,6 @@ def _memory_cleanup_after_analytics(response):
                     response.headers.pop('Content-Length', None)
     except Exception as _rc9_info_error:
         print(f"⚠️ RC9 info widget omitido: {_rc9_info_error}")
-
-    # COMMIT 21.3: el HTML de las páginas operativas nunca conserva una
-    # versión vieja de index.html/los query-bust de JS. Esto evita que un
-    # navegador siga cargando 21.1 mientras el backend ya está en 21.3.
-    try:
-        if request.path in {'/', '/futures', '/multiasset'} and response.status_code == 200:
-            response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
-            response.headers['Pragma'] = 'no-cache'
-            response.headers['Expires'] = '0'
-    except Exception:
-        pass
 
     # RC9.8.7: comprimir al final, después de cualquier inyección HTML.
     return _rc987_compress_text_response(response)
@@ -59461,8 +59325,7 @@ print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flu
 
 
 # ============================================================================
-# COMMIT 21.2 — GUARDED AUTO-INSTALL
-# The retained module name premium_path_expansion_20 is used for backward compatibility.
+# COMMIT 20.2 — GUARDED AUTO-INSTALL
 # ============================================================================
 # Render dashboards sometimes override Procfile/render.yaml with `gunicorn app:app`.
 # Keep Commit 20.2 active in that configuration too. The overlay is idempotent.
@@ -59470,13 +59333,13 @@ _COMMIT20_2_AUTOINSTALL = {}
 try:
     from premium_path_expansion_20 import install as _install_commit20_2
     _COMMIT20_2_AUTOINSTALL = _install_commit20_2(app) or {}
-    print(f"✅ [COMMIT21.2] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
+    print(f"✅ [COMMIT20.2] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
 except Exception as _commit20_2_exc:
     _COMMIT20_2_AUTOINSTALL = {
-        'version': 'COMMIT21_2_PREMIUM_STRATEGY_ROUTE_ENGINE_FIX_V1',
+        'version': 'COMMIT20_2_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1',
         'error': f'{type(_commit20_2_exc).__name__}: {str(_commit20_2_exc)[:240]}',
     }
-    print(f"⚠️ [COMMIT21.2] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
+    print(f"⚠️ [COMMIT20.2] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

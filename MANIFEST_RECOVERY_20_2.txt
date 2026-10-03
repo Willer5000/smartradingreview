@@ -1,0 +1,17 @@
+app.py
+commit20_2_main_entrypoint.py
+premium_path_expansion_20.py
+static/script.js
+static/futures.js
+templates/index.html
+Procfile
+render.yaml
+schema_commit20_2_runtime_saved_signals.sql
+README_COMMIT20_2.txt
+COMMIT20_CHANGESET.md
+INSTRUCCIONES_IMPLEMENTACION_COMMIT20_2.md
+PROMPT_MAESTRO_CONTINUIDAD_COMMIT20_2.md
+QA_COMMIT20_2_FIX.py
+INSTRUCCIONES_RECOVERY_20_2.md
+README_RECOVERY_20_2.txt
+MANIFEST_RECOVERY_20_2.txt
