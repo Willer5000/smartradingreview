@@ -13,7 +13,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Iterable
 
-VERSION = "COMMIT21_9Q_ENGINE_V1"
+VERSION = "COMMIT21_9Q_ENGINE_V2_SAFETY_AUTHORITY"
 MODEL = "Q1-Q9_QUALITY_PLUS_Q10_SAFETY"
 
 # These are inherited from the established CPQE research contract. They are not
@@ -22,6 +22,7 @@ MIN_COMPOSITE = 76.0
 MIN_STRUCTURAL_FLOOR = 64.0
 MIN_EXECUTION_Q6_Q7 = 70.0
 MIN_Q9_EVIDENCE = 55.0
+MIN_DEEP_QUALITY_SAFETY_UPGRADE = 76.0
 
 # Q10 = unchanged production safety/economic publication contract.
 Q10_MIN_SAFETY = 75.0
@@ -347,6 +348,29 @@ def evaluate(
             "adds_network_calls": False,
             "changes_q10_safety": False,
         },
+    }
+
+
+def deep_quality_safety_upgrade(levels: Mapping[str, Any], quality: Mapping[str, Any], *, operational_min: float = 65.0, publication_min: float = 75.0) -> Dict[str, Any]:
+    """Calculate an optional upward Safety authority from Q1-Q9.
+
+    The helper never lowers Safety and never bypasses economic hard gates. It is
+    intentionally constrained to candidates already inside the operational
+    Safety band. The publication threshold remains unchanged.
+    """
+    legacy = _f((levels or {}).get("execution_safety"), 0.0)
+    composite = _f((quality or {}).get("composite"), legacy)
+    quality_ready = bool((quality or {}).get("quality_ready"))
+    can_upgrade = legacy >= float(operational_min) and quality_ready and composite >= MIN_DEEP_QUALITY_SAFETY_UPGRADE
+    upgraded = max(legacy, composite) if can_upgrade else legacy
+    return {
+        "legacy_execution_safety": round(legacy, 2),
+        "deep_quality_composite": round(composite, 2),
+        "upgraded_execution_safety": round(upgraded, 2),
+        "upgrade_applied": bool(can_upgrade and upgraded >= float(publication_min)),
+        "operational_min": float(operational_min),
+        "publication_min": float(publication_min),
+        "thresholds_lowered": False,
     }
 
 

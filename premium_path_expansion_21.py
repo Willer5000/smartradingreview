@@ -13,7 +13,7 @@ from typing import Any, Dict, Mapping
 
 import quality_9q_engine_21 as q9
 
-VERSION = "COMMIT21_9Q_QUALITY_PATH_V1"
+VERSION = "COMMIT21_2_Q9_QUALITY_AUTHORITY_V1"
 MAX_ALTERNATIVE_ROUTES = 2
 
 
@@ -278,18 +278,75 @@ def install_quality_gate_contract() -> Dict[str, Any]:
                 q = _evaluate(lv, trend, momentum, volatility, structure, symbol, timeframe, action)
                 q10 = q9.q10_safety_snapshot(out, lv)
                 gate = dict(out.get("futures_publication_gate") or {})
+                legacy_safety = float(q10.get("execution_safety") or 0.0)
+                reasons = [str(x).upper() for x in (gate.get("reason_codes") or [])]
+                deep_upgrade_applied = False
+
+                # COMMIT21.2 — Q1-Q9 becomes a genuine quality authority for the
+                # legacy Safety score, but only inside the already-existing
+                # operational safety band.  This does NOT lower any Q10 hard
+                # threshold and does not rescue RR/loss/ATR violations.
+                #
+                # Why this bridge is necessary:
+                # the old system calculates execution_safety first (65 operational,
+                # 75 Premium) and the original 21.0/21.1 implementation only
+                # recorded Q1-Q9 diagnostically.  Therefore a high deep-quality
+                # thesis could never become the quality score consumed by the
+                # existing publication filter.
+                try:
+                    from futures_system import FUTURES_RISK_CONFIG
+                    operational_min = float((FUTURES_RISK_CONFIG or {}).get("minimum_execution_safety", 65.0) or 65.0)
+                    q10_safety_min = float((FUTURES_RISK_CONFIG or {}).get("minimum_publication_execution_safety", 75.0) or 75.0)
+                except Exception:
+                    operational_min, q10_safety_min = 65.0, 75.0
+
+                if (
+                    not bool(gate.get("eligible"))
+                    and bool(q.get("quality_ready"))
+                    and legacy_safety >= operational_min
+                    and set(reasons).issubset({"SAFETY"})
+                ):
+                    upgraded_safety = max(legacy_safety, float(q.get("composite") or legacy_safety))
+                    if upgraded_safety >= q10_safety_min:
+                        upgraded_levels = dict(out.get("levels") or lv or {})
+                        upgraded_levels["legacy_execution_safety"] = legacy_safety
+                        upgraded_levels["execution_safety"] = round(upgraded_safety, 1)
+                        upgraded_levels["execution_safety_authority"] = "Q1_Q9_DEEP_QUALITY"
+                        upgraded_levels["q1_q9_safety_upgrade"] = True
+                        upgraded_levels.pop("_commit21_quality_context", None)
+                        upgraded = current(self, upgraded_levels, timeframe, symbol=symbol, action=action)
+                        if isinstance(upgraded, dict):
+                            upgraded_gate = dict(upgraded.get("futures_publication_gate") or {})
+                            if upgraded_gate.get("eligible"):
+                                out = upgraded
+                                gate = upgraded_gate
+                                deep_upgrade_applied = True
+                                q10 = q9.q10_safety_snapshot(out, upgraded_levels)
+                                q10["legacy_execution_safety"] = round(legacy_safety, 2)
+                                q10["deep_quality_safety_authority"] = True
+                                q10["upgrade_points"] = round(upgraded_safety - legacy_safety, 2)
+
                 gate["commit21_9q"] = q
                 gate["q10_safety"] = q10
                 gate["quality_model"] = q9.MODEL
+                gate["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
+                gate["legacy_execution_safety"] = round(legacy_safety, 2)
+                gate["final_execution_safety"] = round(float((out.get("levels") or {}).get("execution_safety") or legacy_safety), 2)
+                gate["hard_q10_thresholds_unchanged"] = True
                 out["futures_publication_gate"] = gate
                 out["quality_9q"] = q
                 out["q10_safety"] = q10
-                out["quality_authority"] = "9Q_DEEP_QUALITY_PLUS_Q10_HARD_SAFETY"
-                out["premium_blocker_stage_21"] = "Q10_SAFETY" if not q10.get("hard_gate_eligible") else ("Q1_Q9_QUALITY_DIAGNOSTIC" if not q.get("quality_ready") else "NONE")
+                out["quality_authority"] = "Q1_Q9_DEEP_QUALITY_PLUS_Q10_HARD_SAFETY"
+                out["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
                 if isinstance(out.get("levels"), dict):
                     out["levels"]["quality_9q"] = q
                     out["levels"]["q10_safety"] = q10
+                    out["levels"]["q1_q9_safety_upgrade_applied"] = bool(deep_upgrade_applied)
                     out["levels"].pop("_commit21_quality_context", None)
+                out["premium_blocker_stage_21"] = (
+                    "Q10_SAFETY" if not gate.get("eligible") and not deep_upgrade_applied
+                    else ("Q1_Q9_QUALITY_DIAGNOSTIC" if not q.get("quality_ready") else "NONE")
+                )
                 return out
             wrapped._commit21_9q_gate = True
             cls._apply_futures_publication_gate = wrapped
