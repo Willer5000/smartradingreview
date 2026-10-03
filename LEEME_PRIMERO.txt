@@ -1,0 +1,20 @@
+COMMIT 21.1 FIX — partir del Commit 21 9Q actual
+
+REEMPLAZAR:
+- app.py
+- premium_path_expansion_21.py
+- static/script.js
+- templates/index.html
+
+NO TOCAR:
+- Procfile
+- render.yaml
+- premium_path_expansion_20.py
+- commit20_2_main_entrypoint.py
+- static/futures.js
+
+Motivo principal: /api/futures/analyze devolvía 500 por numpy.bool_ dentro del caché UI no sanitizado.
+Motivo adicional de calidad: Q1-Q9 podía seleccionar una geometría ya incompatible con Q10 cuando había otra compatible.
+
+Q1-Q9 sigue siendo calidad profunda.
+Q10 sigue siendo el contrato duro de Safety/publicación.

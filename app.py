@@ -37531,7 +37531,7 @@ def api_futures_analyze():
         symbol = str(data.get('symbol') or 'BTC-USDT').strip()
         timeframe = str(data.get('timeframe') or '1h').strip()
 
-        cached_ui = _get_futures_ui_cached(symbol, timeframe)
+        cached_ui = _json_safe_transport(_get_futures_ui_cached(symbol, timeframe))
         if cached_ui is not None:
             analysis_status = _classify_futures_analysis_result(
                 symbol=symbol,
@@ -37550,7 +37550,7 @@ def api_futures_analyze():
 
         # Si el incremental ya tiene una decisión compacta, entregarla YA para
         # que el usuario vea dirección/Entry/SL/TP mientras se preparan gráficos.
-        partial_data = _get_futures_runtime_cached(symbol, timeframe)
+        partial_data = _json_safe_transport(_get_futures_runtime_cached(symbol, timeframe))
 
         # RC7 anti-storm: a failed async job gets a short quiet period. Browser
         # polls still receive 202/partial data, but cannot relaunch a heavy job
@@ -38441,6 +38441,57 @@ def _hotfix16_1_navigation_priority():
         pass
 
 
+def _json_safe_transport(value):
+    """Commit 21.1: sanitize UI transport payloads before Flask jsonify.
+
+    The technical engine already has a recursive NumPy/pandas serializer on
+    TradingExpertSystem._make_serializable(). The interactive UI cache was
+    bypassing that helper and could retain numpy.bool_ values inside nested
+    levels/diagnostics. Flask then failed at the final jsonify step with:
+    "Object of type bool_ is not JSON serializable".
+
+    This function is transport-only: it does not alter trading decisions,
+    Entry/SL/TP, Safety, publication, or learning data.
+    """
+    if value is None:
+        return None
+    try:
+        serializer = getattr(globals().get('expert_system'), '_make_serializable', None)
+        if callable(serializer):
+            return serializer(value)
+    except Exception:
+        pass
+
+    # Conservative fallback for transient/cache objects before expert_system is
+    # available. Keep this branch dependency-light.
+    try:
+        import numpy as _np
+        if isinstance(value, (_np.integer, _np.floating, _np.bool_)):
+            return value.item()
+        if isinstance(value, _np.ndarray):
+            return value.tolist()
+    except Exception:
+        pass
+
+    if isinstance(value, dict):
+        return {str(k): _json_safe_transport(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_transport(v) for v in value]
+    if isinstance(value, (datetime,)):
+        return value.isoformat()
+
+    # pandas Timestamp is handled when available, without forcing pandas import
+    # on the hot path.
+    try:
+        import pandas as _pd
+        if isinstance(value, _pd.Timestamp):
+            return value.isoformat()
+    except Exception:
+        pass
+
+    return value
+
+
 def _get_futures_ui_cached(symbol, timeframe):
     key = _futures_ui_key(symbol, timeframe)
     now = time.time()
@@ -38458,7 +38509,7 @@ def _get_futures_ui_cached(symbol, timeframe):
         if age > ttl:
             _FUTURES_UI_CACHE['items'].pop(key, None)
             return None
-        return item.get('data')
+        return _json_safe_transport(item.get('data'))
 
 
 
@@ -38500,12 +38551,15 @@ def _get_futures_runtime_cached(symbol, timeframe):
 
 def _store_futures_ui_cached(symbol, timeframe, payload):
     key = _futures_ui_key(symbol, timeframe)
+    # Store a JSON-safe copy so later browser reads cannot fail in Flask's
+    # response serializer even when the analysis engine returned numpy scalars.
+    safe_payload = _json_safe_transport(payload)
     with _FUTURES_UI_CACHE['lock']:
         items = _FUTURES_UI_CACHE['items']
         items[key] = {
             'ts': time.time(),
             'timeframe': str(timeframe or ''),
-            'data': payload,
+            'data': safe_payload,
         }
         if len(items) > _FUTURES_UI_CACHE_MAX_ITEMS:
             ordered = sorted(

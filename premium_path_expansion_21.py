@@ -47,6 +47,55 @@ def _evaluate(levels: Mapping[str, Any], trend: Mapping[str, Any], momentum: Map
     return q9.evaluate(levels, trend, momentum, volatility, structure, timeframe, symbol, action)
 
 
+def _q10_hard_violation_codes(levels: Mapping[str, Any], timeframe: str = "") -> list[str]:
+    """Pre-publication hard-contract screen used only to rank route candidates.
+
+    This mirrors the already-existing Futures publication limits so Q1-Q9 never
+    selects an alternative that is known in advance to fail Q10 while another
+    generated route is economically/publication-valid. The final native gate
+    remains authoritative and is still executed downstream.
+    """
+    l = dict(levels or {})
+    risk_control = dict(l.get("risk_control") or {})
+
+    def f(value, default=0.0):
+        try:
+            x = float(value if value is not None else default)
+            return x if x == x else float(default)
+        except Exception:
+            return float(default)
+
+    try:
+        import futures_system
+        cfg = getattr(futures_system, "FUTURES_RISK_CONFIG", {}) or {}
+    except Exception:
+        cfg = {}
+
+    safety_min = f(cfg.get("minimum_publication_execution_safety"), 75.0)
+    tp_min = f(cfg.get("minimum_publication_tp_quality"), 55.0)
+    sl_min = f(cfg.get("minimum_publication_sl_avoidance_quality"), 60.0)
+    rr_min = max(1.0, f(l.get("minimum_viable_rr"), f(cfg.get("minimum_publication_rr"), 1.8)))
+    rr_max = max(rr_min, f(l.get("maximum_technical_rr"), f(cfg.get("maximum_publication_rr"), 3.5)))
+    sl = f(l.get("sl_reliability"), 0.0)
+    sl_quality = sl * 100.0 if sl <= 1.0 else sl
+    rr = f(l.get("risk_reward"), 0.0)
+    safety = f(l.get("execution_safety"), 0.0)
+    tp = f(l.get("tp_quality_score"), 0.0)
+    planned_sl = f(risk_control.get("estimated_sl_loss_pct_margin"), abs(f(l.get("roi_sl"), 0.0)))
+    atr_stress = f(risk_control.get("estimated_atr_stress_loss_pct_margin"), 0.0)
+    loss_max = f(cfg.get("maximum_publication_loss_pct_margin"), 8.0)
+    atr_max = f(cfg.get("maximum_publication_atr_stress_loss_pct_margin"), 25.0)
+
+    codes = []
+    if safety < safety_min: codes.append("SAFETY")
+    if tp < tp_min: codes.append("TP_QUALITY")
+    if sl_quality < sl_min: codes.append("SL_QUALITY")
+    if not (rr_min <= rr <= rr_max): codes.append("RR")
+    if planned_sl > loss_max: codes.append("LOSS_AT_SL")
+    if not (0 < atr_stress <= atr_max): codes.append("ATR_STRESS")
+    return codes
+
+
 def _route_geometry_score(levels: Mapping[str, Any]) -> float:
     try:
         from premium_path_expansion_20 import _geometry_score
@@ -164,13 +213,29 @@ def install_quality_geometry_router() -> Dict[str, Any]:
                 except Exception as exc:
                     meta.append({"route": route, "error": type(exc).__name__})
 
+            q10_viable = []
             for row in candidates:
                 row["q9_route_score"] = q9.route_score(row["quality"], row["geometry_score"])
+                row["q10_hard_violation_codes"] = _q10_hard_violation_codes(row["levels"], timeframe)
+                row["q10_preeligible"] = not row["q10_hard_violation_codes"]
+                if row["q10_preeligible"]:
+                    q10_viable.append(row)
 
-            # Quality first, geometry second. Route selection cannot change the
-            # already chosen direction or invent a new Entry/SL/TP source.
-            candidates.sort(key=lambda row: (-row["q9_route_score"], -row["geometry_score"], 0 if row["route"] == setup else 1))
-            selected = candidates[0]
+            # Q1-Q9 chooses quality ONLY among route geometries that do not
+            # already violate the existing Q10 hard contract. If every generated
+            # route fails Q10, keep the best Q1-Q9 route for diagnostics and let
+            # the native publication gate reject it downstream. This prevents a
+            # high 9Q score on an invalid RR/Safety package from replacing a
+            # publishable baseline candidate.
+            ranking_pool = q10_viable or candidates
+            ranking_pool.sort(key=lambda row: (-row["q9_route_score"], -row["geometry_score"], 0 if row["route"] == setup else 1))
+            selected = ranking_pool[0]
+            for item in meta:
+                route = item.get("route")
+                match = next((c for c in candidates if c.get("route") == route), None)
+                if match:
+                    item["q10_preeligible"] = bool(match.get("q10_preeligible"))
+                    item["q10_hard_violation_codes"] = list(match.get("q10_hard_violation_codes") or [])
             out = _context_levels(selected["levels"], trend, momentum, volatility, structure, symbol, timeframe, decision)
             out["commit21_9q_version"] = VERSION
             out["commit21_9q_route_selection"] = len(candidates) > 1
