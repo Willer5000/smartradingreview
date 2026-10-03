@@ -21934,8 +21934,11 @@ class TradingExpertSystem:
             if str(accion_consenso or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
                 try:
                     from operational_intelligence import execution_setup_guard
+                    _promoted_family = str((levels or {}).get('strategy_route_family') or '').strip()
                     _setup_family_for_guard = (
-                        (contingency_playbook or {}).get('setup_family')
+                        _promoted_family
+                        if (levels or {}).get('premium_route_promoted') and _promoted_family
+                        else (contingency_playbook or {}).get('setup_family')
                         or ((operational_intelligence or {}).get('default_strategy') or {}).get('family')
                     )
                     operational_execution = execution_setup_guard(
@@ -30111,11 +30114,24 @@ def analytics_page():
 @app.route('/health')
 def health():
     """Health check para Render + telemetría de memoria no sensible."""
+    overlay = globals().get('_COMMIT20_2_AUTOINSTALL') or {}
+    try:
+        import cpqe_19_2_4 as _cpqe_mod
+        cpqe_version = getattr(_cpqe_mod, 'VERSION', 'UNKNOWN')
+    except Exception:
+        cpqe_version = 'UNAVAILABLE'
     return jsonify({
         'status': 'ok',
         'timestamp': datetime.now(bolivia_tz).isoformat(),
         'system': 'Crypto Trader Analyst Pro',
-        'version': '2.0',
+        'version': '21.2',
+        'route_engine_version': str(overlay.get('version') or ''),
+        'cpqe_version': cpqe_version,
+        'memory_policy': {
+            'job_start_limit_mb': float(globals().get('_MEMORY_JOB_START_LIMIT_MB', 0) or 0),
+            'soft_limit_mb': float(globals().get('_MEMORY_SOFT_LIMIT_MB', 0) or 0),
+            'hard_limit_mb': float(globals().get('_MEMORY_HARD_LIMIT_MB', 0) or 0),
+        },
         'memory': _memory_runtime_state()
     })
 
@@ -31186,10 +31202,9 @@ if _LOW_MEMORY_MODE:
     # 250/340/240 thresholds reacted too late to sudden analysis spikes.
     _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 235.0)
     _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 300.0)
-    # Commit 21.1: the previous 200 MB clamp rejected jobs while the process
-    # still had substantial cgroup headroom (observed RSS ~220-223 MB). Keep a
-    # conservative 225 MB start budget and let the single heavy-lock + 300 MB
-    # hard guard decide under real RSS pressure.
+    # Commit 21.2: keep a 225 MB start budget with a single heavy-lock +
+    # 300 MB hard guard. Route Engine 21.2 has its own post-shed <=222 MB
+    # alternative budget and will skip alternatives rather than risk the cgroup.
     _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 225.0)
     _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
@@ -59435,7 +59450,7 @@ print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flu
 
 
 # ============================================================================
-# COMMIT 21.1 — GUARDED AUTO-INSTALL
+# COMMIT 21.2 — GUARDED AUTO-INSTALL
 # The retained module name premium_path_expansion_20 is used for backward compatibility.
 # ============================================================================
 # Render dashboards sometimes override Procfile/render.yaml with `gunicorn app:app`.
@@ -59444,13 +59459,13 @@ _COMMIT20_2_AUTOINSTALL = {}
 try:
     from premium_path_expansion_20 import install as _install_commit20_2
     _COMMIT20_2_AUTOINSTALL = _install_commit20_2(app) or {}
-    print(f"✅ [COMMIT21.1] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
+    print(f"✅ [COMMIT21.2] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
 except Exception as _commit20_2_exc:
     _COMMIT20_2_AUTOINSTALL = {
-        'version': 'COMMIT21_1_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1',
+        'version': 'COMMIT21_2_PREMIUM_STRATEGY_ROUTE_ENGINE_FIX_V1',
         'error': f'{type(_commit20_2_exc).__name__}: {str(_commit20_2_exc)[:240]}',
     }
-    print(f"⚠️ [COMMIT21.1] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
+    print(f"⚠️ [COMMIT21.2] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

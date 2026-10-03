@@ -1925,6 +1925,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         : '1D'
                 );
             if (window.IS_MULTI_ASSET_PAGE === true) window.commit18MultiIdentityReset?.(currentSymbol, currentInterval);
+            if ((window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) && typeof window.loadLightVisualsForSignal === 'function') {
+                window.loadLightVisualsForSignal(currentSymbol, currentInterval).catch(() => null);
+            }
             runCompleteAnalysis();
         });
     }
@@ -1934,6 +1937,9 @@ document.addEventListener('DOMContentLoaded', function() {
             currentInterval = this.value;
             currentSymbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
             if (window.IS_MULTI_ASSET_PAGE === true) window.commit18MultiIdentityReset?.(currentSymbol, currentInterval);
+            if ((window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) && typeof window.loadLightVisualsForSignal === 'function') {
+                window.loadLightVisualsForSignal(currentSymbol, currentInterval).catch(() => null);
+            }
             runCompleteAnalysis();
         });
     }
@@ -10629,7 +10635,7 @@ window.updateActiveSignals = function updateActiveSignals() {
 window.loadLightVisualsForSignal = async function(symbol, timeframe) {
     const market = window.IS_MULTI_ASSET_PAGE ? 'multiasset' : (window.IS_FUTURES_PAGE ? 'futures' : 'spot');
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+    const timeoutId = window.setTimeout(() => controller.abort(), 5000);
     try {
         const params = new URLSearchParams({
             symbol: String(symbol || '').toUpperCase(),
@@ -10693,16 +10699,17 @@ window.changeToSignal = function(symbol, timeframe) {
         window.resetLiveVisualContext(symbol, timeframe);
     }
     
-    // COMMIT 21.1: mostrar gráficos primero, análisis pesado después.
-    // El análisis sigue ejecutándose una sola vez; esto no crea una segunda
-    // señal ni modifica el pipeline de publicación.
-    window.loadLightVisualsForSignal?.(symbol, timeframe).finally(() => {
-        window.setTimeout(() => {
-            if (typeof window.runCompleteAnalysis === 'function') {
-                window.runCompleteAnalysis();
-            }
-        }, 50);
-    });
+    // COMMIT 21.2: visuales y análisis pesado son rutas independientes.
+    // Un timeout/latencia de OHLCV nunca vuelve a bloquear el análisis ni el
+    // panel de gráficos. La visualización es best-effort y no tiene autoridad
+    // de trading.
+    Promise.resolve(window.loadLightVisualsForSignal?.(symbol, timeframe))
+        .catch(() => null);
+    window.setTimeout(() => {
+        if (typeof window.runCompleteAnalysis === 'function') {
+            window.runCompleteAnalysis();
+        }
+    }, 0);
     
     // Hacer scroll al gráfico principal
     const chartElement = document.getElementById('candle-chart');

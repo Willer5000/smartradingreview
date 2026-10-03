@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit21_1_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn commit21_2_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -49,6 +49,10 @@ services:
         value: "1"
       - key: PPE_MAX_ALTERNATIVE_ROUTES
         value: "2"
+      - key: PPE_ROUTE_RSS_SOFT_MB
+        value: "215"
+      - key: PPE_ROUTE_RSS_HARD_MB
+        value: "235"
       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
         value: "12"
       # Commit 19.2 — Greeks/options provider guard (budget unchanged). The chart is
@@ -86,6 +90,8 @@ services:
         value: "12"
       - key: MULTIASSET_AI_AUTOMATIC_ENABLED
         value: "0"
+      - key: MACRO_HTTP_TIMEOUT
+        value: "3"
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
         value: "30"
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS

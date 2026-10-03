@@ -3091,8 +3091,21 @@ document.addEventListener('DOMContentLoaded', function() {
     const _fut96SymbolSelect = document.getElementById('symbol-select');
     _fut96SymbolSelect?.addEventListener('change', (event) => {
         _fut96ApplyTimeframes(event.target.value);
+        window.setTimeout(() => {
+            const tf = document.getElementById('interval-select')?.value || '1h';
+            window.loadLightVisualsForSignal?.(event.target.value, tf)?.catch?.(() => null);
+        }, 100);
     }, true);
     setTimeout(() => window.loadFuturesUniverse96(), 150);
+    // Commit 21.2: always prime the chart/indicator lane without waiting for
+    // the heavy 9-trader analysis. Exactly one light request at page boot.
+    setTimeout(() => {
+        if (!document.hidden && window.IS_FUTURES_PAGE && typeof window.loadLightVisualsForSignal === 'function') {
+            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            const timeframe = document.getElementById('interval-select')?.value || '1h';
+            window.loadLightVisualsForSignal(symbol, timeframe).catch(() => null);
+        }
+    }, 350);
     // RC9.8.1 — Activas intrabar: el polling debe ser menor que el TTL más
     // corto del preview para evitar huecos falsos de 0 entre refrescos.
     setInterval(() => {
@@ -3243,6 +3256,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // Refrescar contexto cuando cambia temporalidad O símbolo.
     const refreshFuturesContext = () => {
         setTimeout(() => {
+            const symbol = document.getElementById('symbol-select')?.value || 'BTC-USDT';
+            const timeframe = document.getElementById('interval-select')?.value || '1h';
+            if (typeof window.loadLightVisualsForSignal === 'function') {
+                window.loadLightVisualsForSignal(symbol, timeframe).catch(() => null);
+            }
             if (typeof window.updateCorrelationInfo === 'function') {
                 window.updateCorrelationInfo({});
             }

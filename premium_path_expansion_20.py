@@ -27,12 +27,13 @@ import os
 from functools import wraps
 from typing import Any, Dict, List, Mapping, Optional
 
-VERSION = "COMMIT21_1_PREMIUM_STRATEGY_ROUTE_ENGINE_FIX_V1"
+VERSION = "COMMIT21_2_PREMIUM_STRATEGY_ROUTE_ENGINE_FIX_V1"
 MAX_ALTERNATIVE_ROUTES = 2
 MAX_FALLBACK_ALTERNATIVE_ROUTES = 1
 ALT_BANK_MIN_QUALITY = 55.0
-ROUTE_RSS_SOFT_MB = 190.0
-ROUTE_RSS_HARD_MB = 220.0
+ROUTE_RSS_SOFT_MB = 215.0
+ROUTE_RSS_HARD_MB = 235.0
+ROUTE_MAX_RSS_AFTER_SHED_MB = 222.0
 ROUTE_MIN_SAFETY_TO_SEARCH = 68.0
 
 # Existing immutable publication contract.
@@ -321,6 +322,69 @@ def _funnel(result: Mapping[str, Any], levels: Mapping[str, Any], attempts: List
     }
 
 
+
+# ---------------------------------------------------------------------------
+# Commit 21.2 — FULL CONTEXT CPQE REVALIDATION
+# The original CPQE wrapper receives ``levels`` at publication time, but the
+# full trend/momentum/structure dictionaries live in calculate_entry_levels' 
+# call arguments.  Without restoring that context, CPQE saw neutral/default
+# structure and could reject otherwise eligible candidates.  This helper only
+# re-runs the SAME publication gate with the SAME hard thresholds and the exact
+# causal context already computed by the engine.  It never changes Entry/SL/TP.
+# ---------------------------------------------------------------------------
+def _revalidate_with_full_context(
+    self,
+    result: Mapping[str, Any],
+    *,
+    trend: Mapping[str, Any],
+    momentum: Mapping[str, Any],
+    volatility: Mapping[str, Any],
+    structure: Mapping[str, Any],
+    timeframe: str,
+    symbol: str,
+    decision: str,
+) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return result
+    gate_fn = getattr(self, "_apply_futures_publication_gate", None)
+    if not callable(gate_fn):
+        return result
+    levels = dict(result.get("levels") or {})
+    levels["_cpqe_context"] = {
+        "trend": dict(trend or {}),
+        "momentum": dict(momentum or {}),
+        "volatility": dict(volatility or {}),
+        "structure": dict(structure or {}),
+        "symbol": symbol,
+        "action": decision,
+        "timeframe": timeframe,
+    }
+    try:
+        refreshed = gate_fn(self, levels, timeframe, symbol=symbol, action=decision)
+        out = dict(refreshed or result)
+    except Exception as exc:
+        out = dict(result)
+        out.setdefault("premium_route_engine_21", {})["cpqe_revalidation_error"] = type(exc).__name__
+    # The full context is too large and may contain DataFrames. Keep only the
+    # compact CPQE result and remove the hidden transport payload immediately.
+    out_levels = dict(out.get("levels") or {})
+    out_levels.pop("_cpqe_context", None)
+    out["levels"] = out_levels
+    return out
+
+
+def _compact_route_context(structure: Mapping[str, Any], route: Mapping[str, Any]) -> Dict[str, Any]:
+    ctx = dict((structure or {}).get("_commit21_route_context") or {})
+    return {
+        "source": "DEFAULT_STRATEGY_BANK",
+        "family": str(route.get("family") or ""),
+        "strategy_id": str(route.get("strategy_id") or ""),
+        "bank_quality": route.get("quality"),
+        "regime_match": route.get("regime_match"),
+        "volatility_match": route.get("volatility_match"),
+        "research_state": ctx.get("research_state"),
+    }
+
 # ---------------------------------------------------------------------------
 # Strategy route engine
 # ---------------------------------------------------------------------------
@@ -351,6 +415,15 @@ def install_strategy_route_engine() -> Dict[str, Any]:
             if not isinstance(base, dict):
                 return base
 
+            # Commit 21.2: re-run the SAME publication gate with the full causal
+            # context. This fixes a data-plumbing hole in CPQE without changing
+            # any threshold or trade geometry.
+            base = _revalidate_with_full_context(
+                self, base, trend=trend, momentum=momentum, volatility=volatility,
+                structure=base_structure, timeframe=timeframe,
+                symbol=symbol, decision=decision,
+            )
+
             # Premium baseline is already sufficient: never spend CPU searching
             # for another route after a valid Premium result exists.
             if _premium_gate(base):
@@ -364,13 +437,26 @@ def install_strategy_route_engine() -> Dict[str, Any]:
                 return {**base, "levels": lv, "premium_route_engine_21": lv["premium_route_engine_21"]}
 
             rss = _rss_mb()
-            if rss is not None and rss >= ROUTE_RSS_HARD_MB:
+            if rss is not None and rss >= ROUTE_RSS_SOFT_MB:
+                # Reclaim only recreatable caches before attempting an alternate.
+                # Never add threads, never fetch new market data here.
+                try:
+                    import app as _app_for_shed
+                    shed = getattr(_app_for_shed, "_shed_recreatable_memory", None)
+                    if callable(shed):
+                        shed(reason="commit21.2:route-preflight", aggressive=False)
+                except Exception:
+                    pass
+                rss = _rss_mb()
+
+            if rss is not None and rss > ROUTE_MAX_RSS_AFTER_SHED_MB:
                 lv = dict(base.get("levels") or {})
                 lv["premium_route_engine_21"] = {
                     **_funnel(base, lv, [], None),
                     "stage": "MEMORY_BUDGET",
                     "memory_rss_mb": round(rss, 1),
                     "attempt_count": 0,
+                    "route_search_skipped_reason": "RSS_AFTER_SHED_ABOVE_SAFE_ALTERNATIVE_BUDGET",
                 }
                 return {**base, "levels": lv, "premium_route_engine_21": lv["premium_route_engine_21"]}
 
@@ -426,6 +512,12 @@ def install_strategy_route_engine() -> Dict[str, Any]:
                         timeframe,
                         liquidation,
                     )
+                    if isinstance(candidate, dict):
+                        candidate = _revalidate_with_full_context(
+                            self, candidate, trend=trend, momentum=momentum,
+                            volatility=volatility, structure=route_structure,
+                            timeframe=timeframe, symbol=symbol, decision=decision,
+                        )
                 except Exception as exc:
                     attempts.append({
                         "family": route.get("family"),
@@ -450,6 +542,9 @@ def install_strategy_route_engine() -> Dict[str, Any]:
                     lv["strategy_route_family"] = str(route.get("family") or "")
                     lv["strategy_route_id"] = str(route.get("strategy_id") or "")
                     lv["strategy_route_authority"] = "DEFAULT_STRATEGY_BANK_EXACT_CELL"
+                    lv["premium_route_source_version"] = VERSION
+                    gate = dict(candidate.get("futures_publication_gate") or {})
+                    lv["premium_blocker_codes"] = [str(x) for x in (gate.get("reason_codes") or [])]
                     candidate["levels"] = lv
                     candidate["premium_route_engine_21"] = funnel
                     candidate["premium_route_promoted"] = True
@@ -475,7 +570,7 @@ def install_strategy_route_engine() -> Dict[str, Any]:
 
         wrapped._commit21_route_engine = True
         cls.calculate_entry_levels = wrapped
-        return {"installed": True, "already": False, "max_alternatives": MAX_ALTERNATIVE_ROUTES}
+        return {"installed": True, "already": False, "max_alternatives": MAX_ALTERNATIVE_ROUTES, "version": VERSION}
     except Exception as exc:
         return {"installed": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
 

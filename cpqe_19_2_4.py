@@ -18,7 +18,7 @@ import os
 from functools import wraps
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "COMMIT19_2_4_CPQE_LIVE_QUALITY_V1"
+VERSION = "COMMIT19_2_4_CPQE_LIVE_QUALITY_V2_CONTEXT_COMPLETE"
 
 HARD_OPERATIONAL_SAFETY = 65.0
 CPQE_MIN_COMPOSITE = float(os.getenv("CPQE_MIN_COMPOSITE", "76.0"))
@@ -307,6 +307,7 @@ def evaluate(levels: Mapping[str, Any], trend: Mapping[str, Any], momentum: Mapp
 def _decorate_gate(result: Dict[str, Any], cpqe: Mapping[str, Any], legacy: Mapping[str, Any]) -> Dict[str, Any]:
     out = dict(result or {})
     levels = dict(out.get("levels") or {})
+    levels.pop("_cpqe_context", None)
     gate = dict(out.get("futures_publication_gate") or {})
     levels["cpqe_19_2_4"] = dict(cpqe)
     levels["legacy_execution_safety"] = legacy.get("execution_safety")
@@ -327,10 +328,16 @@ def _patch_futures_class(cls: Any) -> bool:
         out = original_gate(self, levels, timeframe, symbol=symbol, action=action)
         legacy_levels = dict(out.get("levels") or {})
         legacy_safety = _f(legacy_levels.get("execution_safety"))
-        trend = legacy_levels.get("trend") if isinstance(legacy_levels.get("trend"), dict) else {}
-        momentum = legacy_levels.get("momentum") if isinstance(legacy_levels.get("momentum"), dict) else {}
-        structure = legacy_levels.get("structure") if isinstance(legacy_levels.get("structure"), dict) else {}
+        ctx = legacy_levels.get("_cpqe_context") if isinstance(legacy_levels.get("_cpqe_context"), dict) else {}
+        trend = dict(ctx.get("trend") or {})
+        momentum = dict(ctx.get("momentum") or {})
+        structure = dict(ctx.get("structure") or {})
+        symbol = str(ctx.get("symbol") or symbol or legacy_levels.get("symbol") or "")
+        action = str(ctx.get("action") or action or legacy_levels.get("action") or "")
         # Common aliases used by older payloads.
+        trend = trend or (legacy_levels.get("trend") if isinstance(legacy_levels.get("trend"), dict) else {})
+        momentum = momentum or (legacy_levels.get("momentum") if isinstance(legacy_levels.get("momentum"), dict) else {})
+        structure = structure or (legacy_levels.get("structure") if isinstance(legacy_levels.get("structure"), dict) else {})
         trend = trend or (out.get("trend") if isinstance(out.get("trend"), dict) else {})
         momentum = momentum or (out.get("momentum") if isinstance(out.get("momentum"), dict) else {})
         structure = structure or (out.get("structure") if isinstance(out.get("structure"), dict) else {})
@@ -408,9 +415,13 @@ def _patch_safety_class(cls: Any) -> bool:
         out = original(self, levels, trend, momentum, structure, timeframe)
         result = dict(out or {})
         legacy = _f(result.get("execution_safety"))
-        symbol = str((levels or {}).get("symbol") or "")
-        action = str((levels or {}).get("action") or "")
-        cpqe = evaluate(levels or {}, trend or {}, momentum or {}, structure or {}, timeframe, symbol, action)
+        ctx = (levels or {}).get("_cpqe_context") if isinstance((levels or {}).get("_cpqe_context"), dict) else {}
+        symbol = str(ctx.get("symbol") or (levels or {}).get("symbol") or "")
+        action = str(ctx.get("action") or (levels or {}).get("action") or "")
+        cpqe_trend = dict(ctx.get("trend") or trend or {})
+        cpqe_momentum = dict(ctx.get("momentum") or momentum or {})
+        cpqe_structure = dict(ctx.get("structure") or structure or {})
+        cpqe = evaluate(levels or {}, cpqe_trend, cpqe_momentum, cpqe_structure, timeframe, symbol, action)
         result["legacy_execution_safety"] = legacy
         result["cpqe_19_2_4"] = cpqe
         if legacy >= HARD_OPERATIONAL_SAFETY and cpqe.get("qualifying"):

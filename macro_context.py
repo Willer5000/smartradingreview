@@ -47,7 +47,7 @@ MACRO_NEWS_CACHE_SECONDS = max(300, min(3600, int(os.getenv("MACRO_NEWS_CACHE_SE
 MACRO_CALENDAR_CACHE_SECONDS = max(1800, min(43200, int(os.getenv("MACRO_CALENDAR_CACHE_SECONDS", "21600"))))
 MACRO_NEWS_MAX_ARTICLES = max(5, min(24, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "12"))))
 MACRO_HEADLINE_MAX_AGE_HOURS = max(6, min(48, int(os.getenv("MACRO_HEADLINE_MAX_AGE_HOURS", "24"))))
-MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "7"))))
+MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "3"))))
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 BLS_ICS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
