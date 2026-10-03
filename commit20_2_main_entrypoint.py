@@ -1,4 +1,4 @@
-"""Commit 20.2 — Premium Path Expansion + Runtime/Save Chart Fix."""
+"""Commit 20.2.1 — Stability Fix, built from known-good Commit 20.2."""
 from __future__ import annotations
 
 from commit19_1_runtime import install_pre_app, install_post_app
@@ -33,3 +33,5 @@ COMMIT20_RUNTIME = {
     "legacy_post": _POST,
     "ppe": _PPE,
 }
+
+# COMMIT20.2.1-STABILITY: intentionally retains the Commit 20.2 pre/post boot chain.

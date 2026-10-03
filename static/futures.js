@@ -1388,12 +1388,9 @@ window.updatePreviousSignals = async function() {
     ) {
 
         console.warn(
-            '⚠️ PREVIOUS: petición anterior marcada como activa.'
+            '⏳ PREVIOUS: petición anterior sigue en vuelo; se reutiliza el estado actual.'
         );
-
-        // Evitar bloqueo permanente.
-        window._futuresSignalsState
-            .previousLoading = false;
+        return;
     }
 
     window._futuresSignalsState
@@ -5772,4 +5769,72 @@ if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
     } else {
         bind();
     }
+})();
+
+
+// ============================================================================
+// COMMIT 20.2.1 — REQUEST GOVERNOR / SINGLE-FLIGHT
+// ============================================================================
+// Basado EXCLUSIVAMENTE en Commit 20.2. No altera análisis, señales, Safety,
+// Entry/SL/TP, CPQE ni PPE. Su única función es impedir que el navegador lance
+// la misma lectura lenta repetidamente y compita con el único heavy slot.
+// ============================================================================
+(function installCommit2021RequestGovernor() {
+    'use strict';
+    if (window.__COMMIT2021_REQUEST_GOVERNOR__) return;
+    window.__COMMIT2021_REQUEST_GOVERNOR__ = true;
+
+    const state = window.__COMMIT2021_REQUEST_STATE__ = {
+        active: {inFlight: null, lastStart: 0},
+        previous: {inFlight: null, lastStart: 0},
+        opportunities: {inFlight: null, lastStart: 0},
+        risk: {inFlight: null, lastStart: 0},
+    };
+
+    function guard(name, original, minGapMs) {
+        if (typeof original !== 'function') return original;
+        const slot = state[name];
+        const wrapped = function (...args) {
+            const now = Date.now();
+            if (slot.inFlight) {
+                console.debug(`[20.2.1] ${name}: single-flight, petición reutilizada.`);
+                return slot.inFlight;
+            }
+            if (slot.lastStart > 0 && now - slot.lastStart < minGapMs) {
+                console.debug(`[20.2.1] ${name}: cooldown ${Math.ceil((minGapMs - (now - slot.lastStart))/1000)}s.`);
+                return Promise.resolve(false);
+            }
+            slot.lastStart = now;
+            let result;
+            try {
+                result = original.apply(this, args);
+            } catch (error) {
+                slot.lastStart = Date.now();
+                throw error;
+            }
+            // All targeted functions are async in Commit 20.2; Promise.resolve
+            // also keeps compatibility if one ever returns a plain value.
+            slot.inFlight = Promise.resolve(result).finally(() => {
+                slot.inFlight = null;
+            });
+            return slot.inFlight;
+        };
+        wrapped.__commit2021Wrapped = true;
+        return wrapped;
+    }
+
+    if (typeof window.updateActiveSignals === 'function' && !window.updateActiveSignals.__commit2021Wrapped) {
+        window.updateActiveSignals = guard('active', window.updateActiveSignals, 15000);
+    }
+    if (typeof window.updatePreviousSignals === 'function' && !window.updatePreviousSignals.__commit2021Wrapped) {
+        window.updatePreviousSignals = guard('previous', window.updatePreviousSignals, 30000);
+    }
+    if (typeof window.loadFuturesOpportunities96 === 'function' && !window.loadFuturesOpportunities96.__commit2021Wrapped) {
+        window.loadFuturesOpportunities96 = guard('opportunities', window.loadFuturesOpportunities96, 12000);
+    }
+    if (typeof window.loadFuturesRiskProfile === 'function' && !window.loadFuturesRiskProfile.__commit2021Wrapped) {
+        window.loadFuturesRiskProfile = guard('risk', window.loadFuturesRiskProfile, 120000);
+    }
+
+    console.log('✅ [COMMIT20.2.1] Request Governor activo: single-flight + cooldowns; análisis pesado independiente.');
 })();

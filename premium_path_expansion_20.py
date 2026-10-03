@@ -23,7 +23,7 @@ import math
 from functools import wraps
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-VERSION = "COMMIT20_2_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1"
+VERSION = "COMMIT20_2_1_STABILITY_FIX_V1"
 MAX_ALTERNATIVE_ROUTES = 2
 
 # Existing hard publication contract. PPE never changes these values.
@@ -684,6 +684,8 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
                 "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
                 "no_new_network_calls": True,
                 "no_new_threads": True,
+                "stability_layer": "COMMIT20.2.1_REQUEST_GOVERNOR",
+                "strategy_route_engine_21x": False,
             }
             try:
                 import cpqe_19_2_4

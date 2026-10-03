@@ -12750,3 +12750,5 @@ window.prioritizeSpotSignalLanes = function prioritizeSpotSignalLanes() {
         };
     }
 })();
+
+// COMMIT20.2.1-STABILITY-FIX: 20.2 baseline frontend. No visuals-first dependency.

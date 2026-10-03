@@ -1,3 +1,4 @@
+# COMMIT20.2.1-STABILITY — baseline boot chain retained from Commit 20.2.
 services:
   - type: web
     name: crypto-trader-analyst

@@ -44067,6 +44067,11 @@ def _memory_cleanup_after_analytics(response):
     # for navigation/filtering without cloning its large template.
     try:
         if request.path in {'/', '/futures', '/multiasset', '/analytics'} and response.status_code == 200:
+            # COMMIT20.2.1: never let an older 21.x HTML document keep stale JS
+            # query versions. This applies only to HTML shell routes.
+            response.headers['Cache-Control'] = 'no-store, no-cache, max-age=0, must-revalidate'
+            response.headers['Pragma'] = 'no-cache'
+            response.headers['Expires'] = '0'
             ctype = str(response.headers.get('Content-Type') or '').lower()
             if 'text/html' in ctype:
                 html = response.get_data(as_text=True)
