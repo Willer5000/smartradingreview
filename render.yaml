@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit19_2_3_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn commit20_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -43,6 +43,12 @@ services:
         value: "1"
       - key: FREE_PLAN_LOCKDOWN
         value: "1"
+      # Commit 20 — Premium Path Expansion. Bounded to two alternate routes;
+      # no extra workers, polling or market-data requests.
+      - key: PPE_ENABLED
+        value: "1"
+      - key: PPE_MAX_ALTERNATIVE_ROUTES
+        value: "2"
       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
         value: "12"
       # Commit 19.2 — Greeks/options provider guard (budget unchanged). The chart is

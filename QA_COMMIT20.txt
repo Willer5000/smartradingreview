@@ -1,0 +1,17 @@
+COMMIT 20 — QA STATIC ACCEPTANCE
+
+[PASS TARGET]
+- premium_path_expansion_20.py compiles
+- commit20_main_entrypoint.py compiles
+- static/futures.js passes node --check
+- static/script.js passes node --check
+- schema_commit20_premium_path.sql is idempotent (ADD COLUMN IF NOT EXISTS / indexes)
+- Premium hard thresholds unchanged: Safety 75, TP 55, SL 60, RR 1.8..3.5
+- PPE creates no direction
+- PPE adds no network request / thread / worker
+- fallback geometry never becomes Premium
+- Multi-Asset saved chart uses MultiAsset provider when market_type=multiasset
+
+[NOTE]
+Runtime/live validation requires deployment. The ZIP itself cannot prove Render
+runtime state. /health must be checked after deploy.

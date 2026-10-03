@@ -2603,7 +2603,9 @@ window.loadSavedSignals = async function() {
     //
     // ================================================================
 
-    if (!window.IS_FUTURES_PAGE) {
+    // Commit 20: la card de Saved Signals también pertenece a Multi-Activo.
+    // Spot permanece excluido.
+    if (!window.IS_FUTURES_PAGE && !window.IS_MULTI_ASSET_PAGE) {
 
         if (card) {
             card.style.display =
@@ -2614,7 +2616,7 @@ window.loadSavedSignals = async function() {
     }
 
     // ================================================================
-    // FUTURES
+    // FUTURES / MULTI-ASSET
     // ================================================================
 
     if (

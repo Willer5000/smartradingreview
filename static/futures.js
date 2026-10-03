@@ -3930,14 +3930,16 @@ async function(detailsEl) {
 
 // ============ Refrescar lista y KPIs ============
 window.updateSavedSignalsList = async function() {
-    if (!window.IS_FUTURES_PAGE) return;
+    // Commit 20: Saved Signals is shared by Futures + Multi-Asset.
+    // Spot remains excluded.
+    if (!window.IS_FUTURES_PAGE && !window.IS_MULTI_ASSET_PAGE) return;
 
     if (
         typeof window.isSmartTradingAuthenticated === 'function'
         && !window.isSmartTradingAuthenticated()
     ) {
         console.log(
-            '🔒 Futuros: señales guardadas requieren sesión.'
+            '🔒 Señales guardadas: se requiere sesión.'
         );
 
         const card =
@@ -3954,7 +3956,7 @@ window.updateSavedSignalsList = async function() {
     const list = document.getElementById('saved-signals-list');
     if (!card || !list) return;
     
-    // Mostrar la card en futuros
+    // Mostrar la card en Futures y Multi-Activo
     card.style.display = 'block';
     
     try {
