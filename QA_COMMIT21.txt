@@ -1,0 +1,15 @@
+QA COMMIT 21
+============
+
+Python compile: PASS
+JavaScript syntax: PASS
+Unit tests: 5 passed
+
+Covered:
+- Premium thresholds remain 75 / 55 / 60 / RR 1.8-3.5
+- no new workers/network calls
+- negative research blocks route expansion
+- only Strategy Bank contextual alternatives are accepted
+- route count is bounded to 2
+- Premium is promoted only when the existing publication gate returns eligible
+- baseline remains when alternatives do not qualify

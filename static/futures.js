@@ -671,6 +671,11 @@ function futRenderAnalysisDiagnostics(json, context) {
         const conf = Number(c.confidence);
         const metric = Number.isFinite(q) ? `Calidad ${q.toFixed(0)}/100` : (Number.isFinite(conf) && conf > 0 ? `Confianza ${conf.toFixed(0)}%` : '');
         const stage = c.diagnostic_stage ? ` · ${futEscapeHtml(String(c.diagnostic_stage).replaceAll('_',' '))}` : '';
+        const blockerCodes = Array.isArray(c.premium_blocker_codes) && c.premium_blocker_codes.length
+            ? ` · Bloqueo Premium: ${futEscapeHtml(c.premium_blocker_codes.slice(0,4).join(' · '))}`
+            : '';
+        const routeAttempts = Number(c.premium_route_engine_21?.attempt_count || c.ppe_route_attempt_count || 0);
+        const routeInfo = routeAttempts > 1 ? ` · Rutas evaluadas: ${routeAttempts}` : '';
         const riskClass = String(c.manual_risk_class || '').toUpperCase();
         const e = Number(c.entry), sl = Number(c.stop_loss), tp = Number(c.take_profit);
         const geometryOk = Number.isFinite(e) && Number.isFinite(sl) && Number.isFinite(tp)
@@ -703,7 +708,7 @@ function futRenderAnalysisDiagnostics(json, context) {
             ? `<div class="small mt-1"><span class="text-info">Entry ${e.toPrecision(7)}</span> · <span class="text-danger">SL ${sl.toPrecision(7)}</span> · <span class="text-success">TP ${tp.toPrecision(7)}</span>${Number(c.risk_reward) > 0 ? ` · R/R 1:${Number(c.risk_reward).toFixed(2)}` : ''}</div>`
             : `<div class="small text-warning mt-1">Hipótesis incompleta omitida para seguimiento: actualiza el análisis.</div>`;
 
-        return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}</div>${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
+        return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}${blockerCodes}${routeInfo}</div>${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
     }).join('');
 
     // R3 inherited contract phrase retained for QA traceability:
