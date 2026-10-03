@@ -59325,6 +59325,23 @@ print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flu
 
 
 # ============================================================================
+# COMMIT 20.2 — GUARDED AUTO-INSTALL
+# ============================================================================
+# Render dashboards sometimes override Procfile/render.yaml with `gunicorn app:app`.
+# Keep Commit 20.2 active in that configuration too. The overlay is idempotent.
+_COMMIT20_2_AUTOINSTALL = {}
+try:
+    from premium_path_expansion_20 import install as _install_commit20_2
+    _COMMIT20_2_AUTOINSTALL = _install_commit20_2(app) or {}
+    print(f"✅ [COMMIT20.2] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
+except Exception as _commit20_2_exc:
+    _COMMIT20_2_AUTOINSTALL = {
+        'version': 'COMMIT20_2_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1',
+        'error': f'{type(_commit20_2_exc).__name__}: {str(_commit20_2_exc)[:240]}',
+    }
+    print(f"⚠️ [COMMIT20.2] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
+
+# ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
 # ============================================================================
 

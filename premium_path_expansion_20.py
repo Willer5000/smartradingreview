@@ -23,11 +23,8 @@ import math
 from functools import wraps
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-VERSION = "COMMIT20_1_PREMIUM_PATH_EXPANSION_FIX_V1"
+VERSION = "COMMIT20_2_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1"
 MAX_ALTERNATIVE_ROUTES = 2
-MAX_ALTERNATIVE_ROUTES_PRESSURE = 1
-PPE_ROUTE_EXPANSION_MAX_RSS_MB = 215.0
-PPE_ROUTE_EXPANSION_PRESSURE_RSS_MB = 185.0
 
 # Existing hard publication contract. PPE never changes these values.
 PREMIUM_MIN_SAFETY = 75.0
@@ -63,28 +60,6 @@ def _f(value: Any, default: float = 0.0) -> float:
 
 def _u(value: Any) -> str:
     return str(value or "").strip().upper().replace("/", "-")
-
-
-def _rss_mb() -> Optional[float]:
-    try:
-        import app as app_module
-        fn = getattr(app_module, "_process_rss_mb", None)
-        value = fn() if callable(fn) else None
-        return float(value) if value is not None else None
-    except Exception:
-        return None
-
-
-def _memory_safe_route_budget() -> int:
-    """Bound route expansion by live RSS without changing publication gates."""
-    rss = _rss_mb()
-    if rss is None:
-        return MAX_ALTERNATIVE_ROUTES
-    if rss >= PPE_ROUTE_EXPANSION_MAX_RSS_MB:
-        return 0
-    if rss >= PPE_ROUTE_EXPANSION_PRESSURE_RSS_MB:
-        return MAX_ALTERNATIVE_ROUTES_PRESSURE
-    return MAX_ALTERNATIVE_ROUTES
 
 
 def _regime(*blobs: Any) -> str:
@@ -283,33 +258,6 @@ def _route_candidate_payload(levels: Mapping[str, Any], route: str, score: float
     }
 
 
-def _run_alternative_geometry(original, self, decision, trend, momentum, volatility, alt_structure, symbol, timeframe, liquidation, execution_observations):
-    """Re-run only the local geometry calculator; suppress repeated option-provider calls.
-    Marker: _commit20_1_route_shadow.
-
-    Commit 20.1 fixes the main free-RAM regression introduced by bounded route
-    expansion: the original Entry routine may consult the external crypto
-    options context when called without an option-chain snapshot. Alternative
-    geometry is comparative only, so it must never trigger a new provider call.
-    """
-    alt = dict(alt_structure or {})
-    alt["_commit20_1_route_shadow"] = True
-    try:
-        # The existing engine reads the option-chain from execution observations
-        # when available. For a route comparison we intentionally pass an empty
-        # observed chain and let the existing market-maker layer remain shadow.
-        local_obs = dict(execution_observations or {}) if isinstance(execution_observations, dict) else {}
-        if not local_obs.get("option_chain"):
-            local_obs["option_chain"] = []
-        return original(
-            self, decision, dict(trend or {}), dict(momentum or {}),
-            dict(volatility or {}), alt, symbol, timeframe,
-            liquidation=liquidation, execution_observations=local_obs,
-        )
-    finally:
-        alt.clear()
-
-
 def install_geometry_router() -> Dict[str, Any]:
     """Patch TradingExpertSystem.calculate_entry_levels with bounded alternatives."""
     try:
@@ -348,15 +296,6 @@ def install_geometry_router() -> Dict[str, Any]:
                 baseline["ppe_selected_route"] = str(((structure or {}).get("_contingency_playbook") or {}).get("setup_family") or "UNSPECIFIED")
                 return baseline
 
-            route_budget = _memory_safe_route_budget()
-            if route_budget <= 0:
-                baseline["ppe_version"] = VERSION
-                baseline["ppe_route_expansion"] = False
-                baseline["ppe_route_expansion_skipped"] = "MEMORY_PRESSURE"
-                baseline["ppe_route_expansion_rss_mb"] = _rss_mb()
-                baseline["ppe_route_candidates"] = []
-                return baseline
-
             setup = str(
                 ((structure or {}).get("_contingency_playbook") or {}).get("setup_family")
                 or (structure or {}).get("setup_family")
@@ -380,12 +319,13 @@ def install_geometry_router() -> Dict[str, Any]:
             }]
             route_meta = [_route_candidate_payload(baseline, setup or "BASELINE", candidates[0]["geometry_score"])]
 
-            for route in routes[:route_budget]:
+            for route in routes[:MAX_ALTERNATIVE_ROUTES]:
                 try:
                     alt_structure = _clone_route_structure(structure or {}, route)
-                    alt_levels = _run_alternative_geometry(
-                        original, self, decision, trend, momentum, volatility,
-                        alt_structure, symbol, timeframe, liquidation, execution_observations,
+                    alt_levels = original(
+                        self, decision, dict(trend or {}), dict(momentum or {}), dict(volatility or {}),
+                        alt_structure, symbol, timeframe, liquidation=liquidation,
+                        execution_observations=execution_observations,
                     )
                     if not isinstance(alt_levels, dict):
                         continue
@@ -402,12 +342,6 @@ def install_geometry_router() -> Dict[str, Any]:
                     route_meta.append(_route_candidate_payload(alt_levels, route, score))
                 except Exception as exc:
                     route_meta.append({"route": route, "error": type(exc).__name__})
-                finally:
-                    try:
-                        import gc
-                        gc.collect()
-                    except Exception:
-                        pass
 
             candidates.sort(key=lambda row: (-float(row["geometry_score"]), 0 if row["route"] == setup else 1))
             selected = candidates[0]
@@ -570,125 +504,138 @@ def install_gate_diagnostics() -> Dict[str, Any]:
         return {"installed": False, "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
 
 
+def _canonical_market_symbol(symbol: Any) -> str:
+    return _u(symbol).replace('_', '-')
+
+
+def _market_for_saved_signal(sig: Mapping[str, Any]) -> str:
+    market = str(sig.get('market_type') or sig.get('market') or '').strip().lower()
+    symbol = _canonical_market_symbol(sig.get('symbol') or '')
+    if market in {'multiasset', 'multi-asset', 'multi'} or _is_multi_symbol(symbol):
+        return 'multiasset'
+    if market == 'spot':
+        return 'spot'
+    return 'futures'
+
+
+def _saved_signal_learning_bundle(sig: Mapping[str, Any]) -> Dict[str, Any]:
+    bundle = {'configuration': {}, 'forensics': {}, 'global_profile': {}, 'guardian_global_profile': {}}
+    try:
+        from user_execution_learning import get_trade_learning_bundle
+        data = get_trade_learning_bundle(sig) or {}
+        if isinstance(data, dict): bundle.update(data)
+    except Exception as exc:
+        print(f"⚠️ Commit20.2 saved trade review: {exc}")
+    return bundle
+
+
+def _saved_signal_chart_payload(sig: Mapping[str, Any], df: Any, source: str, learning_bundle: Mapping[str, Any]) -> Dict[str, Any]:
+    import pandas as pd
+    work = df.tail(100).copy().reset_index(drop=True)
+    time_col = 'time' if 'time' in work.columns else ('timestamp' if 'timestamp' in work.columns else None)
+    if time_col is None or not {'open','high','low','close'}.issubset(set(work.columns)):
+        raise ValueError('OHLC_SCHEMA_INVALID')
+    candles = {
+        'time':[str(x) for x in work[time_col].astype(str).tolist()],
+        'open':[float(x) for x in pd.to_numeric(work['open'], errors='coerce').tolist()],
+        'high':[float(x) for x in pd.to_numeric(work['high'], errors='coerce').tolist()],
+        'low':[float(x) for x in pd.to_numeric(work['low'], errors='coerce').tolist()],
+        'close':[float(x) for x in pd.to_numeric(work['close'], errors='coerce').tolist()],
+    }
+    return {
+        'success':True,'signal':dict(sig),'candles':candles,'current_price':float(candles['close'][-1]),
+        'market_data_source':source,'signal_configuration':learning_bundle.get('configuration') or {},
+        'trade_forensics':learning_bundle.get('forensics') or {},
+        'global_execution_learning':learning_bundle.get('global_profile') or {},
+        'guardian_global_learning':learning_bundle.get('guardian_global_profile') or {},
+    }
+
+
 def install_saved_signals_market_contract(app: Any) -> Dict[str, Any]:
-    """Persist market/provider metadata and make saved-chart routing market aware."""
-    status: Dict[str, Any] = {"market_metadata": False, "chart_route": False, "frontend_route": False}
+    status={'market_metadata':False,'chart_route':False,'frontend_route':True}
     try:
         import saved_signals
-        original_create = getattr(saved_signals, "create_saved_signal", None)
-        if callable(original_create) and not getattr(original_create, "_commit20_market", False):
+        original_create=getattr(saved_signals,'create_saved_signal',None)
+        if callable(original_create) and not getattr(original_create,'_commit20_2_market',False):
             @wraps(original_create)
             def create_wrapper(data, _original=original_create):
-                payload = dict(data or {})
-                market = str(payload.get("market_type") or payload.get("market") or "futures").strip().lower()
-                if market not in {"futures", "multiasset", "spot"}:
-                    market = "futures"
-                payload["market_type"] = market
-                if market == "multiasset":
+                payload=dict(data or {})
+                market=str(payload.get('market_type') or payload.get('market') or '').strip().lower()
+                symbol=_canonical_market_symbol(payload.get('symbol') or '')
+                if market in {'multiasset','multi-asset','multi'} or _is_multi_symbol(symbol): market='multiasset'
+                elif market=='spot': market='spot'
+                else: market='futures'
+                payload['symbol']=symbol; payload['market_type']=market; payload['market']=market
+                if market=='multiasset':
                     try:
                         from multiasset_system import MULTIASSET_SYMBOLS
-                        meta = dict((MULTIASSET_SYMBOLS or {}).get(_u(payload.get("symbol"))) or {})
-                    except Exception:
-                        meta = {}
-                    payload["asset_class"] = str(meta.get("asset_class") or "MULTI")[:60]
-                    payload["data_provider"] = "MULTIASSET_KUCOIN_REST"
-                elif market == "futures":
-                    payload["asset_class"] = "CRYPTO_FUTURES"
-                    payload["data_provider"] = "KUCOIN_FUTURES_PERPETUAL_REST"
+                        meta=dict((MULTIASSET_SYMBOLS or {}).get(symbol) or {})
+                    except Exception: meta={}
+                    payload['asset_class']=str(meta.get('asset_class') or 'MULTI')[:60]
+                    payload['data_provider']='MULTIASSET_KUCOIN_REST'
+                elif market=='futures':
+                    payload['asset_class']='CRYPTO_FUTURES'; payload['data_provider']='KUCOIN_FUTURES_PERPETUAL_REST'
                 else:
-                    payload["asset_class"] = str(payload.get("asset_class") or "SPOT")[:60]
-                    payload["data_provider"] = "KUCOIN_SPOT_REST"
-                return _original(payload)
-            create_wrapper._commit20_market = True
-            saved_signals.create_saved_signal = create_wrapper
-            status["market_metadata"] = True
+                    payload['asset_class']=str(payload.get('asset_class') or 'SPOT')[:60]; payload['data_provider']='KUCOIN_SPOT_REST'
+                result=_original(payload)
+                try:
+                    row=result[0] if isinstance(result,tuple) and result else None
+                    err=result[1] if isinstance(result,tuple) and len(result)>1 else None
+                    if row is None and err and 'column' in str(err).lower() and 'does not exist' in str(err).lower():
+                        legacy=dict(payload)
+                        for key in ('market_type','market','asset_class','data_provider'): legacy.pop(key,None)
+                        return _original(legacy)
+                except Exception: pass
+                return result
+            create_wrapper._commit20_2_market=True
+            saved_signals.create_saved_signal=create_wrapper
+            status['market_metadata']=True
     except Exception as exc:
-        status["market_metadata_error"] = str(exc)[:160]
-
+        status['market_metadata_error']=str(exc)[:180]
     try:
-        endpoint = None
-        for rule in app.url_map.iter_rules():
-            if str(rule.rule) == "/api/saved_signals/<signal_id>/chart_data":
-                endpoint = rule.endpoint
-                break
-        endpoint = endpoint or "api_saved_signals_chart_data"
-        view = app.view_functions.get(endpoint)
-        if callable(view) and not getattr(view, "_commit20_1_saved_chart", False):
-            @wraps(view)
-            def chart_wrapper(signal_id, _original=view):
+        endpoint=next((r.endpoint for r in app.url_map.iter_rules() if str(r.rule)=='/api/saved_signals/<signal_id>/chart_data'),'api_saved_signals_chart_data')
+        original_view=app.view_functions.get(endpoint)
+        if callable(original_view) and not getattr(original_view,'_commit20_2_saved_chart',False):
+            @wraps(original_view)
+            def chart_wrapper(signal_id, _original=original_view):
                 from flask import jsonify
+                market='unknown'
                 try:
                     from saved_signals import get_saved_signal
-                    user = app_module_user(app)
-                    if not user:
-                        return _original(signal_id)
-                    sig = get_saved_signal(signal_id)
-                    if not sig or sig.get("user_name") != user:
-                        return _original(signal_id)
-                    market = str(sig.get("market_type") or sig.get("market") or "").lower()
-                    symbol = str(sig.get("symbol") or "")
-                    timeframe = str(sig.get("timeframe") or "")
-                    # Existing rows created before Commit 20 may have no market_type.
-                    if not market and _is_multi_symbol(symbol):
-                        market = "multiasset"
-                    if market != "multiasset":
-                        return _original(signal_id)
+                    user=app_module_user(app)
+                    if not user: return jsonify({'success':False,'authenticated':False,'error':'Debes iniciar sesión.'}),401
+                    sig=get_saved_signal(signal_id)
+                    if not sig or sig.get('user_name')!=user: return jsonify({'success':False,'error':'No encontrada'}),404
+                    market=_market_for_saved_signal(sig)
+                    symbol=_canonical_market_symbol(sig.get('symbol') or '')
+                    timeframe=str(sig.get('timeframe') or '').strip()
+                    if market!='multiasset': return _original(signal_id)
                     from multiasset_system import multiasset_system
-                    df = multiasset_system.get_kucoin_data(symbol, timeframe)
-                    if df is None or len(df) < 5:
-                        return jsonify({"success": False, "error": "Sin datos de velas Multi-Activo para este par/timeframe", "market_data_source": "MULTIASSET_KUCOIN_REST"}), 200
-                    df = df.tail(100).copy().reset_index(drop=True)
-                    candles = {
-                        "time": [str(t) for t in df["time"].astype(str).tolist()],
-                        "open": [float(v) for v in df["open"].tolist()],
-                        "high": [float(v) for v in df["high"].tolist()],
-                        "low": [float(v) for v in df["low"].tolist()],
-                        "close": [float(v) for v in df["close"].tolist()],
-                    }
-                    current_price = float(df["close"].iloc[-1])
-                    learning_bundle = {
-                        "configuration": {},
-                        "forensics": {},
-                        "global_profile": {},
-                        "guardian_global_profile": {},
-                    }
+                    df=multiasset_system.get_kucoin_data(symbol,timeframe)
+                    if df is None or len(df)<5:
+                        return jsonify({'success':False,'error':f'Sin datos de velas Multi-Activo para {symbol} {timeframe}.','market':'multiasset','market_data_source':'MULTIASSET_KUCOIN_REST','signal':sig}),200
                     try:
-                        from user_execution_learning import get_trade_learning_bundle
-                        learning_bundle = get_trade_learning_bundle(sig) or learning_bundle
-                    except Exception:
-                        pass
-                    try:
-                        del df
-                    except Exception:
-                        pass
-                    return jsonify({
-                        "success": True,
-                        "signal": sig,
-                        "candles": candles,
-                        "current_price": current_price,
-                        "market_data_source": "MULTIASSET_KUCOIN_REST",
-                        "signal_configuration": learning_bundle.get("configuration") or {},
-                        "trade_forensics": learning_bundle.get("forensics") or {},
-                        "global_execution_learning": learning_bundle.get("global_profile") or {},
-                        "guardian_global_learning": learning_bundle.get("guardian_global_profile") or {},
-                    })
-                except Exception:
+                        payload=_saved_signal_chart_payload(sig,df,'MULTIASSET_KUCOIN_REST',_saved_signal_learning_bundle(sig))
+                        payload['market']='multiasset'
+                        return jsonify(payload),200
+                    finally:
+                        try: del df
+                        except Exception: pass
+                except Exception as exc:
+                    print(f"❌ Commit20.2 saved chart: {type(exc).__name__}: {exc}")
+                    if market=='multiasset':
+                        return jsonify({'success':False,'error':f'Error cargando gráfico Multi-Activo: {type(exc).__name__}: {str(exc)[:160]}','market':'multiasset','market_data_source':'MULTIASSET_KUCOIN_REST'}),200
                     return _original(signal_id)
-            chart_wrapper._commit20_1_saved_chart = True
-            app.view_functions[endpoint] = chart_wrapper
+            chart_wrapper._commit20_2_saved_chart=True
+            app.view_functions[endpoint]=chart_wrapper
             try:
                 import app as app_module
-                if hasattr(app_module, "api_saved_signals_chart_data"):
-                    app_module.api_saved_signals_chart_data = chart_wrapper
-            except Exception:
-                pass
-            status["chart_route"] = True
-            status["chart_endpoint"] = endpoint
+                if hasattr(app_module,'api_saved_signals_chart_data'): app_module.api_saved_signals_chart_data=chart_wrapper
+            except Exception: pass
+            status['chart_route']=True; status['chart_endpoint']=endpoint
     except Exception as exc:
-        status["chart_route_error"] = str(exc)[:160]
-
+        status['chart_route_error']=str(exc)[:180]
     return status
-
 
 def _is_multi_symbol(symbol: str) -> bool:
     try:
@@ -700,19 +647,17 @@ def _is_multi_symbol(symbol: str) -> bool:
 
 def app_module_user(app: Any) -> Optional[str]:
     try:
-        import app as app_module
-        fn = getattr(app_module, "_authenticated_user", None)
-        if callable(fn):
-            return fn()
-    except Exception:
-        pass
-    try:
         view = app.view_functions.get("_authenticated_user")
         if callable(view):
             return view()
     except Exception:
         pass
-    return None
+    try:
+        import app as app_module
+        fn = getattr(app_module, "_authenticated_user", None)
+        return fn() if callable(fn) else None
+    except Exception:
+        return None
 
 
 def install_health_contract(app: Any) -> Dict[str, Any]:
@@ -731,18 +676,13 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
                 payload = None
             if not isinstance(payload, dict):
                 return response
-            memory_policy = getattr(app, "_COMMIT20_1_MEMORY_POLICY", {}) or {}
             payload["runtime_contract"] = {
-                "commit": "20.1",
+                "commit": "20.2",
                 "entrypoint": VERSION,
                 "ppe_installed": True,
                 "premium_thresholds_unchanged": True,
                 "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
-                "max_alternative_routes_under_pressure": MAX_ALTERNATIVE_ROUTES_PRESSURE,
-                "route_expansion_rss_cap_mb": PPE_ROUTE_EXPANSION_MAX_RSS_MB,
-                "memory_policy": memory_policy,
                 "no_new_network_calls": True,
-                "alternative_route_external_calls": False,
                 "no_new_threads": True,
             }
             try:
@@ -767,22 +707,42 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
 
 
 def install(app: Any) -> Dict[str, Any]:
-    return {
-        "version": VERSION,
+    # Commit 20.2 runtime governor. The legacy app clamps low-memory mode to
+    # 220/300/200; that 200 MB start gate caused the observed interactive
+    # starvation at harmless ~202 MB baselines. Keep the 300 MB hard guard,
+    # but create enough preflight room for one interactive job while preserving
+    # cache shedding and single-heavy-slot serialization.
+    try:
+        hard = min(300.0, max(280.0, float(getattr(app, '_MEMORY_HARD_LIMIT_MB', 300.0) or 300.0)))
+        soft = min(235.0, hard - 45.0)
+        start = min(215.0, soft - 20.0)
+        app._MEMORY_HARD_LIMIT_MB = hard
+        app._MEMORY_SOFT_LIMIT_MB = soft
+        app._MEMORY_JOB_START_LIMIT_MB = start
+        app._MEMORY_ANALYSIS_CACHE_KEEP = 1
+        app._COMMIT20_2_MEMORY_POLICY = {
+            'memory_job_start_limit_mb': start,
+            'memory_soft_limit_mb': soft,
+            'memory_hard_limit_mb': hard,
+            'single_heavy_slot': True,
+            'interactive_priority': True,
+        }
+    except Exception as exc:
+        app._COMMIT20_2_MEMORY_POLICY = {'error': f'{type(exc).__name__}: {str(exc)[:160]}'}
+
+    parts = {
         "geometry_router": install_geometry_router(),
         "gate_diagnostics": install_gate_diagnostics(),
         "saved_signals": install_saved_signals_market_contract(app),
         "health": install_health_contract(app),
     }
+    return {"version": VERSION, **parts, 'memory_policy': getattr(app, '_COMMIT20_2_MEMORY_POLICY', {})}
 
 
 def audit() -> Dict[str, Any]:
     return {
         "version": VERSION,
         "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
-        "max_alternative_routes_under_pressure": MAX_ALTERNATIVE_ROUTES_PRESSURE,
-        "route_expansion_max_rss_mb": PPE_ROUTE_EXPANSION_MAX_RSS_MB,
-        "route_expansion_pressure_rss_mb": PPE_ROUTE_EXPANSION_PRESSURE_RSS_MB,
         "premium_thresholds": {
             "safety": PREMIUM_MIN_SAFETY,
             "tp": PREMIUM_MIN_TP,
@@ -793,7 +753,6 @@ def audit() -> Dict[str, Any]:
         "changes_direction": False,
         "changes_hard_thresholds": False,
         "adds_network_calls": False,
-        "alternative_route_external_calls": False,
         "adds_threads": False,
         "promotes_fallback": False,
         "research_authority": "DIAGNOSTIC_ONLY",

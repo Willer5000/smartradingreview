@@ -3260,7 +3260,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 // ============================================================================
-// v22.9: SEÑALES GUARDADAS (solo página FUTUROS)
+// v22.9: SEÑALES GUARDADAS (FUTURES + MULTI-ACTIVO)
 // ============================================================================
 // El usuario ve una señal en "Señales de la Vela Anterior" → click → modal
 // justificación → botón GUARDAR → modal con inputs → confirmar → señal
@@ -5592,7 +5592,7 @@ window.deleteSavedSignal = async function() {
 };
 
 // ============ Auto-refresh de la lista cada 5 min ============
-if (window.IS_FUTURES_PAGE) {
+if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
     document.addEventListener('DOMContentLoaded', () => {
         setTimeout(() => window.updateSavedSignalsList(), 1500);
         setInterval(() => {
