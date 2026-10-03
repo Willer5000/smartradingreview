@@ -59347,6 +59347,25 @@ except Exception as _commit20_2_exc:
     print(f"⚠️ [COMMIT20.2] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
 
 # ============================================================================
+# COMMIT 21 — 9Q QUALITY + Q10 SAFETY (GUARDED AUTO-INSTALL)
+# ============================================================================
+# Built on the stable Commit 20.2.1 runtime. This layer is intentionally
+# installed AFTER 20.2 so its geometry router can supersede only the bounded
+# route comparator while preserving the existing runtime governor, publication
+# thresholds, Saved Signals fix, and single-worker architecture.
+_COMMIT21_9Q_AUTOINSTALL = {}
+try:
+    from premium_path_expansion_21 import install as _install_commit21_9q
+    _COMMIT21_9Q_AUTOINSTALL = _install_commit21_9q(app) or {}
+    print(f"✅ [COMMIT21 9Q] overlay activo: {_COMMIT21_9Q_AUTOINSTALL}", flush=True)
+except Exception as _commit21_9q_exc:
+    _COMMIT21_9Q_AUTOINSTALL = {
+        'version': 'COMMIT21_9Q_QUALITY_PATH_V1',
+        'error': f'{type(_commit21_9q_exc).__name__}: {str(_commit21_9q_exc)[:240]}',
+    }
+    print(f"⚠️ [COMMIT21 9Q] overlay no instalado: {_COMMIT21_9Q_AUTOINSTALL['error']}", flush=True)
+
+# ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
 # ============================================================================
 

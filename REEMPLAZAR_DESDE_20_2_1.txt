@@ -1,0 +1,21 @@
+COMMIT 21 — 9Q
+
+BASE OBLIGATORIA: Commit 20.2.1 Stability Fix.
+
+Reemplazar:
+  app.py
+  templates/index.html
+
+Agregar:
+  premium_path_expansion_21.py
+  quality_9q_engine_21.py
+
+No reemplazar:
+  Procfile
+  render.yaml
+  premium_path_expansion_20.py
+  static/script.js
+  static/futures.js
+
+Commit 21 conserva el runtime de 20.2.1 y modifica el selector de calidad/ruta mediante Q1-Q9.
+Q10 = Safety y contrato Premium existente; no se relaja.

@@ -2654,7 +2654,7 @@
     <!-- Toast Container -->
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
-    <!-- COMMIT20.2.1-STABILITY-FIX: baseline 20.2 + frontend request governor; no 21.x strategy route engine. -->
+    <!-- COMMIT21-9Q: base estable 20.2.1 + calidad Q1-Q9 con Q10 Safety independiente. -->
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="https://cdn.plot.ly/plotly-3.7.0.min.js"></script>
@@ -2663,9 +2663,9 @@
     <!-- ============================================================= -->
 
     <script src="{{ url_for('static', filename='trading_theme.js') }}?v=20260909-PRO-UI-2"></script>
-    <!-- inherited cache marker: 20261002-COMMIT20-PPE -->
+    <!-- COMMIT21-9Q cache-bust: UI identity + no stale 20.2.1 asset query strings -->
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20261003-COMMIT20-2-STABILITY-1"
+        src="{{ url_for('static', filename='script.js') }}?v=20261003-COMMIT21-9Q"
     ></script>
 
 
@@ -2676,17 +2676,17 @@
     {% if is_futures %}
 
     <script
-        src="{{ url_for('static', filename='futures.js') }}?v=20261003-COMMIT20-2-STABILITY-1"
+        src="{{ url_for('static', filename='futures.js') }}?v=20261003-COMMIT21-9Q"
     ></script>
 
     {% endif %}
 
     <!-- Greeks chart is shared by Spot, Futures and Multi-Asset. -->
     <script
-        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261003-COMMIT20-2-STABILITY-1"
+        src="{{ url_for('static', filename='market_maker_frontend.js') }}?v=20261003-COMMIT21-9Q"
     ></script>
 
-    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20261003-COMMIT20-2-STABILITY-1"></script>
+    <script src="{{ url_for('static', filename='chart_workspace.js') }}?v=20261003-COMMIT21-9Q"></script>
 
     <!-- ============================================================= -->
     <!-- IA AISLADA -->
@@ -3815,13 +3815,20 @@
                     window.currentSymbol = window.PAGE_CONFIG.defaultSymbol;
                     window.currentInterval = window.PAGE_CONFIG.defaultTimeframe;
                     
-                    // Actualizar título del navbar si es futuros
-                    if (window.IS_FUTURES_PAGE) {
-                        const navBrand = document.querySelector('.navbar-brand');
+                    // Actualizar el título del navbar por mercado.
+                    // Multi-Activos comparte la UI derivada de Futures, pero su
+                    // identidad visual debe permanecer explícitamente separada.
+                    const navBrand = document.querySelector('.navbar-brand');
+                    if (window.IS_MULTI_ASSET_PAGE) {
+                        if (navBrand) {
+                            navBrand.innerHTML = '<span class="brand-desktop">CRYPTO TRADER ANALYST PRO · MULTIACTIVOS</span><span class="brand-mobile">TRADER ANALYST · MULTIACTIVOS</span>';
+                        }
+                        document.title = 'Multi-Activos - Crypto Trader Analyst Pro';
+                    } else if (window.IS_FUTURES_PAGE) {
                         if (navBrand) {
                             navBrand.innerHTML = '<span class="brand-desktop">CRYPTO TRADER ANALYST PRO · FUTUROS</span><span class="brand-mobile">TRADER ANALYST · FUTUROS</span>';
                         }
-                        document.title = window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo - Trader Analyst Pro' : 'Futuros - Crypto Trader Analyst Pro';
+                        document.title = 'Futuros - Crypto Trader Analyst Pro';
                     }
                     
                     console.log('✅ Selectores reconfigurados para:', window.PAGE_CONFIG.title);
