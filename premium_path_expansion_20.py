@@ -27,11 +27,13 @@ import os
 from functools import wraps
 from typing import Any, Dict, List, Mapping, Optional
 
-VERSION = "COMMIT21_PREMIUM_STRATEGY_ROUTE_ENGINE_V1"
+VERSION = "COMMIT21_1_PREMIUM_STRATEGY_ROUTE_ENGINE_FIX_V1"
 MAX_ALTERNATIVE_ROUTES = 2
+MAX_FALLBACK_ALTERNATIVE_ROUTES = 1
 ALT_BANK_MIN_QUALITY = 55.0
-ROUTE_RSS_SOFT_MB = 205.0
+ROUTE_RSS_SOFT_MB = 190.0
 ROUTE_RSS_HARD_MB = 220.0
+ROUTE_MIN_SAFETY_TO_SEARCH = 68.0
 
 # Existing immutable publication contract.
 PREMIUM_MIN_SAFETY = 75.0
@@ -102,7 +104,19 @@ def _clone_structure(structure: Mapping[str, Any], *, route_family: str, route_i
 
 
 def _candidate_source(structure: Mapping[str, Any]) -> Dict[str, Any]:
-    return dict((structure.get("_contingency_playbook") or {}).get("strategy") or {})
+    pb = dict((structure.get("_contingency_playbook") or {}))
+    raw = pb.get("strategy")
+    strategy = dict(raw) if isinstance(raw, Mapping) else {}
+    # Commit 20/21 originally expected a nested strategy dict. The real
+    # contingency playbook stores strategy/id/family as top-level metadata.
+    # Normalize both forms so the route engine can actually see alternatives.
+    if not strategy and raw:
+        strategy = {"id": str(raw)}
+    strategy.setdefault("id", pb.get("strategy_id") or pb.get("strategy"))
+    strategy.setdefault("family", pb.get("setup_family") or pb.get("strategy_family"))
+    strategy.setdefault("quality", pb.get("strategy_quality"))
+    strategy.setdefault("indicators", pb.get("strategy_indicators") or [])
+    return strategy
 
 
 def _research_blocks(structure: Mapping[str, Any]) -> bool:
@@ -130,86 +144,127 @@ def _route_engine_enabled_for(structure: Mapping[str, Any], decision: str) -> bo
 
 
 def _strategy_alternatives(
-    *, structure: Mapping[str, Any], decision: str, symbol: str, timeframe: str
+    *, structure: Mapping[str, Any], decision: str, symbol: str, timeframe: str,
+    max_routes: int = MAX_ALTERNATIVE_ROUTES,
 ) -> List[Dict[str, Any]]:
-    """Resolve up to two *real* Strategy Bank alternatives.
+    """Resolve real, predeclared Strategy Bank families for the exact cell.
 
-    No new strategy is invented here.  We ask the existing Bank to re-evaluate
-    each already-ranked alternative under the exact current cell/context.  This
-    is deliberately deterministic and uses the same indicator snapshot already
-    attached to the contingency playbook.
+    The old Commit 21 implementation depended on ``strategy.alternatives``
+    being embedded in the contingency strategy object. Production actually
+    stores the strategy family/quality at the playbook top level, so the route
+    engine often saw zero alternatives and did no useful work.
+
+    This fix derives candidate *families* directly from the frozen Strategy
+    Bank for the exact Futures symbol/TF/action cell, then evaluates them with
+    the Bank's deterministic selector. No live outcomes or new thresholds are
+    used.
     """
     if not _route_engine_enabled_for(structure, decision):
         return []
 
-    pb = structure.get("_contingency_playbook") or {}
+    pb = dict(structure.get("_contingency_playbook") or {})
     strategy = _candidate_source(structure)
     primary_family = _u(pb.get("setup_family") or strategy.get("family"))
-    raw_alts = list(strategy.get("alternatives") or [])
-    if not raw_alts:
-        return []
-
     groups = dict(pb.get("indicator_groups") or {})
     context = dict(pb.get("context") or {})
-    regime = str(context.get("regime") or "BALANCE")
-    vol_state = str((pb.get("volatility") or {}).get("state") or context.get("volatility") or "NORMAL")
-
-    try:
-        from default_strategy_bank import select_strategy
-    except Exception:
-        return []
-
-    out: List[Dict[str, Any]] = []
-    seen = {primary_family}
+    regime = str(context.get("regime") or "BALANCE").upper()
+    vol_state = str((pb.get("volatility") or {}).get("state") or "NORMAL").upper()
     market = "FUTURES"
     action = _u(decision)
 
-    for raw in raw_alts:
-        if not isinstance(raw, dict):
+    try:
+        import default_strategy_bank as bank
+        select_strategy = getattr(bank, "select_strategy")
+        rows = list(getattr(bank, "STRATEGIES", []) or [])
+    except Exception:
+        return []
+
+    # Build a small deterministic family universe for this exact governed cell.
+    families = []
+    seen = set([primary_family]) if primary_family else set()
+    for row in rows:
+        if not isinstance(row, Mapping):
             continue
-        family = _u(raw.get("family"))
+        if action not in [str(x).upper() for x in (row.get("actions") or [])]:
+            continue
+        if market not in [str(x).upper() for x in (row.get("markets") or [])]:
+            continue
+        symbols = {str(x).upper().replace("/", "-") for x in (row.get("symbols") or [])}
+        tfs = {str(x).upper() for x in (row.get("timeframes") or [])}
+        if symbols and _u(symbol) not in symbols:
+            continue
+        if tfs and _u(timeframe) not in tfs:
+            continue
+        family = _u(row.get("family"))
         if not family or family in seen:
             continue
         seen.add(family)
+        families.append(family)
+
+    evaluated: List[Dict[str, Any]] = []
+    for family in families:
         try:
             pick = select_strategy(
-                action,
-                regime,
-                vol_state,
-                groups,
-                symbol=_u(symbol),
-                timeframe=_u(timeframe),
-                market=market,
+                action, regime, vol_state, groups,
+                symbol=_u(symbol), timeframe=_u(timeframe), market=market,
                 preferred_family=family,
             )
         except Exception:
             continue
         if _u(pick.get("family")) != family:
             continue
-        if float(pick.get("quality") or 0.0) < ALT_BANK_MIN_QUALITY:
+        quality = _f(pick.get("quality"), 0.0)
+        if quality < ALT_BANK_MIN_QUALITY:
             continue
-        if not bool(pick.get("regime_match", True)):
-            continue
-        if not bool(pick.get("volatility_match", True)):
+        if not bool(pick.get("regime_match", True)) or not bool(pick.get("volatility_match", True)):
             continue
         required = int(pick.get("required_independent_families") or 4)
         positive = int(pick.get("positive_functional_families") or 0)
         if positive < required:
             continue
-        out.append({
+        evaluated.append({
             "family": family,
-            "strategy_id": str(pick.get("id") or raw.get("id") or "")[:120],
-            "quality": round(float(pick.get("quality") or 0.0), 2),
+            "strategy_id": str(pick.get("id") or "")[:120],
+            "quality": round(quality, 2),
             "regime_match": True,
             "volatility_match": True,
             "positive_functional_families": positive,
             "required_independent_families": required,
-            "source": "DEFAULT_STRATEGY_BANK",
+            "source": "DEFAULT_STRATEGY_BANK_EXACT_CELL",
             "ranked_alternative": True,
         })
-        if len(out) >= MAX_ALTERNATIVE_ROUTES:
-            break
-    return out
+
+    evaluated.sort(key=lambda x: (-float(x.get("quality") or 0.0), -int(x.get("positive_functional_families") or 0), str(x.get("family") or "")))
+    return evaluated[:max(0, int(max_routes or 0))]
+
+
+def _route_search_allowed(base: Mapping[str, Any]) -> bool:
+    """Cheap preflight: only spend CPU on candidates with a plausible route.
+
+    This is a resource/quality budget, not a publication bypass. It prevents
+    Commit 21 from rerunning the full execution pipeline for hopeless hard
+    failures while still giving fallback/near-Premium theses a second path.
+    """
+    levels = dict(base.get("levels") or {})
+    if not levels:
+        return False
+    codes = set(_reason_codes(base))
+    hard_blockers = {
+        "LOSS_AT_SL", "ATR_STRESS", "ACTIVE_STRATEGY_CONFLICT",
+        "EXECUTION_RUNTIME_FAILED", "HIGH_TF_LOWER_TRIGGER_REQUIRED",
+    }
+    if codes & hard_blockers:
+        return False
+    if bool(levels.get("manual_geometry_fallback")):
+        return True
+    safety = _f(levels.get("execution_safety"), 0.0)
+    rr = _f(levels.get("risk_reward"), 0.0)
+    near_rr = 1.65 <= rr <= 3.60
+    near_safety = safety >= ROUTE_MIN_SAFETY_TO_SEARCH
+    gate = base.get("futures_publication_gate") or {}
+    if gate and not gate.get("eligible"):
+        return near_rr or near_safety
+    return near_rr or near_safety
 
 
 def _route_attempt_record(result: Mapping[str, Any], route: Mapping[str, Any]) -> Dict[str, Any]:
@@ -319,11 +374,18 @@ def install_strategy_route_engine() -> Dict[str, Any]:
                 }
                 return {**base, "levels": lv, "premium_route_engine_21": lv["premium_route_engine_21"]}
 
+            if not _route_search_allowed(base):
+                lv = dict(base.get("levels") or {})
+                lv["premium_route_engine_21"] = _funnel(base, lv, [], None)
+                return {**base, "levels": lv, "premium_route_engine_21": lv["premium_route_engine_21"]}
+
+            fallback_mode = bool((base.get("levels") or {}).get("manual_geometry_fallback"))
             routes = _strategy_alternatives(
                 structure=base_structure,
                 decision=decision,
                 symbol=symbol,
                 timeframe=timeframe,
+                max_routes=MAX_FALLBACK_ALTERNATIVE_ROUTES if fallback_mode else MAX_ALTERNATIVE_ROUTES,
             )
             if not routes:
                 lv = dict(base.get("levels") or {})
@@ -338,7 +400,7 @@ def install_strategy_route_engine() -> Dict[str, Any]:
 
             # More than one alternate can raise RSS materially.  At the observed
             # 205–220MB range we intentionally reduce to one sequential route.
-            max_routes_now = 1 if rss is not None and rss >= ROUTE_RSS_SOFT_MB else MAX_ALTERNATIVE_ROUTES
+            max_routes_now = 1 if rss is not None and rss >= ROUTE_RSS_SOFT_MB else (MAX_FALLBACK_ALTERNATIVE_ROUTES if fallback_mode else MAX_ALTERNATIVE_ROUTES)
 
             for route in routes[:max_routes_now]:
                 route_structure = _clone_structure(
@@ -631,9 +693,10 @@ def install_health_contract(app: Any) -> Dict[str, Any]:
             if not isinstance(payload, dict):
                 return response
             payload["runtime_contract"] = {
-                "commit": "21",
+                "commit": "21.1",
                 "entrypoint": VERSION,
                 "strategy_route_engine_loaded": True,
+                "route_engine_v": "21.1_PREDECLARED_BANK",
                 "premium_thresholds_unchanged": True,
                 "max_alternative_strategy_routes": MAX_ALTERNATIVE_ROUTES,
                 "no_new_network_calls": True,
@@ -667,10 +730,21 @@ def install(app: Any) -> Dict[str, Any]:
         start = min(215.0, soft - 20.0)
         app._MEMORY_HARD_LIMIT_MB = hard
         app._MEMORY_SOFT_LIMIT_MB = soft
-        app._MEMORY_JOB_START_LIMIT_MB = start
+        app._MEMORY_JOB_START_LIMIT_MB = min(225.0, max(210.0, start))
         app._MEMORY_ANALYSIS_CACHE_KEEP = 1
+        # app.py's guards read module globals, not only Flask app attributes.
+        # Commit 20.2 changed the attributes but left the real guards at the
+        # old 200 MB clamp. Synchronize both surfaces explicitly.
+        try:
+            import app as _app_module
+            _app_module._MEMORY_HARD_LIMIT_MB = hard
+            _app_module._MEMORY_SOFT_LIMIT_MB = soft
+            _app_module._MEMORY_JOB_START_LIMIT_MB = min(225.0, max(210.0, start))
+            _app_module._MEMORY_ANALYSIS_CACHE_KEEP = 1
+        except Exception:
+            pass
         app._COMMIT21_MEMORY_POLICY = {
-            "memory_job_start_limit_mb": start,
+            "memory_job_start_limit_mb": min(225.0, max(210.0, start)),
             "memory_soft_limit_mb": soft,
             "memory_hard_limit_mb": hard,
             "single_heavy_slot": True,
@@ -699,6 +773,7 @@ def install(app: Any) -> Dict[str, Any]:
 def audit() -> Dict[str, Any]:
     return {
         "version": VERSION,
+        "fix": "21.1",
         "max_alternative_routes": MAX_ALTERNATIVE_ROUTES,
         "bank_min_quality": ALT_BANK_MIN_QUALITY,
         "premium_thresholds": {

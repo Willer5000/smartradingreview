@@ -3,7 +3,7 @@ services:
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit21_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
+    startCommand: gunicorn commit21_1_main_entrypoint:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 120 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -28,7 +28,7 @@ services:
       - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
         value: "10"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "220"
+        value: "235"
       - key: MEMORY_HARD_LIMIT_MB
         value: "300"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
@@ -38,7 +38,7 @@ services:
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
         value: "20"
       - key: MEMORY_JOB_START_LIMIT_MB
-        value: "200"
+        value: "225"
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: FREE_PLAN_LOCKDOWN

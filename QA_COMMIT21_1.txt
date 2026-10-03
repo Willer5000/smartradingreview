@@ -1,0 +1,19 @@
+QA COMMIT 21.1
+==============
+
+Python compile: PASS
+JavaScript syntax: PASS
+Commit 21.1 unit tests: 3 PASS
+Existing Commit 21 route tests: PASS
+
+Not executed in this container:
+- full Flask/Render runtime import (Flask is not installed in the validation container)
+- live KuCoin request
+- live Supabase query
+
+Production verification required:
+- /health -> commit 21.1 + CPQE loaded
+- MEMORY_JOB_START_LIMIT_MB effective around 225 MB
+- /api/futures/visuals returns OHLCV
+- clicking opportunity shows chart before heavy analysis
+- any promoted Premium still has the normal futures publication gate eligible=true/tier=PREMIUM

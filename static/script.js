@@ -10621,6 +10621,60 @@ window.updateActiveSignals = function updateActiveSignals() {
             window.__spotActiveSignalsLoading = false;
         });
 };
+// ============ COMMIT 21.1 — VISUALS-FIRST SIGNAL NAVIGATION ============
+// Render the candle + indicator workspace from the lightweight market-data
+// endpoint before launching the heavy 9-trader analysis. This removes the
+// perception of infinite loading and lets the user inspect the chart while the
+// full analysis continues in the background.
+window.loadLightVisualsForSignal = async function(symbol, timeframe) {
+    const market = window.IS_MULTI_ASSET_PAGE ? 'multiasset' : (window.IS_FUTURES_PAGE ? 'futures' : 'spot');
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+    try {
+        const params = new URLSearchParams({
+            symbol: String(symbol || '').toUpperCase(),
+            timeframe: String(timeframe || ''),
+            market,
+            _ts: String(Date.now())
+        });
+        const response = await fetch(`/api/futures/visuals?${params.toString()}`, {
+            method: 'GET',
+            credentials: 'same-origin',
+            cache: 'no-store',
+            signal: controller.signal
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload?.success || !payload?.df?.time?.length) {
+            throw new Error(payload?.error || `HTTP ${response.status}`);
+        }
+        window.currentAnalysis = payload;
+        const safeRender = (fn, label) => {
+            try {
+                if (typeof fn === 'function') fn(payload);
+            } catch (error) {
+                console.warn(`⚠️ Visual ${label} diferido:`, error);
+            }
+        };
+        safeRender(window.updateCandleChart, 'candles');
+        safeRender(window.updateRSIChart, 'RSI');
+        safeRender(window.updateMACDChart, 'MACD');
+        safeRender(window.updateStochasticChart, 'Stochastic');
+        safeRender(window.updateVolumeChart, 'Volume');
+        safeRender(window.updateBollingerChart, 'Bollinger');
+        safeRender(window.updateATRChart, 'ATR');
+        safeRender(window.updateSuperTrendChart, 'SuperTrend');
+        safeRender(window.updateWilliamsCCIChart, 'Williams/CCI');
+        safeRender(window.updateMFIForceChart, 'MFI/Force');
+        window._commit21_1_light_visuals_at = Date.now();
+        return payload;
+    } catch (error) {
+        console.warn('⚠️ Commit 21.1 visualización ligera:', error);
+        return null;
+    } finally {
+        window.clearTimeout(timeoutId);
+    }
+};
+
 // ============ FUNCIÓN PARA CAMBIAR A UNA SEÑAL ============
 window.changeToSignal = function(symbol, timeframe) {
     console.log(`🔄 Cambiando a ${symbol} ${timeframe}`);
@@ -10639,10 +10693,16 @@ window.changeToSignal = function(symbol, timeframe) {
         window.resetLiveVisualContext(symbol, timeframe);
     }
     
-    // Ejecutar análisis
-    if (typeof window.runCompleteAnalysis === 'function') {
-        window.runCompleteAnalysis();
-    }
+    // COMMIT 21.1: mostrar gráficos primero, análisis pesado después.
+    // El análisis sigue ejecutándose una sola vez; esto no crea una segunda
+    // señal ni modifica el pipeline de publicación.
+    window.loadLightVisualsForSignal?.(symbol, timeframe).finally(() => {
+        window.setTimeout(() => {
+            if (typeof window.runCompleteAnalysis === 'function') {
+                window.runCompleteAnalysis();
+            }
+        }, 50);
+    });
     
     // Hacer scroll al gráfico principal
     const chartElement = document.getElementById('candle-chart');
