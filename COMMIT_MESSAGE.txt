@@ -1,1 +1,17 @@
-Commit 17.4 FINAL R3 — Adaptive Trading Reasoning + Trading Audit Closure
+Commit 24 — Repair real Q authority + fair heavy runtime
+
+Root fixes:
+- Q engine was not evaluated on the actual fallback ANALYSIS_ONLY path.
+- Commit 23.1 reconciled pre-existing Q metadata instead of creating authority.
+- The single heavy-analysis lock starved interactive UI behind background work.
+
+Policy preserved:
+- one-of-ten Q authority, Q >= 75
+- Q10 non-mandatory
+- Safety floor 65
+- SL loss max 8%
+- ATR stress max 25%
+- explicit PUBLICATION_GATE
+- no threshold lowering
+- no new provider/network calls
+- no permanent workers

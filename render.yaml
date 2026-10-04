@@ -1,12 +1,10 @@
-# COMMIT 23.1 FIX — Blueprint must use the same production entrypoint as Procfile.
-# The boot chain intentionally preserves the known-good 19.1 -> 20.2.1 sequence
-# and installs Q23 + the final authority reconciler only after app.py is loaded.
+# COMMIT 24 — same proven Commit 23.1 chain + real Q authority/runtime repair.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit23_1_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn commit24_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -52,6 +50,10 @@ services:
         value: "1"
       - key: COMMIT22_WORKER_RESTART_POLICY
         value: "TIMEOUT_120S_MAX_REQUESTS_80"
+      - key: COMMIT24_STALL_EXIT_SECONDS
+        value: "105"
+      - key: COMMIT24_PENDING_UI_TTL_SECONDS
+        value: "90"
       - key: PPE_ENABLED
         value: "1"
       - key: PPE_MAX_ALTERNATIVE_ROUTES
@@ -93,7 +95,7 @@ services:
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
         value: "30"
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS
-        value: "60"
+        value: "120"
       - key: FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
         value: "120"
       - key: LEARNING_MICROBATCH_ROWS
