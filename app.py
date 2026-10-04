@@ -38626,84 +38626,247 @@ def _store_futures_ui_cached(symbol, timeframe, payload):
                 items.pop(old_key, None)
 
 
-def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
-    """Schedule one interactive heavy job across Futures and Multi-Asset.
+# 24.3: cola preemptive de UI. No crea threads que esperen el heavy lock.
+# El worker HTTP reserva el slot de forma no bloqueante si está libre; si no,
+# encola la petición y devuelve inmediatamente 202 a través de la ruta existente.
+_UI_PENDING_MAX = max(1, int(os.environ.get('UI_PENDING_MAX', '5') or 5))
+_PENDING_UI_ANALYSIS_QUEUE = []
+_PENDING_UI_ANALYSIS_LOCK = threading.RLock()
 
-    No permanent worker is added. A second market cannot spawn a waiting thread
-    while another interactive job already owns the shared heavy slot.
-    """
-    market=str(market or 'futures').lower()
-    key=_futures_ui_key(symbol,timeframe)
-    _mark_futures_interactive_priority()
-    with _FUTURES_UI_CACHE['lock']:
-        running=_FUTURES_UI_CACHE['running']
-        if key in running: return 'RUNNING'
-        if running: return 'DEFERRED_BUSY'
-        running.add(key); _FUTURES_UI_CACHE['errors'].pop(key,None)
 
-    def _do_ui_analysis():
-        owner=(f'multi-ui:{symbol}:{timeframe}' if market=='multiasset' else f'{market}-ui:{symbol}:{timeframe}')
-        heavy_acquired=False
-        try:
-            # COMMIT 24.1: the queue/reservation in commit24_repair_runtime is
-            # authoritative, but this direct guard also protects gunicorn when
-            # the overlay is unavailable or a race occurs between reservation
-            # and thread start. Never create a thread that merely sleeps on the
-            # global heavy lock behind another owner.
-            try:
-                with _HEAVY_ANALYSIS_STATE_LOCK:
-                    current_heavy_owner = str(_HEAVY_ANALYSIS_OWNER or '')
-                if current_heavy_owner and current_heavy_owner != owner:
-                    print(
-                        f'⏳ [COMMIT24.1] {owner}: heavy slot already held by '
-                        f'{current_heavy_owner}; UI remains deferred.',
-                        flush=True,
-                    )
-                    return
-            except Exception:
-                current_heavy_owner = ''
-            heavy_acquired=_acquire_heavy_analysis(owner,timeout=5)
-            if not heavy_acquired: raise RuntimeError('No se obtuvo turno de análisis interactivo')
-            _log_memory_runtime(f'{owner}:before')
-            if market=='multiasset':
-                engine=_get_multiasset_system()
-                if engine is None: raise RuntimeError('MultiAssetSystem no disponible')
-                result=engine.analyze_multiasset_market(symbol,timeframe,closed_candle_only=True)
-                if not isinstance(result,dict) or result.get('success') is False:
-                    raise RuntimeError(str((result or {}).get('error') or 'Análisis Multi-Activo vacío'))
-                result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
-                result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
-                levels=result.get('levels') or {}
-                if levels.get('execution_runtime_failed') or levels.get('execution_runtime_error'):
-                    raise RuntimeError(str(levels.get('execution_runtime_error') or 'EXECUTION_RUNTIME_FAILED'))
-                _multiasset_cache_result(symbol,timeframe,result)
-                ui_result=_compact_futures_ui_result(result)
-                _store_futures_ui_cached(symbol,timeframe,ui_result)
-            else:
-                futures=_get_futures_system()
-                if futures is None: raise RuntimeError('FuturesSystem no disponible')
-                from copy import copy
-                preview_futures=copy(futures); preview_futures.liquidation_heatmaps={}; preview_futures.dynamic_zones={}; preview_futures.last_analysis={}; preview_futures.voting_history={}
-                result=preview_futures.analyze_futures_market(symbol,timeframe,closed_candle_only=False,intrabar_preview=True)
-                if not result: raise RuntimeError('Análisis Futures vacío')
-                result=_apply_profitability_router(result,symbol,timeframe); result=_apply_96_futures_risk_policy(result,symbol,timeframe); result=_apply_36s_futures_ai_control(result,symbol,timeframe); result=_apply_17_5_8_preliminary_learning_prior(result,'futures'); result=_enrich_futures_public_message(result)
-                ui_result=_compact_fast_futures_ui_result(_compact_futures_ui_result(result),timeframe)
-                runtime_result=_compact_futures_runtime_result(result)
-                _store_futures_intrabar_preview(symbol,timeframe,result,runtime_result=runtime_result)
-                _store_futures_ui_cached(symbol,timeframe,ui_result)
-            _log_memory_runtime(f'{owner}:after')
-        except Exception as exc:
-            print(f'❌ [UI {market.upper()}] {symbol} {timeframe}: {exc}')
+def _pending_ui_analysis_key(symbol, timeframe, market='futures'):
+    return (
+        str(symbol or '').strip().upper(),
+        str(timeframe or '').strip(),
+        str(market or 'futures').strip().lower(),
+    )
+
+
+def _get_pending_ui_analysis_snapshot():
+    """# 24.3: snapshot liviano de la cola; no ejecuta I/O ni crea threads."""
+    now = time.monotonic()
+    with _PENDING_UI_ANALYSIS_LOCK:
+        rows = []
+        for row in _PENDING_UI_ANALYSIS_QUEUE:
+            queued_at = float(row.get('queued_at') or now)
+            rows.append({
+                'symbol': row.get('symbol'),
+                'timeframe': row.get('timeframe'),
+                'market': row.get('market'),
+                'age_seconds': round(max(0.0, now - queued_at), 1),
+                'blocked_by': row.get('blocked_by'),
+            })
+        return rows
+
+
+def _enqueue_ui_analysis(symbol, timeframe, market='futures', blocked_by=None):
+    """# 24.3: FIFO bounded queue; same cell is coalesced, oldest is evicted."""
+    key = _pending_ui_analysis_key(symbol, timeframe, market)
+    row = {
+        'key': key,
+        'symbol': str(symbol or ''),
+        'timeframe': str(timeframe or ''),
+        'market': str(market or 'futures').lower(),
+        'queued_at': time.monotonic(),
+        'blocked_by': str(blocked_by or 'HEAVY_LOCK')[:120],
+    }
+    dropped = None
+    with _PENDING_UI_ANALYSIS_LOCK:
+        # Coalesce repeated browser polling for the same cell.
+        for i, existing in enumerate(list(_PENDING_UI_ANALYSIS_QUEUE)):
+            if existing.get('key') == key:
+                _PENDING_UI_ANALYSIS_QUEUE.pop(i)
+                break
+        while len(_PENDING_UI_ANALYSIS_QUEUE) >= _UI_PENDING_MAX:
+            dropped = _PENDING_UI_ANALYSIS_QUEUE.pop(0)
+        _PENDING_UI_ANALYSIS_QUEUE.append(row)
+    try:
+        import commit24_repair_runtime as _c24_runtime
+        recorder = getattr(_c24_runtime, "_record_queue_enqueue", None)
+        if callable(recorder):
+            recorder(bool(dropped))
+    except Exception:
+        pass
+    if dropped:
+        print(
+            f"⚠️ [COMMIT24.3] cola UI llena: se descarta {dropped.get('symbol')} "
+            f"{dropped.get('timeframe')} ({dropped.get('market')})",
+            flush=True,
+        )
+    return {
+        'queued': True,
+        'queue_size': len(_PENDING_UI_ANALYSIS_QUEUE),
+        'dropped_oldest': bool(dropped),
+        'row': dict(row),
+    }
+
+
+def _pop_pending_ui_analysis():
+    with _PENDING_UI_ANALYSIS_LOCK:
+        if not _PENDING_UI_ANALYSIS_QUEUE:
+            return None
+        return dict(_PENDING_UI_ANALYSIS_QUEUE.pop(0))
+
+
+def _run_futures_ui_analysis_sync(symbol, timeframe, market='futures', pre_acquired=False):
+    """# 24.3: ejecuta UNA UI analysis sin crear un thread de espera."""
+    market = str(market or 'futures').lower()
+    key = _futures_ui_key(symbol, timeframe)
+    owner = f"multi-ui:{symbol}:{timeframe}" if market == 'multiasset' else f"{market}-ui:{symbol}:{timeframe}"
+    heavy_acquired = bool(pre_acquired)
+
+    if not heavy_acquired:
+        # Nunca esperar el lock aquí. Si no está libre, el caller vuelve a la cola.
+        heavy_acquired = bool(_acquire_heavy_analysis(owner, timeout=0))
+        if not heavy_acquired:
+            return 'DEFERRED_BUSY'
+
+    try:
+        _log_memory_runtime(f'{owner}:before')
+        if market == 'multiasset':
+            engine = _get_multiasset_system()
+            if engine is None:
+                raise RuntimeError('MultiAssetSystem no disponible')
+            result = engine.analyze_multiasset_market(symbol, timeframe, closed_candle_only=True)
+            if not isinstance(result, dict) or result.get('success') is False:
+                raise RuntimeError(str((result or {}).get('error') or 'Análisis Multi-Activo vacío'))
+            result.setdefault('symbol', symbol)
+            result.setdefault('timeframe', timeframe)
+            result = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
+            levels = result.get('levels') or {}
+            if levels.get('execution_runtime_failed') or levels.get('execution_runtime_error'):
+                raise RuntimeError(str(levels.get('execution_runtime_error') or 'EXECUTION_RUNTIME_FAILED'))
+            _multiasset_cache_result(symbol, timeframe, result)
+            ui_result = _compact_futures_ui_result(result)
+            _store_futures_ui_cached(symbol, timeframe, ui_result)
+        else:
+            futures = _get_futures_system()
+            if futures is None:
+                raise RuntimeError('FuturesSystem no disponible')
+            from copy import copy
+            preview_futures = copy(futures)
+            preview_futures.liquidation_heatmaps = {}
+            preview_futures.dynamic_zones = {}
+            preview_futures.last_analysis = {}
+            preview_futures.voting_history = {}
+            result = preview_futures.analyze_futures_market(
+                symbol,
+                timeframe,
+                closed_candle_only=False,
+                intrabar_preview=True,
+            )
+            if not result:
+                raise RuntimeError('Análisis Futures vacío')
+            result = _apply_profitability_router(result, symbol, timeframe)
+            result = _apply_96_futures_risk_policy(result, symbol, timeframe)
+            result = _apply_36s_futures_ai_control(result, symbol, timeframe)
+            result = _apply_17_5_8_preliminary_learning_prior(result, 'futures')
+            result = _enrich_futures_public_message(result)
+            ui_result = _compact_fast_futures_ui_result(_compact_futures_ui_result(result), timeframe)
+            runtime_result = _compact_futures_runtime_result(result)
+            _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=runtime_result)
+            _store_futures_ui_cached(symbol, timeframe, ui_result)
+        _log_memory_runtime(f'{owner}:after')
+        return 'COMPLETED'
+    except Exception as exc:
+        print(f'❌ [UI {market.upper()}] {symbol} {timeframe}: {exc}', flush=True)
+        with _FUTURES_UI_CACHE['lock']:
+            _FUTURES_UI_CACHE['errors'][key] = {'ts': time.time(), 'error': str(exc)[:240]}
+        return 'FAILED'
+    finally:
+        if heavy_acquired:
+            _release_heavy_analysis(owner)
+        with _FUTURES_UI_CACHE['lock']:
+            _FUTURES_UI_CACHE['running'].discard(key)
+        if str(timeframe) in _FAST_FUTURES_UI_POINTS:
+            _trim_process_heap()
+        _mark_futures_interactive_priority(seconds=6)
+
+
+def _drain_ui_analysis_queue(max_items=None):
+    """# 24.3: procesa pendientes en el MISMO worker que liberó el heavy lock."""
+    limit = _UI_PENDING_MAX if max_items is None else max(1, int(max_items))
+    processed = 0
+    while processed < limit:
+        row = _pop_pending_ui_analysis()
+        if row is None:
+            break
+        symbol = row.get('symbol')
+        timeframe = row.get('timeframe')
+        market = row.get('market') or 'futures'
+        key = _futures_ui_key(symbol, timeframe)
+        with _FUTURES_UI_CACHE['lock']:
+            if key in _FUTURES_UI_CACHE['running']:
+                continue
+            _FUTURES_UI_CACHE['running'].add(key)
+            _FUTURES_UI_CACHE['errors'].pop(key, None)
+        status = _run_futures_ui_analysis_sync(symbol, timeframe, market, pre_acquired=False)
+        processed += 1
+        if status == 'DEFERRED_BUSY':
+            # The release wrapper should normally have a free slot; if a race
+            # occurred, put this single item back and stop without waiting.
+            _enqueue_ui_analysis(symbol, timeframe, market, blocked_by='HEAVY_LOCK_RACE')
             with _FUTURES_UI_CACHE['lock']:
-                _FUTURES_UI_CACHE['errors'][key]={'ts':time.time(),'error':str(exc)[:240]}
-        finally:
-            if heavy_acquired: _release_heavy_analysis(owner)
-            with _FUTURES_UI_CACHE['lock']: _FUTURES_UI_CACHE['running'].discard(key)
-            if str(timeframe) in _FAST_FUTURES_UI_POINTS: _trim_process_heap()
-            _mark_futures_interactive_priority(seconds=6)
+                _FUTURES_UI_CACHE['running'].discard(key)
+            break
+    return processed
 
-    threading.Thread(target=_do_ui_analysis,daemon=True,name=f'{market}-ui-{symbol}-{timeframe}').start()
+
+def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
+    """# 24.3: schedule UI analysis without any thread waiting on heavy lock."""
+    market = str(market or 'futures').lower()
+    try:
+        import sys
+        _commit24_3 = sys.modules.get('commit24_repair_runtime')
+        if _commit24_3 is not None and callable(getattr(_commit24_3, '_maybe_stall_exit', None)):
+            # # 24.3: user interaction is an existing heartbeat for the bounded
+            # stall policy; no watchdog thread is created.
+            _commit24_3._maybe_stall_exit(sys.modules[__name__])
+    except Exception:
+        pass
+    key = _futures_ui_key(symbol, timeframe)
+    owner = f"multi-ui:{symbol}:{timeframe}" if market == 'multiasset' else f"{market}-ui:{symbol}:{timeframe}"
+    _mark_futures_interactive_priority()
+
+    with _FUTURES_UI_CACHE['lock']:
+        running = _FUTURES_UI_CACHE['running']
+        if key in running:
+            return 'RUNNING'
+
+    # # 24.3: reserve the heavy slot NOW when free, so a background job cannot
+    # slip in between HTTP request and UI worker creation.
+    try:
+        reserved = bool(_acquire_heavy_analysis(owner, timeout=0))
+    except Exception:
+        reserved = False
+
+    if not reserved:
+        holder = globals().get('_HEAVY_ANALYSIS_OWNER')
+        result = _enqueue_ui_analysis(symbol, timeframe, market, blocked_by=holder or 'MEMORY_GUARD')
+        return 'DEFERRED_INTERACTIVE_QUEUE'
+
+    with _FUTURES_UI_CACHE['lock']:
+        _FUTURES_UI_CACHE['running'].add(key)
+        _FUTURES_UI_CACHE['errors'].pop(key, None)
+
+    def _runner():
+        # # 24.3: this thread performs only analysis; it never waits for the lock.
+        _run_futures_ui_analysis_sync(symbol, timeframe, market, pre_acquired=True)
+
+    try:
+        threading.Thread(
+            target=_runner,
+            daemon=True,
+            name=f'{market}-ui-{symbol}-{timeframe}',
+        ).start()
+    except Exception as exc:
+        with _FUTURES_UI_CACHE['lock']:
+            _FUTURES_UI_CACHE['running'].discard(key)
+            _FUTURES_UI_CACHE['errors'][key] = {'ts': time.time(), 'error': f'THREAD_START:{exc}'}
+        _release_heavy_analysis(owner)
+        return 'FAILED'
     return 'SCHEDULED'
+
 
 def _serialize_futures_cache(data):
     """

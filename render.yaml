@@ -1,4 +1,4 @@
-# COMMIT 24.1 — Q authority + frequency coverage + fair heavy-runtime repair.
+# COMMIT 24.3 — Q-Cluster + preemptive UI queue; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
@@ -10,6 +10,10 @@ services:
         value: 3.11.9
       - key: MALLOC_ARENA_MAX
         value: "1"
+      - key: PYTHONMALLOC
+        value: "malloc"
+      - key: MALLOC_TRIM_THRESHOLD_
+        value: "65536"
       - key: PYTHONUNBUFFERED
         value: "1"
       - key: OMP_NUM_THREADS
@@ -50,6 +54,20 @@ services:
         value: "1"
       - key: COMMIT22_WORKER_RESTART_POLICY
         value: "TIMEOUT_120S_MAX_REQUESTS_80"
+      - key: STALL_EXIT_SECONDS
+        value: "105"
+      - key: UI_PENDING_MAX
+        value: "5"
+      - key: Q_CLUSTER_ENABLED
+        value: "true"
+      - key: Q_CLUSTER_MIN_AVG
+        value: "72"
+      - key: Q_CLUSTER_MIN_TWO
+        value: "70"
+      - key: Q_CLUSTER_STD_MIN
+        value: "5"
+      - key: REGIME_CLASSIFIER_ENABLED
+        value: "false"
       - key: COMMIT24_STALL_EXIT_SECONDS
         value: "105"
       - key: COMMIT24_PENDING_UI_TTL_SECONDS

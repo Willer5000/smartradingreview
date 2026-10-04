@@ -1,18 +1,14 @@
-"""Commit 24 production entrypoint.
-
-Loads the proven Commit 23.1 boot chain first, then applies the real runtime
-repair to the already-imported app.py.
-"""
+"""Commit 24.3 production entrypoint."""
 from __future__ import annotations
 
 from commit23_1_main_entrypoint import app  # noqa: F401
 
+COMMIT24_VERSION = "COMMIT24.3_Q_CLUSTER_PREEMPTIVE_RUNTIME_V1"
 try:
     import commit24_repair_runtime as _repair
     COMMIT24_INSTALL = _repair.install(app)
     COMMIT24_VERSION = _repair.VERSION
-except Exception as exc:
-    COMMIT24_VERSION = "COMMIT24_1_REAL_Q_AUTHORITY_FAIR_RUNTIME_V2"
+except Exception as exc:  # Fail closed without hiding the base application.
     COMMIT24_INSTALL = {
         "installed": False,
         "version": COMMIT24_VERSION,
