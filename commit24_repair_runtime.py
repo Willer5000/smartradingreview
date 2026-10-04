@@ -27,7 +27,7 @@ import time
 from functools import wraps
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "COMMIT24_REAL_Q_AUTHORITY_FAIR_RUNTIME_V1"
+VERSION = "COMMIT24_1_REAL_Q_AUTHORITY_FAIR_RUNTIME_V2"
 QUALITY_AUTHORITY_VERSION = "COMMIT23_TEN_FILTER_PARALLEL_AUTHORITY_V1"
 Q_MIN_SCORE = 75.0
 OPERATING_SAFETY_FLOOR = 65.0
@@ -52,6 +52,15 @@ _INSTALLED = False
 
 _STATE_LOCK = threading.RLock()
 _PENDING_UI: Dict[str, Dict[str, Any]] = {}
+
+_METRICS_LOCK = threading.Lock()
+_METRICS = {
+    "q_evaluations": 0,
+    "q_confirmed": 0,
+    "q_rejected": 0,
+    "last_authority": None,
+    "blockers": {},
+}
 _HOLDER_STARTED_AT = 0.0
 _HOLDER_OWNER = ""
 _STALL_TIMER: threading.Timer | None = None
@@ -135,12 +144,12 @@ def _rr(action: str, levels: Dict[str, Any]) -> float:
 
 
 def _revalue_safety_for_geometry(app_module: Any, result: Dict[str, Any], action: str) -> Dict[str, Any]:
-    """Recalculate deterministic Safety after a fallback geometry change.
+    """Recalculate every geometry-dependent risk quantity after fallback repair.
 
-    We reuse the already-computed entry/tp/sl quality components and the real
-    context present in the same snapshot. This never raises a missing metric to
-    make a candidate pass. If the engine cannot recalculate Safety, the old
-    value is retained and the candidate remains subject to the 65 floor.
+    Commit 24.1 deliberately fails closed when the fallback geometry cannot be
+    re-valued from the same closed-candle snapshot.  In particular, ATR stress
+    is NOT copied from the old geometry because the Futures risk engine defines
+    the stress move as max(SL distance, ATR * multiplier).
     """
     levels = dict(result.get("levels") or {})
     if not levels:
@@ -163,37 +172,83 @@ def _revalue_safety_for_geometry(app_module: Any, result: Dict[str, Any], action
                 levels["execution_safety_components"] = dict(safety.get("components") or {})
                 levels["execution_safety_timeframe_factor"] = safety.get("timeframe_factor")
     except Exception:
+        # The existing score remains subject to the hard >=65 guard. We never
+        # manufacture a passing value if the deterministic recalculation fails.
         pass
 
-    # Recompute only the geometry-dependent SL-loss margin. ATR stress depends on
-    # ATR/leverage/risk fraction and can safely be preserved from the same
-    # closed-candle snapshot when available.
+    risk_control = dict(levels.get("risk_control") or {})
+    leverage = _f(levels.get("leverage"), 0.0)
+    raw_allocation = (
+        levels.get("risk_allocation_fraction")
+        if levels.get("risk_allocation_fraction") is not None
+        else risk_control.get("risk_allocation_fraction")
+    )
+    allocation = _f(raw_allocation, -1.0)
+    entry = _f(levels.get("entry"))
+    stop_loss = _f(levels.get("stop_loss"))
+
+    if not (leverage > 0 and 0.0 < allocation <= 1.0 and entry > 0 and stop_loss > 0):
+        risk_control["geometry_revaluation_failed"] = True
+        risk_control["geometry_revaluation_reason"] = "MISSING_LEVERAGE_OR_RISK_ALLOCATION"
+        levels["risk_control"] = risk_control
+        result["levels"] = levels
+        return result
+
+    sl_pct = abs(entry - stop_loss) / entry * 100.0
+    risk_control["estimated_sl_loss_pct_margin"] = round(
+        sl_pct * leverage * allocation, 2
+    )
+    risk_control["estimated_sl_loss_pct_position_margin"] = round(
+        sl_pct * leverage, 2
+    )
+
+    volatility = result.get("volatility") or {}
+    current = _f(
+        result.get("current_price")
+        or result.get("live_price")
+        or result.get("analysis_price")
+        or entry
+    )
+    atr_pct = _f(volatility.get("atr_pct") or levels.get("atr_pct"), 0.0)
+    if atr_pct <= 0:
+        atr_abs = _f(volatility.get("atr"), 0.0)
+        if atr_abs > 0 and current > 0:
+            atr_pct = atr_abs / current * 100.0
+
+    # Same multiplier used by FuturesSystem's publication-risk contract.
+    atr_multiplier = 1.5
     try:
-        risk_control = dict(levels.get("risk_control") or {})
-        leverage = _f(levels.get("leverage"), 0.0)
-        raw_allocation = (
-            levels.get("risk_allocation_fraction")
-            if levels.get("risk_allocation_fraction") is not None
-            else risk_control.get("risk_allocation_fraction")
+        from futures_system import FUTURES_RISK_CONFIG
+        atr_multiplier = _f(
+            FUTURES_RISK_CONFIG.get("atr_stress_multiplier"),
+            1.5,
         )
-        allocation = _f(raw_allocation, -1.0)
-        if leverage > 0 and 0.0 < allocation <= 1.0:
-            e = _f(levels.get("entry"))
-            sl = _f(levels.get("stop_loss"))
-            if e > 0 and sl > 0:
-                sl_pct = abs(e - sl) / e * 100.0
-                risk_control["estimated_sl_loss_pct_margin"] = round(sl_pct * leverage * allocation, 2)
-                risk_control["estimated_sl_loss_pct_position_margin"] = round(sl_pct * leverage, 2)
-                risk_control["sl_loss_revaluation_source"] = "COMMIT24_REAL_GEOMETRY_PLUS_EXISTING_RISK_ALLOCATION"
-                levels["risk_control"] = risk_control
-        elif leverage > 0 and risk_control.get("estimated_sl_loss_pct_margin") is not None:
-            # Old compact snapshots may lack the allocation field. Preserve the
-            # already persisted estimate rather than inventing a 100% allocation.
-            risk_control["sl_loss_revaluation_source"] = "PRESERVED_EXISTING_SNAPSHOT_ESTIMATE_NO_ALLOCATION"
-            levels["risk_control"] = risk_control
     except Exception:
         pass
 
+    if atr_pct <= 0:
+        risk_control["geometry_revaluation_failed"] = True
+        risk_control["geometry_revaluation_reason"] = "MISSING_REAL_ATR"
+    else:
+        atr_stress_move_pct = max(sl_pct, atr_pct * atr_multiplier)
+        risk_control["atr_stress_move_pct"] = round(atr_stress_move_pct, 4)
+        risk_control["estimated_atr_stress_loss_pct_margin"] = round(
+            atr_stress_move_pct * leverage * allocation,
+            2,
+        )
+        risk_control["estimated_atr_stress_loss_pct_position_margin"] = round(
+            atr_stress_move_pct * leverage,
+            2,
+        )
+        risk_control["atr_stress_revaluation_source"] = (
+            "COMMIT24_1_REAL_GEOMETRY_MAX_SL_OR_ATR"
+        )
+
+    risk_control["risk_allocation_fraction"] = round(allocation, 6)
+    risk_control["sl_loss_revaluation_source"] = (
+        "COMMIT24_1_REAL_GEOMETRY_PLUS_EXISTING_RISK_ALLOCATION"
+    )
+    levels["risk_control"] = risk_control
     result["levels"] = levels
     return result
 
@@ -299,11 +354,17 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
     if gate_codes:
         legacy_blockers = gate_codes
 
-    synthetic = bool(result.get("market_data_is_synthetic") or levels.get("market_data_is_synthetic"))
+    synthetic_raw = (
+        result.get("market_data_is_synthetic")
+        if "market_data_is_synthetic" in result
+        else levels.get("market_data_is_synthetic")
+    )
+    # Commit 24.1: absence of a provenance flag is not proof of real data.
+    real_data_explicit = synthetic_raw is False
     safety = _f(levels.get("execution_safety"))
     risk_control = levels.get("risk_control") if isinstance(levels.get("risk_control"), Mapping) else {}
-    sl_loss = _f(risk_control.get("estimated_sl_loss_pct_margin"), abs(_f(levels.get("roi_sl"))))
-    atr_stress = _f(risk_control.get("estimated_atr_stress_loss_pct_margin"))
+    sl_loss = _f(risk_control.get("estimated_sl_loss_pct_margin"), 0.0)
+    atr_stress = _f(risk_control.get("estimated_atr_stress_loss_pct_margin"), 0.0)
 
     universal_codes = [str(x).upper() for x in ((parallel.get("universal_guards") or {}).get("codes") or [])]
     if safety < OPERATING_SAFETY_FLOOR and "OPERATIONAL_SAFETY_BELOW_65" not in universal_codes:
@@ -312,7 +373,9 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         universal_codes.append("LOSS_AT_SL")
     if not (0.0 < atr_stress <= MAX_ATR_STRESS_PCT) and "ATR_STRESS" not in universal_codes:
         universal_codes.append("ATR_STRESS")
-    if synthetic and "SYNTHETIC_MARKET_DATA" not in universal_codes:
+    if not real_data_explicit and "REAL_MARKET_DATA_UNVERIFIED" not in universal_codes:
+        universal_codes.append("REAL_MARKET_DATA_UNVERIFIED")
+    elif synthetic_raw is True and "SYNTHETIC_MARKET_DATA" not in universal_codes:
         universal_codes.append("SYNTHETIC_MARKET_DATA")
     if stage != "PUBLICATION_GATE":
         universal_codes.append("PRE_GATE_REJECTION")
@@ -334,7 +397,7 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         and safety >= OPERATING_SAFETY_FLOOR
         and sl_loss <= MAX_SL_LOSS_PCT
         and 0.0 < atr_stress <= MAX_ATR_STRESS_PCT
-        and not synthetic
+        and real_data_explicit
         and not universal_codes
     )
 
@@ -356,6 +419,7 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         "atr_stress_pct": round(atr_stress, 2),
         "q10_required": False,
         "dedupe_key": f"{str(result.get('symbol') or '').upper()}|{str(result.get('timeframe') or '')}",
+        "real_data_explicit": real_data_explicit,
     }
 
     # Persist the complete trace into the same compact result/lifecycle payload.
@@ -389,6 +453,27 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
     result["levels"] = levels
 
     if confirmed:
+        gate = dict(
+            result.get("futures_publication_gate")
+            or levels.get("futures_publication_gate")
+            or {}
+        )
+        gate.update({
+            "eligible": True,
+            "tier": "PREMIUM",
+            "status": "PREMIUM_CONTEXT_QUALITY",
+            "reasons": [],
+            "reason_codes": [],
+            "quality_authority": authority.get("authority"),
+            "quality_authority_name": authority.get("authority_name"),
+            "quality_authority_score": authority.get("score"),
+            "q10_is_mandatory": False,
+            "hard_q10_thresholds_unchanged": True,
+            "final_authority_version": VERSION,
+            "legacy_q10_reason_codes": authority.get("legacy_blockers") or [],
+        })
+        levels["futures_publication_gate"] = gate
+        result["futures_publication_gate"] = gate
         levels["publication_status"] = "EXECUTABLE_SIGNAL"
         levels["is_rejected"] = False
         levels["is_executable"] = True
@@ -412,47 +497,151 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
     else:
         result["premium_blocker_stage_24"] = ";".join(universal_codes[:8]) or "Q_NOT_AUTHORISED"
 
+    with _METRICS_LOCK:
+        _METRICS["q_evaluations"] += 1
+        if confirmed:
+            _METRICS["q_confirmed"] += 1
+        else:
+            _METRICS["q_rejected"] += 1
+        _METRICS["last_authority"] = {
+            "symbol": str(result.get("symbol") or ""),
+            "timeframe": str(result.get("timeframe") or ""),
+            "authority": authority.get("authority"),
+            "score": authority.get("score"),
+            "confirmed": bool(confirmed),
+            "blockers": list(universal_codes[:8]),
+        }
+        for code in universal_codes:
+            _METRICS["blockers"][code] = int(_METRICS["blockers"].get(code, 0)) + 1
+
     return result, authority
 
 
-def _normalize_quality_candidate(app_module: Any, result: Dict[str, Any], symbol: str, timeframe: str) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def _geometry_fingerprint(action: str, result: Mapping[str, Any]) -> Tuple[Any, ...]:
+    levels = _levels(result)
+    return (
+        _action(action),
+        round(_f(levels.get("entry")), 12),
+        round(_f(levels.get("stop_loss")), 12),
+        round(_f(levels.get("take_profit")), 12),
+    )
+
+
+def _existing_authority_if_current(result: Mapping[str, Any]) -> Dict[str, Any]:
+    authority = result.get("final_quality_authority")
+    if not isinstance(authority, Mapping):
+        return {}
+    if str(result.get("final_quality_authority_version") or "") != VERSION:
+        return {}
+    if not isinstance(result.get("quality_filter_version"), str):
+        return {}
+    if result.get("quality_filter_version") != QUALITY_AUTHORITY_VERSION:
+        return {}
+    return dict(authority)
+
+
+def _normalize_quality_candidate(
+    app_module: Any,
+    result: Dict[str, Any],
+    symbol: str,
+    timeframe: str,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     if not isinstance(result, dict) or result.get("success") is False:
         return result, {"confirmed": False, "authority": "NONE", "score": 0.0}
 
-    out = dict(result)
+    out = result
     out.setdefault("symbol", symbol)
     out.setdefault("timeframe", timeframe)
 
-    # The real source of the user's 20 visible hypotheses is this exact helper
-    # called by app.py's classifier. It may rebuild fallback geometry and then
-    # hard-code publication_status=ANALYSIS_ONLY. We deliberately call it first
-    # so Q evaluates the geometry that the UI/lifecycle actually see.
+    cached_authority = _existing_authority_if_current(out)
+    if cached_authority:
+        return out, cached_authority
+
+    levels_before = _levels(out)
     action = _action(
-        ((out.get("levels") or {}).get("manual_observation_action"))
-        or ((out.get("decision") or {}).get("action"))
-        or ((out.get("operational_intelligence") or {}).get("candidate_action"))
-        or ((out.get("decision") or {}).get("original_action"))
+        levels_before.get("manual_observation_action")
+        or (out.get("decision") or {}).get("action")
+        or (out.get("operational_intelligence") or {}).get("candidate_action")
+        or (out.get("decision") or {}).get("original_action")
         or ((out.get("operational_intelligence") or {}).get("thesis") or {}).get("direction")
     )
     if action not in {"LONG", "SHORT"}:
-        return out, {"confirmed": False, "authority": "NONE", "score": 0.0, "reason": "DIRECTION_UNDEFINED"}
+        return out, {
+            "confirmed": False,
+            "authority": "NONE",
+            "score": 0.0,
+            "reason": "DIRECTION_UNDEFINED",
+        }
 
-    try:
-        geometry_fn = getattr(app_module, "_ensure_manual_diagnostic_geometry_175114", None)
-        if callable(geometry_fn):
-            geometry_fn(out, action, symbol, timeframe)
-    except Exception:
-        pass
+    before_status = str(
+        levels_before.get("publication_status")
+        or out.get("publication_status")
+        or ""
+    ).upper()
+    before_fp = _geometry_fingerprint(action, out)
 
-    out = _revalue_safety_for_geometry(app_module, out, action)
+    # IMPORTANT: the diagnostic geometry helper is only allowed to run on the
+    # exact ANALYSIS_ONLY/fallback lane. Native EXECUTABLE_SIGNAL geometry is
+    # never silently rewritten by this repair.
+    needs_fallback_repair = bool(
+        before_status in {"", "ANALYSIS_ONLY", "REJECTED"}
+        or levels_before.get("manual_geometry_fallback")
+        or levels_before.get("manual_geometry_reaction_conflict")
+        or levels_before.get("is_rejected") is True
+    )
+
+    if needs_fallback_repair:
+        try:
+            geometry_fn = getattr(
+                app_module,
+                "_ensure_manual_diagnostic_geometry_175114",
+                None,
+            )
+            if callable(geometry_fn):
+                geometry_fn(out, action, symbol, timeframe)
+        except Exception:
+            pass
+
+    after_fp = _geometry_fingerprint(action, out)
+    geometry_changed = before_fp != after_fp
+
+    # Any ANALYSIS_ONLY/fallback candidate gets a deterministic risk revaluation
+    # even when the helper kept the same prices: its risk allocation/ATR stress
+    # contract must correspond to the exact geometry that Q will score.
+    if needs_fallback_repair or geometry_changed:
+        out = _revalue_safety_for_geometry(app_module, out, action)
+
     return _build_q_evaluation(app_module, out, action)
 
 
 def _force_executable_output(out: Dict[str, Any], authority: Mapping[str, Any]) -> Dict[str, Any]:
     if not authority.get("confirmed"):
         return out
+
     result = dict(out)
     levels = dict(result.get("levels") or {})
+    gate = dict(
+        result.get("futures_publication_gate")
+        or levels.get("futures_publication_gate")
+        or {}
+    )
+    gate.update({
+        "eligible": True,
+        "tier": "PREMIUM",
+        "status": "PREMIUM_CONTEXT_QUALITY",
+        "reasons": [],
+        "reason_codes": [],
+        "quality_authority": authority.get("authority"),
+        "quality_authority_name": authority.get("authority_name"),
+        "quality_authority_score": authority.get("score"),
+        "q10_is_mandatory": False,
+        "hard_q10_thresholds_unchanged": True,
+        "final_authority_version": VERSION,
+        "legacy_q10_reason_codes": authority.get("legacy_blockers") or [],
+    })
+    levels["futures_publication_gate"] = gate
+    result["futures_publication_gate"] = gate
+
     levels["publication_status"] = "EXECUTABLE_SIGNAL"
     levels["publication_eligible"] = True
     levels["is_rejected"] = False
@@ -461,17 +650,20 @@ def _force_executable_output(out: Dict[str, Any], authority: Mapping[str, Any]) 
     levels["quality_filter_authority"] = authority.get("authority")
     levels["quality_filter_score"] = authority.get("score")
     levels["quality_filter_name"] = authority.get("authority_name")
+    levels["quality_authority_version"] = QUALITY_AUTHORITY_VERSION
     result["levels"] = levels
     result["publication_status"] = "EXECUTABLE_SIGNAL"
     result["publication_eligible"] = True
     result["is_executable"] = True
     result["is_rejected"] = False
+    result["futures_signal_tier"] = "PREMIUM"
     result["quality_filter_confirmed"] = True
     result["quality_filter_authority"] = authority.get("authority")
     result["quality_filter_score"] = authority.get("score")
+    result["quality_filter_name"] = authority.get("authority_name")
     result["premium_confirmation_mode"] = "ONE_OF_TEN_QUALITY_FILTERS"
     result["final_quality_authority"] = dict(authority)
-    result["quality_authority_version"] = QUALITY_AUTHORITY_VERSION
+    result["final_quality_authority_version"] = VERSION
     return result
 
 
@@ -483,7 +675,13 @@ def _wrap_classifier(app_module: Any) -> Dict[str, Any]:
 
     @wraps(original)
     def wrapped(symbol, timeframe, result, lifecycle=None, min_confidence=0, _original=original):
-        enriched, authority = _normalize_quality_candidate(app_module, result, str(symbol), str(timeframe))
+        cached = _existing_authority_if_current(result if isinstance(result, Mapping) else {})
+        if cached:
+            enriched, authority = result, cached
+        else:
+            enriched, authority = _normalize_quality_candidate(
+                app_module, result, str(symbol), str(timeframe)
+            )
         out = _original(
             symbol=str(symbol),
             timeframe=str(timeframe),
@@ -541,9 +739,15 @@ def _wrap_lifecycle(app_module: Any) -> Dict[str, Any]:
 
     @wraps(original)
     def wrapped(lifecycle, symbol, timeframe, result, _original=original):
-        enriched, authority = _normalize_quality_candidate(app_module, result, str(symbol), str(timeframe))
+        cached = _existing_authority_if_current(result if isinstance(result, Mapping) else {})
+        if cached:
+            enriched, authority = result, cached
+        else:
+            enriched, authority = _normalize_quality_candidate(
+                app_module, result, str(symbol), str(timeframe)
+            )
         if authority.get("confirmed"):
-            result = _force_executable_output(enriched, authority)
+            result = _force_executable_output(dict(enriched), authority)
         else:
             result = enriched
         return _original(lifecycle, symbol, timeframe, result)
@@ -571,7 +775,14 @@ def _wrap_hidden_candidates(app_module: Any) -> Dict[str, Any]:
             symbol = str(item.get("symbol") or "")
             timeframe = str(item.get("timeframe") or "")
             authority = dict(item.get("final_quality_authority") or {})
-            if not authority.get("confirmed"):
+            if not authority:
+                # Preserve canonical metadata already attached by the upstream
+                # classifier/visibility builder. Do not erase a valid Q result.
+                item["quality_filter_membership"] = item.get("quality_filter_membership") or []
+                item["quality_filter_authority"] = item.get("quality_filter_authority") or "NONE"
+                item["quality_filter_score"] = _f(item.get("quality_filter_score"))
+                item["quality_filter_confirmed"] = bool(item.get("quality_filter_confirmed"))
+            elif not authority.get("confirmed"):
                 item["quality_filter_membership"] = authority.get("passed_filters") or item.get("quality_filter_membership") or []
                 item["quality_filter_authority"] = authority.get("authority") or "NONE"
                 item["quality_filter_score"] = authority.get("score") or 0
@@ -890,6 +1101,24 @@ def _install_health(app_module: Any) -> Dict[str, Any]:
                     }
                     for v in _PENDING_UI.values()
                 ]
+            with _METRICS_LOCK:
+                metrics = {
+                    "q_evaluations": int(_METRICS["q_evaluations"]),
+                    "q_confirmed": int(_METRICS["q_confirmed"]),
+                    "q_rejected": int(_METRICS["q_rejected"]),
+                    "promotion_rate_pct": round(
+                        100.0 * _METRICS["q_confirmed"] / max(1, _METRICS["q_evaluations"]),
+                        2,
+                    ),
+                    "last_authority": dict(_METRICS["last_authority"] or {}),
+                    "top_blockers": sorted(
+                        (
+                            {"code": k, "count": v}
+                            for k, v in _METRICS["blockers"].items()
+                        ),
+                        key=lambda row: (-row["count"], row["code"]),
+                    )[:8],
+                }
             return jsonify({
                 "success": True,
                 "version": VERSION,
@@ -915,6 +1144,7 @@ def _install_health(app_module: Any) -> Dict[str, Any]:
                 "no_threshold_lowering": True,
                 "no_new_market_data_requests": True,
                 "no_new_permanent_workers": True,
+                "metrics": metrics,
             })
     except Exception as exc:
         return {"installed": False, "error": f"{type(exc).__name__}:{str(exc)[:180]}"}

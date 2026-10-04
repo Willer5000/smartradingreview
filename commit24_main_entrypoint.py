@@ -12,7 +12,7 @@ try:
     COMMIT24_INSTALL = _repair.install(app)
     COMMIT24_VERSION = _repair.VERSION
 except Exception as exc:
-    COMMIT24_VERSION = "COMMIT24_REAL_Q_AUTHORITY_FAIR_RUNTIME_V1"
+    COMMIT24_VERSION = "COMMIT24_1_REAL_Q_AUTHORITY_FAIR_RUNTIME_V2"
     COMMIT24_INSTALL = {
         "installed": False,
         "version": COMMIT24_VERSION,

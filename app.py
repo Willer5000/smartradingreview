@@ -38645,7 +38645,24 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
         owner=(f'multi-ui:{symbol}:{timeframe}' if market=='multiasset' else f'{market}-ui:{symbol}:{timeframe}')
         heavy_acquired=False
         try:
-            heavy_acquired=_acquire_heavy_analysis(owner,timeout=18)
+            # COMMIT 24.1: the queue/reservation in commit24_repair_runtime is
+            # authoritative, but this direct guard also protects gunicorn when
+            # the overlay is unavailable or a race occurs between reservation
+            # and thread start. Never create a thread that merely sleeps on the
+            # global heavy lock behind another owner.
+            try:
+                with _HEAVY_ANALYSIS_STATE_LOCK:
+                    current_heavy_owner = str(_HEAVY_ANALYSIS_OWNER or '')
+                if current_heavy_owner and current_heavy_owner != owner:
+                    print(
+                        f'⏳ [COMMIT24.1] {owner}: heavy slot already held by '
+                        f'{current_heavy_owner}; UI remains deferred.',
+                        flush=True,
+                    )
+                    return
+            except Exception:
+                current_heavy_owner = ''
+            heavy_acquired=_acquire_heavy_analysis(owner,timeout=5)
             if not heavy_acquired: raise RuntimeError('No se obtuvo turno de análisis interactivo')
             _log_memory_runtime(f'{owner}:before')
             if market=='multiasset':

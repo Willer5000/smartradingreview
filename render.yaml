@@ -1,4 +1,4 @@
-# COMMIT 24 — same proven Commit 23.1 chain + real Q authority/runtime repair.
+# COMMIT 24.1 — Q authority + frequency coverage + fair heavy-runtime repair.
 services:
   - type: web
     name: crypto-trader-analyst
