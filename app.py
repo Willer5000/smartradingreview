@@ -21927,6 +21927,16 @@ class TradingExpertSystem:
                     or 'ENTRY_MISSED'
                 )
             
+            # COMMIT 24.5R — helper local para no convertir objeciones blandas
+            # de setup Futures en veto direccional. Geometry/Q/economics siguen
+            # gobernando la publicación real.
+            def _futures_setup_guard_is_soft(_guard):
+                if not isinstance(_guard, dict):
+                    return False
+                if str(_guard.get('action') or '').upper() != 'PRECAUCION':
+                    return False
+                return bool(_guard.get('reasons'))
+
             # ==========================================================
             # RC9.2 — SETUP-AWARE EXECUTION GUARD
             # ==========================================================
@@ -21946,16 +21956,50 @@ class TradingExpertSystem:
                     )
                     if operational_execution.get('applied'):
                         _original_operational_action = str(accion_consenso)
-                        accion_consenso = str(operational_execution.get('action') or 'ESPERAR').upper()
-                        confianza_consenso = min(float(confianza_consenso or 0), 68.0 if analysis_system_type == 'futures' else 72.0)
-                        for _r in operational_execution.get('reasons') or []:
-                            if _r and _r not in razones_consenso:
-                                razones_consenso.append(str(_r))
-                        levels['is_executable'] = False
-                        levels['publication_status'] = 'ANALYSIS_ONLY'
-                        levels['suggested_size'] = 0
-                        levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
-                        print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
+                        _guard_action = str(operational_execution.get('action') or 'ESPERAR').upper()
+                        _soft_futures_guard = bool(
+                            analysis_system_type == 'futures'
+                            and _futures_setup_guard_is_soft(operational_execution)
+                        )
+                        if _soft_futures_guard:
+                            # COMMIT 24.5R: calidad de zona / retest / familia son
+                            # evidencia de timing, NO autoridad de dirección. La
+                            # tesis permanece LONG/SHORT para que el Q-engine pueda
+                            # evaluar la geometría primaria real. Los hard guards
+                            # económicos (RR/SL/ATR/Safety) siguen cerrando la puerta
+                            # en _app244_native_quality_authority().
+                            accion_consenso = _original_operational_action
+                            operational_execution['diagnostic_only'] = True
+                            operational_execution['soft_setup_warning'] = True
+                            operational_execution['publication_hard_block'] = False
+                            for _r in operational_execution.get('reasons') or []:
+                                if _r and _r not in razones_consenso:
+                                    razones_consenso.append(str(_r))
+                            levels['operational_setup_warning'] = True
+                            levels['operational_setup_warning_reasons'] = [
+                                str(_r) for _r in (operational_execution.get('reasons') or []) if str(_r).strip()
+                            ][:6]
+                            levels['operational_setup_guard_mode'] = 'SOFT_DIAGNOSTIC_ONLY'
+                            print(
+                                f"🧠 [24.5R SETUP-SOFT] {_original_operational_action} se conserva; "
+                                f"razones={'; '.join(str(_r) for _r in (operational_execution.get('reasons') or [])[:3])}"
+                            )
+                        else:
+                            # Legacy/hard behavior remains unchanged for Spot y
+                            # para una geometría realmente inválida en Futures.
+                            accion_consenso = _guard_action
+                            confianza_consenso = min(
+                                float(confianza_consenso or 0),
+                                68.0 if analysis_system_type == 'futures' else 72.0
+                            )
+                            for _r in operational_execution.get('reasons') or []:
+                                if _r and _r not in razones_consenso:
+                                    razones_consenso.append(str(_r))
+                            levels['is_executable'] = False
+                            levels['publication_status'] = 'ANALYSIS_ONLY'
+                            levels['suggested_size'] = 0
+                            levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
+                            print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
                 except Exception as _execution_guard_error:
                     operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
 
@@ -30074,10 +30118,16 @@ def api_auth_logout():
 def index():
     return render_template('index.html', is_futures=False)
 
+_FUTURES_DISPLAY_LANE_SCRIPT = '<script>\n(function () {\n    \'use strict\';\n    if (window.__SMARTRADING_FUTURES_DISPLAY_LANE__) return;\n    window.__SMARTRADING_FUTURES_DISPLAY_LANE__ = true;\n\n    const state = { seq: 0, inflightKey: \'\', inflight: null, cache: new Map(), ttlMs: 30000, failedAt: new Map() };\n\n    function normSymbol(v) { return String(v || \'\').trim().toUpperCase().replace(\'/\', \'-\'); }\n    function normTf(v) { const x = String(v || \'\').trim(); return x.toUpperCase() === \'1D\' ? \'1D\' : x.toLowerCase(); }\n\n    async function load(symbol, timeframe) {\n        const sym = normSymbol(symbol || window.currentSymbol || \'BTC-USDT\');\n        const tf = normTf(timeframe || window.currentInterval || \'1h\');\n        const key = `${sym}|${tf}`;\n        const now = Date.now();\n\n        const cached = state.cache.get(key);\n        if (cached && now - cached.ts < state.ttlMs && cached.data?.df) {\n            render(cached.data);\n            return cached.data;\n        }\n        if (state.inflight && state.inflightKey === key) return state.inflight;\n        const failedAt = Number(state.failedAt.get(key) || 0);\n        if (failedAt && now - failedAt < 5000) return null;\n\n        const seq = ++state.seq;\n        const controller = new AbortController();\n        const timer = setTimeout(() => controller.abort(), 9000);\n\n        state.inflightKey = key;\n        state.inflight = (async () => {\n            try {\n                const qs = new URLSearchParams({\n                    symbol: sym, timeframe: tf, market: \'futures\', _ts: String(Date.now())\n                });\n                const res = await fetch(`/api/futures/visuals?${qs.toString()}`, {\n                    method: \'GET\', credentials: \'same-origin\', cache: \'no-store\', signal: controller.signal\n                });\n                const payload = await res.json();\n                if (seq !== state.seq) return null;\n                if (!res.ok || payload?.success === false) throw new Error(payload?.error || `HTTP ${res.status}`);\n                const data = payload?.data || payload;\n                const gotSymbol = normSymbol(data?.symbol || payload?.symbol);\n                const gotTf = normTf(data?.timeframe || payload?.timeframe);\n                if (gotSymbol !== sym || gotTf !== tf || !data?.df?.time?.length) throw new Error(\'FUTURES_DISPLAY_IDENTITY_MISMATCH\');\n                state.cache.set(key, {ts: Date.now(), data});\n                while (state.cache.size > 2) {\n                    const oldest = [...state.cache.entries()].sort((a,b) => a[1].ts - b[1].ts)[0]?.[0];\n                    if (oldest == null) break;\n                    state.cache.delete(oldest);\n                }\n                state.failedAt.delete(key);\n                render(data);\n                return data;\n            } catch (err) {\n                state.failedAt.set(key, Date.now());\n                if (err?.name !== \'AbortError\') console.debug(\'Futures display lane:\', err?.message || err);\n                return null;\n            } finally {\n                clearTimeout(timer);\n                if (state.inflightKey === key) { state.inflight = null; state.inflightKey = \'\'; }\n            }\n        })();\n        return state.inflight;\n    }\n\n    function render(data) {\n        if (!data?.df) return;\n        const gotSymbol = normSymbol(data.symbol);\n        const gotTf = normTf(data.timeframe);\n        if (gotSymbol !== normSymbol(window.currentSymbol) || gotTf !== normTf(window.currentInterval)) return;\n        try { window.updateCandleChart?.(data); } catch (_) {}\n        try { window.updateTradingZones?.(data); } catch (_) {}\n        try { window.updatePattern4Chart?.(data); } catch (_) {}\n        try { window.updateFormation40Chart?.(data); } catch (_) {}\n        const price = Number(data.current_price ?? data.live_price);\n        const live = document.getElementById(\'live-price\');\n        if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined, {maximumFractionDigits: 8})}`;\n        const title = document.getElementById(\'chart-title\');\n        if (title) {\n            const symName = (window.PAGE_CONFIG?.symbols?.[gotSymbol]) || gotSymbol.replace(\'-\', \'/\');\n            const tfName = window.PAGE_CONFIG?.timeframes?.[gotTf] || gotTf;\n            title.innerHTML = `${symName} ${tfName} - <span id="live-price" class="live-price">${live?.textContent || \'--\'}</span>`;\n        }\n    }\n\n    window.loadFuturesDisplayLane = load;\n\n    function installRunWrapper() {\n        const original = window.runCompleteAnalysis;\n        if (typeof original !== \'function\' || original.__futuresDisplayWrapped) return false;\n        function wrappedRunCompleteAnalysis() {\n            const symbol = document.getElementById(\'symbol-select\')?.value || window.currentSymbol || \'BTC-USDT\';\n            const tf = document.getElementById(\'interval-select\')?.value || window.currentInterval || \'1h\';\n            load(symbol, tf);\n            return original.apply(this, arguments);\n        }\n        wrappedRunCompleteAnalysis.__futuresDisplayWrapped = true;\n        wrappedRunCompleteAnalysis.__original = original;\n        window.runCompleteAnalysis = wrappedRunCompleteAnalysis;\n        return true;\n    }\n\n    // Install immediately because script.js has already defined the analysis\n    // function before this display-only lane is injected into /futures.\n    installRunWrapper();\n    document.addEventListener(\'DOMContentLoaded\', function () {\n        installRunWrapper();\n        const symbol = document.getElementById(\'symbol-select\')?.value || window.currentSymbol || \'BTC-USDT\';\n        const tf = document.getElementById(\'interval-select\')?.value || window.currentInterval || \'1h\';\n        load(symbol, tf);\n    }, {once: true});\n})();\n</script>\n'
+
 @app.route('/futures')
 def futures_page():
-    """Página de Futuros - reutiliza index.html con flag is_futures=True"""
-    return render_template('index.html', is_futures=True, is_multiasset=False)
+    """Página de Futuros con display lane independiente del heavy slot."""
+    html = render_template('index.html', is_futures=True, is_multiasset=False)
+    marker = '</body>'
+    if marker in html:
+        html = html.replace(marker, _FUTURES_DISPLAY_LANE_SCRIPT + marker, 1)
+    return html
 
 @app.route('/multiasset')
 def multiasset_page():
@@ -31179,6 +31229,60 @@ _FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM = max(
 _FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = 0.0
 _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS', '10') or 10))
 
+# COMMIT 24.5R — global resource backoff for background heavy work.
+# Cuando RSS no tiene headroom, NO se permite que Futures/Multi/learning creen
+# una cadena de intentos cada 20-30s. La UI mantiene prioridad y los jobs de
+# fondo esperan una nueva ventana de recursos sin tocar cachés de gráficos.
+_FREE_RUNTIME_BACKGROUND_BACKOFF_LOCK = threading.Lock()
+_FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL = 0.0
+_FREE_RUNTIME_BACKGROUND_BACKOFF_REASON = ''
+_FREE_RUNTIME_BACKGROUND_BACKOFF_LOG_AT = 0.0
+
+
+def _free_runtime_background_start_limit(owner):
+    """Return a conservative RSS start ceiling for background heavy lanes.
+
+    The Render Free cgroup is 512 MB, but individual 1D/context passes can
+    allocate a much larger temporary working set than short Futures cells.
+    Interactive UI work keeps the normal start ceiling; only background
+    context work is given extra headroom.
+    """
+    base = float(_MEMORY_JOB_START_LIMIT_MB)
+    text = str(owner or '')
+    if text.startswith('multi-background:') and text.endswith(':1D'):
+        return min(base, 210.0)
+    if text.startswith('futures-incremental:') and (text.endswith(':12h') or text.endswith(':1D')):
+        return min(base, 225.0)
+    return base
+
+
+def _free_runtime_background_backoff_active():
+    with _FREE_RUNTIME_BACKGROUND_BACKOFF_LOCK:
+        return time.monotonic() < _FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL
+
+
+def _free_runtime_note_background_backoff(owner, reason='RESOURCE_PRESSURE', seconds=120.0):
+    global _FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL
+    global _FREE_RUNTIME_BACKGROUND_BACKOFF_REASON
+    global _FREE_RUNTIME_BACKGROUND_BACKOFF_LOG_AT
+    now = time.monotonic()
+    ttl = max(30.0, float(seconds or 120.0))
+    should_log = False
+    with _FREE_RUNTIME_BACKGROUND_BACKOFF_LOCK:
+        new_until = now + ttl
+        if new_until > _FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL:
+            _FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL = new_until
+        _FREE_RUNTIME_BACKGROUND_BACKOFF_REASON = str(reason or 'RESOURCE_PRESSURE')[:120]
+        if now - _FREE_RUNTIME_BACKGROUND_BACKOFF_LOG_AT >= 60.0:
+            _FREE_RUNTIME_BACKGROUND_BACKOFF_LOG_AT = now
+            should_log = True
+    if should_log:
+        print(
+            f"⏸️ [FREE-RUNTIME] background backoff {ttl:.0f}s | "
+            f"owner={owner} reason={str(reason or 'RESOURCE_PRESSURE')[:120]}"
+        )
+
+
 # Existing Render dashboard variables may still contain Hotfix 14.6 values.
 # In low-memory mode, clamp them in code so an old env cannot silently restore
 # unsafe 325/395 MB thresholds before a 512 MB cgroup kill.
@@ -31281,24 +31385,11 @@ def _shed_recreatable_memory(reason='memory-pressure', *, aggressive=False):
         except Exception:
             pass
 
-    # Commit 18.1.1: chart payloads are recreatable. Under memory pressure they
-    # must not compete with the trading engine for the same 512 MB process.
-    try:
-        light_cache = globals().get('_MULTI_UI_LIGHT_CACHE')
-        if isinstance(light_cache, dict) and light_cache.get('lock') is not None:
-            with light_cache['lock']:
-                released['multi_ui_light'] = len(light_cache.get('items') or {})
-                (light_cache.get('items') or {}).clear()
-    except Exception:
-        pass
-    try:
-        fut_ui = globals().get('_FUTURES_UI_CACHE')
-        if isinstance(fut_ui, dict) and fut_ui.get('lock') is not None:
-            with fut_ui['lock']:
-                released['futures_ui_payloads'] = len(fut_ui.get('items') or {})
-                (fut_ui.get('items') or {}).clear()
-    except Exception:
-        pass
+    # COMMIT 24.5R: NUNCA vaciar cachés de gráficos/Display durante memory
+    # shed. Son la última línea de respuesta visual cuando el heavy slot está
+    # ocupado o el proceso necesita backpressure. Ambos caches están acotados
+    # (Multi: 1 celda; Futures: 1 celda) y su coste es deliberadamente pequeño.
+    # Los campos released se mantienen en 0 para conservar el contrato de logs.
 
     _trim_process_heap()
     print(
@@ -31436,6 +31527,27 @@ def _acquire_heavy_analysis(owner, timeout=None):
     if (not interactive_owner) and _background_heavy_owner(owner):
         timeout = 0.0
 
+    # COMMIT 24.5R — preflight BEFORE touching the global lock.
+    # Con RSS ya por encima del start-limit, adquirir el lock sólo para hacer
+    # shed y devolver False provoca exactamente el loop observado en Render:
+    # "esperando turno" -> cache shed -> no puede iniciar -> repetir. Ahora se
+    # difiere limpiamente y se conserva la UI/cachés anteriores.
+    pre_rss = _process_rss_mb()
+    if (
+        not interactive_owner
+        and pre_rss is not None
+        and float(pre_rss) >= _free_runtime_background_start_limit(owner)
+    ):
+        _free_runtime_note_background_backoff(
+            owner,
+            reason=(
+                f'RSS_PRESTART_{float(pre_rss):.1f}MB'
+                f'/LIMIT_{_free_runtime_background_start_limit(owner):.0f}MB'
+            ),
+            seconds=120.0,
+        )
+        return False
+
     # Commit 19.2.2 ROOT CAUSE — do not confuse permanent service threads
     # with concurrent heavy jobs. In 19.2.1 the worker normally sat at
     # 11–12 threads while FREE_RUNTIME_MAX_THREADS=10, so background
@@ -31465,6 +31577,9 @@ def _acquire_heavy_analysis(owner, timeout=None):
                 f"permanentes (baseline={_baseline}); autoridad de concurrencia="
                 "heavy-lock + RSS, no el conteo absoluto."
             )
+    if not interactive_owner and _free_runtime_background_backoff_active():
+        return False
+
     if not interactive_owner:
         priority_fn = globals().get('_system_interactive_priority_active')
         fallback_fn = globals().get('_futures_interactive_priority_active')
@@ -31516,10 +31631,15 @@ def _acquire_heavy_analysis(owner, timeout=None):
     else:
         _trim_process_heap()
     rss = _process_rss_mb()
-    if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
+    _job_start_limit = (
+        _free_runtime_background_start_limit(owner)
+        if not interactive_owner
+        else float(_MEMORY_JOB_START_LIMIT_MB)
+    )
+    if rss is not None and rss >= _job_start_limit:
         print(
             f"🛑 [MEM] {owner}: no inicia con RSS {rss:.1f}MB; "
-            f"límite seguro de arranque={_MEMORY_JOB_START_LIMIT_MB:.1f}MB. "
+            f"límite seguro de arranque={_job_start_limit:.1f}MB. "
             "Se conserva el último snapshot."
         )
         with _HEAVY_ANALYSIS_STATE_LOCK:
@@ -36578,6 +36698,8 @@ def _multiasset_background_tick():
     try:
         if str(os.getenv('MULTIASSET_ENABLED','1')).lower() in ('0','false','no','off'):
             return
+        if _free_runtime_background_backoff_active():
+            return
         _multiasset_restore_local_snapshot_once()
         now=datetime.now(timezone.utc); now_mono=time.monotonic()
         with _MULTI_AUTO_LOCK:
@@ -37864,6 +37986,67 @@ def _enrich_futures_public_message(result):
     return result
 
 
+_COMMIT245_NATIVE_Q_VERSION = 'COMMIT24_5R_APP_PY_NATIVE_Q_CONTEXT_REUSE_RUNTIME_V3'
+
+
+def _compact_futures_quality_context(result):
+    """Preserve only the deterministic context fields required by Q1..Q10.
+
+    Commit 24.4 compacted Futures results aggressively and retained only the
+    Trend block. The native Q engine also needs Momentum, Volatility and a
+    compact Structure summary. Without those fields, a reused closed-candle
+    snapshot cannot be re-evaluated faithfully.
+    """
+    if not isinstance(result, dict):
+        return {}
+
+    trend = result.get('trend') or {}
+    momentum = result.get('momentum') or {}
+    volatility = result.get('volatility') or {}
+    structure = result.get('structure') or {}
+
+    def truth(value):
+        return bool(value)
+
+    def pick(source, keys):
+        if not isinstance(source, dict):
+            return {}
+        return {k: source.get(k) for k in keys if k in source}
+
+    # Do not retain arrays of pivots/order blocks/FVGs here. Q only needs their
+    # presence plus the compact directional/structural facts.
+    structure_compact = pick(
+        structure,
+        (
+            'direction', 'structure_direction',
+            'structural_invalidation', 'invalidation_level',
+            'nearest_support', 'nearest_resistance',
+        ),
+    )
+    for dst_key, src_keys in {
+        'liquidity_sweep': ('liquidity_sweep', 'liquidity_sweeps', 'sweep'),
+        'mss': ('mss', 'bos', 'market_structure_shift'),
+        'displacement': ('displacement', 'displacement_confirmed'),
+        'poi': ('order_blocks', 'fair_value_gaps', 'fvg', 'entry_poi_confirmed'),
+    }.items():
+        structure_compact[dst_key] = any(
+            truth(structure.get(k)) for k in src_keys
+        )
+
+    return {
+        'trend': pick(
+            trend,
+            ('direction', 'confidence', 'strength', 'adx', 'score', 'plus_di', 'minus_di', 'regime'),
+        ),
+        'momentum': pick(momentum, ('direction', 'confidence', 'rsi', 'score')),
+        'volatility': pick(
+            volatility,
+            ('atr_pct', 'atr', 'state', 'volatility_state', 'volume_ratio', 'relative_volume', 'squeeze_on'),
+        ),
+        'structure': structure_compact,
+    }
+
+
 def _compact_futures_runtime_result(result):
     """Hotfix 14.7: keep only the Futures fields required by live UI/lifecycle.
 
@@ -37939,6 +38122,65 @@ def _compact_futures_runtime_result(result):
                 'plus_di', 'minus_di'
             )
             if key in trend
+        }
+
+    quality_context = _compact_futures_quality_context(result)
+    if quality_context:
+        compact['quality_context'] = quality_context
+
+    native_audit = result.get('app_native_quality_audit') or {}
+    if isinstance(native_audit, dict) and native_audit:
+        compact['app_native_quality_audit'] = {
+            'version': native_audit.get('version'),
+            'status': native_audit.get('status'),
+            'symbol': native_audit.get('symbol'),
+            'timeframe': native_audit.get('timeframe'),
+            'reason_codes': list(native_audit.get('reason_codes') or [])[:8],
+            'q_scores': dict(native_audit.get('q_scores') or {}),
+            'composite': native_audit.get('composite'),
+            'context_group_composite': native_audit.get('context_group_composite'),
+            'quality_ready': bool(native_audit.get('quality_ready')),
+            'parallel_confirmed': bool(native_audit.get('parallel_confirmed')),
+            'passed_filters': list(native_audit.get('passed_filters') or [])[:10],
+            'selected_filter': native_audit.get('selected_filter'),
+            'selected_filter_score': native_audit.get('selected_filter_score'),
+            'selected_authority_filter': native_audit.get('selected_authority_filter'),
+            'selected_authority_score': native_audit.get('selected_authority_score'),
+            'universal_guards': dict(native_audit.get('universal_guards') or {}),
+            'source_route': native_audit.get('source_route'),
+            'q10_is_mandatory': False,
+        }
+
+    quality_authority = result.get('quality_authority') or {}
+    if isinstance(quality_authority, dict) and quality_authority:
+        compact['quality_authority'] = {
+            'filter': quality_authority.get('filter'),
+            'score': quality_authority.get('score'),
+            'mode': quality_authority.get('mode'),
+            'q_scores': dict(quality_authority.get('q_scores') or {}),
+            'composite': quality_authority.get('composite'),
+            'universal_guards': dict(quality_authority.get('universal_guards') or {}),
+            'q10_is_mandatory': False,
+        }
+
+    # COMMIT 24.5R: keep a tiny signal-engineering funnel in the runtime
+    # snapshot so reused closed-candle cells remain diagnostically equivalent
+    # to the original evaluation.
+    funnel = result.get('signal_engineering_funnel') or {}
+    if isinstance(funnel, dict) and funnel:
+        compact['signal_engineering_funnel'] = {
+            'version': funnel.get('version'),
+            'symbol': funnel.get('symbol'),
+            'timeframe': funnel.get('timeframe'),
+            'action': funnel.get('action'),
+            'geometry_route': funnel.get('geometry_route'),
+            'geometry_source': funnel.get('geometry_source'),
+            'setup_guard_soft_warning': bool(funnel.get('setup_guard_soft_warning')),
+            'q_evaluation_reached': bool(funnel.get('q_evaluation_reached')),
+            'q_scores': dict(funnel.get('q_scores') or {}),
+            'q_best': funnel.get('q_best'),
+            'blocker': funnel.get('blocker'),
+            'stage': funnel.get('stage'),
         }
 
     operational = result.get('operational_intelligence') or {}
@@ -40418,7 +40660,7 @@ def _apply_36s_futures_ai_control(
 
         return result
 # ============================================================================
-# COMMIT 24.4 — APP.PY NATIVE QUALITY AUTHORITY + FAIR RUNTIME
+# COMMIT 24.5R — NATIVE Q CONTEXT + SNAPSHOT REVALIDATION + RUNTIME BACKPRESSURE + SIGNAL FUNNEL
 # ============================================================================
 #
 # Commit 24.3 correctly repaired the HTTP/UI queue, but the live symptom still
@@ -40471,7 +40713,7 @@ def _app244_quality_audit(
 ):
     result = result if isinstance(result, dict) else {}
     audit = {
-        'version': 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_V1',
+        'version': _COMMIT245_NATIVE_Q_VERSION,
         'status': str(status or 'NOT_EVALUATED'),
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
@@ -40503,6 +40745,23 @@ def _app244_quality_audit(
         audit['selected_authority_score'] = round(
             _app244_num(selected.get('score')), 2
         )
+    funnel = result.get('signal_engineering_funnel')
+    if isinstance(funnel, dict):
+        funnel = dict(funnel)
+        funnel['stage'] = str(status or funnel.get('stage') or 'NOT_EVALUATED')
+        funnel['q_evaluation_reached'] = bool(quality)
+        if isinstance(quality, dict):
+            _qvals = quality.get('quality') or {}
+            funnel['q_scores'] = {
+                str(k): round(_app244_num(v), 2)
+                for k, v in _qvals.items()
+                if str(k).startswith('Q')
+            }
+            funnel['q_best'] = max((float(v) for v in funnel['q_scores'].values()), default=0.0)
+            funnel.pop('blocker', None)
+        elif reason_codes:
+            funnel['blocker'] = str((reason_codes or ['UNKNOWN'])[0])[:120]
+        result['signal_engineering_funnel'] = funnel
     result['app_native_quality_audit'] = audit
     return result
 
@@ -40525,6 +40784,33 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         or decision.get('action')
         or result.get('action')
     )
+
+    # Seed the funnel BEFORE any hard-return so every directional hypothesis
+    # leaves a truthful reason for where it stopped. This is diagnostic only;
+    # it never upgrades a candidate.
+    _levels_route = str(
+        levels.get('manual_geometry_source')
+        or levels.get('strategy_route_family')
+        or levels.get('setup_family')
+        or ''
+    )
+    _fallback_geometry = bool(levels.get('manual_geometry_fallback'))
+    _soft_setup_warning = bool(levels.get('operational_setup_warning'))
+    result['signal_engineering_funnel'] = {
+        'version': 'COMMIT24_5R_SIGNAL_FUNNEL_V1',
+        'symbol': str(symbol),
+        'timeframe': str(timeframe),
+        'action': action,
+        'geometry_route': (
+            'GUARANTEED_TECHNICAL_FALLBACK' if _fallback_geometry
+            else ('PRIMARY_WITH_SOFT_SETUP_WARNING' if _soft_setup_warning else 'PRIMARY_OR_STRUCTURAL')
+        ),
+        'geometry_source': _levels_route[:120],
+        'setup_guard_soft_warning': _soft_setup_warning,
+        'q_evaluation_reached': False,
+        'stage': 'DIRECTION_CLASSIFICATION',
+        'blocker': None,
+    }
 
     if action not in ('LONG', 'SHORT'):
         return _app244_quality_audit(
@@ -40621,10 +40907,23 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     # Some upstream variants place the context dictionaries at different
     # levels. Prefer the real result blocks and fall back to the existing level
     # payload instead of synthesizing values.
-    trend = result.get('trend') or levels.get('trend') or {}
-    momentum = result.get('momentum') or levels.get('momentum') or {}
-    volatility = result.get('volatility') or levels.get('volatility') or {}
-    structure = result.get('structure') or levels.get('structure') or {}
+    funnel = result.get('signal_engineering_funnel') or {}
+    if isinstance(funnel, dict):
+        funnel['stage'] = 'PRE_Q_CONTEXT_READY'
+        result['signal_engineering_funnel'] = funnel
+
+    quality_context = result.get('quality_context') or {}
+    if not isinstance(quality_context, dict):
+        quality_context = {}
+    trend = result.get('trend') or quality_context.get('trend') or levels.get('trend') or {}
+    momentum = result.get('momentum') or quality_context.get('momentum') or levels.get('momentum') or {}
+    volatility = result.get('volatility') or quality_context.get('volatility') or levels.get('volatility') or {}
+    structure = result.get('structure') or quality_context.get('structure') or levels.get('structure') or {}
+    if not all(isinstance(x, dict) for x in (trend, momentum, volatility, structure)):
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['Q_CONTEXT_INVALID']
+        )
 
     # The Q engine expects the stage explicitly. Reaching this point means the
     # native app.py bridge has just revalidated the universal preconditions on
@@ -40641,7 +40940,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     q_levels['futures_publication_stage'] = 'PUBLICATION_GATE'
     q_levels['futures_publication_gate_stage'] = 'PUBLICATION_GATE'
     q_levels['app_native_gate_reached'] = True
-    q_levels['app_native_gate_source'] = 'COMMIT24_4_APP_PY_DETERMINISTIC_PRECHECK'
+    q_levels['app_native_gate_source'] = 'COMMIT24_5_APP_PY_DETERMINISTIC_PRECHECK'
 
     try:
         from quality_9q_engine_21 import evaluate as _q_evaluate
@@ -40769,7 +41068,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     # untouched. The original rejection remains traceable for audit/debugging.
     levels.update({
         'app_native_quality_authority': True,
-        'app_native_quality_authority_version': 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_V1',
+        'app_native_quality_authority_version': _COMMIT245_NATIVE_Q_VERSION,
         'quality_filter_authority': str(selected.get('filter') or ''),
         'quality_filter_score': round(selected_score, 2),
         'quality_filter_confirmed': True,
@@ -40962,8 +41261,16 @@ def _analyze_futures_all_parallel(combos_override=None):
                 and str(existing.get('source_candle_timestamp') or '')
                 == str(prepared.get('source_candle_timestamp') or '')
             )
+            existing_q_audit = existing.get('app_native_quality_audit') if isinstance(existing, dict) else None
+            existing_q_context = existing.get('quality_context') if isinstance(existing, dict) else None
+            reusable_quality_snapshot = bool(
+                isinstance(existing_q_context, dict)
+                and all(isinstance(existing_q_context.get(k), dict) for k in ('trend', 'momentum', 'volatility', 'structure'))
+                and isinstance(existing_q_audit, dict)
+                and str(existing_q_audit.get('version') or '') == _COMMIT245_NATIVE_Q_VERSION
+            )
 
-            if same_closed_candle:
+            if same_closed_candle and reusable_quality_snapshot:
                 r = dict(existing)
                 r['live_price'] = prepared.get('live_price')
                 r['live_candle_timestamp'] = prepared.get(
@@ -40974,6 +41281,11 @@ def _analyze_futures_all_parallel(combos_override=None):
                 )
                 r['_reused_closed_candle'] = True
             else:
+                if same_closed_candle:
+                    print(
+                        f"🔄 [APP24.5 Q] {combo_name}: snapshot antiguo/sin contexto Q; "
+                        "recalculando la misma vela cerrada una sola vez."
+                    )
                 r = futures.analyze_futures_market(
                     symbol,
                     timeframe,
@@ -41078,10 +41390,18 @@ def _analyze_futures_all_parallel(combos_override=None):
             # a reused identity restored after deploy. It can only downgrade.
             r = _apply_17_5_8_preliminary_learning_prior(r, 'futures')
 
-            # COMMIT 24.4: evaluate Q on the FINAL real geometry before compacting
-            # the result. This is the missing authority bridge behind the repeated
-            # 68 / ANALYSIS_ONLY cohort seen after Commit 24.3.
-            if not r.get('_reused_closed_candle'):
+            # COMMIT 24.5: evaluate Q on the FINAL real geometry whenever the
+            # snapshot does not already contain an audit produced by this exact
+            # native-Q version. Reused closed candles are safe only when their
+            # Q context + audit survived compaction. Old 24.3/24.4 snapshots are
+            # therefore upgraded once on the SAME closed candle instead of being
+            # silently exempted from quality authority.
+            native_audit = r.get('app_native_quality_audit') or {}
+            audit_is_current = (
+                isinstance(native_audit, dict)
+                and str(native_audit.get('version') or '') == _COMMIT245_NATIVE_Q_VERSION
+            )
+            if not audit_is_current:
                 r = _app244_native_quality_authority(
                     r, symbol, timeframe
                 )
@@ -41304,7 +41624,7 @@ if _LOW_MEMORY_MODE:
     # tanto el aumento es de cadencia/CPU, no de DataFrames residentes en RAM.
     # La prioridad interactiva y el memory guard siguen pudiendo posponerlo.
     _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(
-        30,
+        90,
         _FUTURES_INCREMENTAL_INTERVAL_SECONDS,
     )
 
@@ -41376,15 +41696,32 @@ def _next_futures_incremental_combo():
     # independent forward/OOS cohort validates them. LIVE coverage keeps the
     # natural governed-universe round-robin and is not reordered by old winners.
 
-    # H.2: saltar combinaciones cuya última vela cerrada ya fue analizada.
-    # No se reduce la cobertura: cada nueva vela vuelve a quedar elegible.
+    # COMMIT 24.5R — coverage proportional to market update rate.
+    # A 30m cell becomes eligible four times as often as a slow 12h/1D
+    # context cell. This is NOT a signal quota and does not relax any gate;
+    # it only reduces detection latency on the fast lanes.
+    tf_weights = {}
+    for tf in FUTURES_TIMEFRAMES.keys():
+        seconds = float(_FUTURES_TF_SECONDS.get(tf) or 0.0)
+        if seconds <= 0:
+            tf_weights[tf] = 1
+        else:
+            tf_weights[tf] = max(1, min(4, int(round((2.0 * 3600.0) / seconds))))
+
+    weighted_combos = []
+    for combo in combos:
+        weighted_combos.extend([combo] * int(tf_weights.get(combo[1], 1)))
+    if not weighted_combos:
+        return None
+
     now_ts = time.time()
     with _FUTURES_INCREMENTAL_CURSOR_LOCK:
-        for _ in range(len(combos)):
-            combo = combos[_FUTURES_INCREMENTAL_CURSOR % len(combos)]
+        n = len(weighted_combos)
+        for _ in range(n):
+            combo = weighted_combos[_FUTURES_INCREMENTAL_CURSOR % n]
             _FUTURES_INCREMENTAL_CURSOR = (
                 _FUTURES_INCREMENTAL_CURSOR + 1
-            ) % len(combos)
+            ) % n
             if _futures_combo_due_for_closed_candle(
                 combo[0], combo[1], now_ts=now_ts
             ):
@@ -41404,6 +41741,19 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
 
     if _futures_interactive_priority_active():
         return False
+    if _free_runtime_background_backoff_active():
+        return False
+    try:
+        _rss_gate = _process_rss_mb()
+        if _rss_gate is not None and float(_rss_gate) >= float(_MEMORY_JOB_START_LIMIT_MB):
+            _free_runtime_note_background_backoff(
+                f'futures-incremental:{symbol or "next"}:{timeframe or "next"}',
+                reason=f'RSS_PRE_SCHEDULE_{float(_rss_gate):.1f}MB',
+                seconds=120.0,
+            )
+            return False
+    except Exception:
+        pass
     cache = _futures_analysis_cache
     if not symbol or not timeframe:
         combo = _next_futures_incremental_combo()
