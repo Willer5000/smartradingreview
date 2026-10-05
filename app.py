@@ -31161,7 +31161,7 @@ _MEMORY_HARD_LIMIT_MB = max(
 # 330-390 MB is already too late on a 512 MB instance.
 _MEMORY_JOB_START_LIMIT_MB = min(
     _MEMORY_SOFT_LIMIT_MB,
-    _env_mb('MEMORY_JOB_START_LIMIT_MB', 240),
+    _env_mb('MEMORY_JOB_START_LIMIT_MB', 255),
 )
 _MEMORY_ANALYSIS_CACHE_KEEP = max(1, int(os.environ.get('MEMORY_ANALYSIS_CACHE_KEEP', '2') or 2))
 _LOW_MEMORY_MODE = str(os.environ.get('LOW_MEMORY_MODE', '1')).strip().lower() not in ('0', 'false', 'no', 'off')
@@ -31174,23 +31174,23 @@ _FREE_RUNTIME_THREAD_BASELINE = None
 _FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM = max(
     2, int(os.environ.get('FREE_RUNTIME_TRANSIENT_THREAD_HEADROOM', '4') or 4)
 )
-_FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = max(0.0, float(os.environ.get('FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS', '1') or 1))
+# Background work is try-acquire only. It must never create a waiter behind the
+# single heavy slot; a later scheduler pass can revisit the cell.
+_FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS = 0.0
 _FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS = max(1.0, float(os.environ.get('FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS', '10') or 10))
 
 # Existing Render dashboard variables may still contain Hotfix 14.6 values.
 # In low-memory mode, clamp them in code so an old env cannot silently restore
 # unsafe 325/395 MB thresholds before a 512 MB cgroup kill.
 if _LOW_MEMORY_MODE:
-    # Commit 18.1.1: preserve ~200 MB headroom for pandas/numpy/Plotly
-    # transient allocations on Render Free (512 MB cgroup). The previous
-    # 250/340/240 thresholds reacted too late to sudden analysis spikes.
-    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 235.0)
-    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 300.0)
-    # Commit 21.1: the previous 200 MB clamp rejected jobs while the process
-    # still had substantial cgroup headroom (observed RSS ~220-223 MB). Keep a
-    # conservative 225 MB start budget and let the single heavy-lock + 300 MB
-    # hard guard decide under real RSS pressure.
-    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 225.0)
+    # Commit 24.4: the previous 235/300/225 clamp was still rejecting work at
+    # normal live RSS (~247-297 MB) even though one heavy job had already
+    # demonstrated that the process can complete inside the Render Free cgroup.
+    # Keep meaningful cgroup headroom, but admit a new job after cache shedding.
+    # Observed working-set deltas are typically ~40-50 MB per heavy Futures pass.
+    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 270.0)
+    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 335.0)
+    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 255.0)
     _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
 
@@ -31429,6 +31429,12 @@ def _acquire_heavy_analysis(owner, timeout=None):
         )
     else:
         timeout = max(0, float(timeout))
+
+    # Commit 24.4: legacy callers may still pass timeout=5 for background
+    # refreshes. Override that here so no background thread ever waits on the
+    # global heavy slot. This is the core starvation fix.
+    if (not interactive_owner) and _background_heavy_owner(owner):
+        timeout = 0.0
 
     # Commit 19.2.2 ROOT CAUSE — do not confuse permanent service threads
     # with concurrent heavy jobs. In 19.2.1 the worker normally sat at
@@ -38448,9 +38454,9 @@ _SYSTEM_INTERACTIVE_PRIORITY_LOCK = threading.Lock()
 # La carga infinita observada no es OOM (RSS ~150 MB), sino saturación por una
 # cadena casi continua de jobs incrementales. El cooldown sólo limita NUEVOS
 # trabajos de fondo; los análisis interactivos pueden entrar inmediatamente.
-_BACKGROUND_HEAVY_COOLDOWN_SECONDS = max(5, int(os.environ.get(
-    'BACKGROUND_HEAVY_COOLDOWN_SECONDS', '20'
-) or 20))
+_BACKGROUND_HEAVY_COOLDOWN_SECONDS = max(3, int(os.environ.get(
+    'BACKGROUND_HEAVY_COOLDOWN_SECONDS', '8'
+) or 8))
 _BACKGROUND_HEAVY_NOT_BEFORE = 0.0
 _BACKGROUND_HEAVY_COOLDOWN_LOCK = threading.Lock()
 _BACKGROUND_HEAVY_PREFIXES = (
@@ -40411,6 +40417,409 @@ def _apply_36s_futures_ai_control(
 
 
         return result
+# ============================================================================
+# COMMIT 24.4 — APP.PY NATIVE QUALITY AUTHORITY + FAIR RUNTIME
+# ============================================================================
+#
+# Commit 24.3 correctly repaired the HTTP/UI queue, but the live symptom still
+# showed ~34 directional candidates stuck at ANALYSIS_ONLY with a uniform 68
+# score. The root problem is that the fallback geometry was not being evaluated
+# by the real Q engine at the final classification point in app.py.
+#
+# This bridge deliberately does NOT invent a strategy or a new geometry:
+#   thesis already exists -> Entry/SL/TP already exist -> Q evaluates that exact
+#   package -> universal operational guards -> publication.
+#
+# Hard contracts preserved:
+#   * CLOSED_CANDLE + real data only
+#   * LONG/SHORT already governed by the existing engine
+#   * operational Safety >= 65
+#   * estimated loss-at-SL <= 8%
+#   * ATR stress in (0, 25%]
+#   * RR 1.8..3.5 remains hard in this native bridge
+#   * no new providers / network calls / workers
+#   * no score is treated as a calibrated win probability
+# ============================================================================
+
+def _app244_num(value, default=0.0):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _app244_direction(value):
+    raw = str(value or '').strip().upper().replace('/', '-')
+    if raw in ('LONG', 'BUY', 'BULLISH', 'COMPRA_SPOT'):
+        return 'LONG'
+    if raw in ('SHORT', 'SELL', 'BEARISH', 'VENTA_SPOT'):
+        return 'SHORT'
+    return ''
+
+
+def _app244_quality_audit(
+    result,
+    symbol,
+    timeframe,
+    *,
+    status='NOT_EVALUATED',
+    reason_codes=None,
+    quality=None,
+    parallel=None,
+    selected=None,
+):
+    result = result if isinstance(result, dict) else {}
+    audit = {
+        'version': 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_V1',
+        'status': str(status or 'NOT_EVALUATED'),
+        'symbol': str(symbol or ''),
+        'timeframe': str(timeframe or ''),
+        'reason_codes': list(reason_codes or []),
+        'source_route': 'APP_PY_FINAL_CLASSIFICATION_POINT',
+        'q10_is_mandatory': False,
+    }
+    if isinstance(quality, dict):
+        audit['q_scores'] = {
+            str(k): round(_app244_num(v), 2)
+            for k, v in (quality.get('quality') or {}).items()
+            if str(k).startswith('Q')
+        }
+        audit['composite'] = round(_app244_num(quality.get('composite')), 2)
+        audit['context_group_composite'] = round(
+            _app244_num(quality.get('context_group_composite')), 2
+        )
+        audit['quality_ready'] = bool(quality.get('quality_ready'))
+    if isinstance(parallel, dict):
+        audit['parallel_confirmed'] = bool(parallel.get('confirmed_one_of_ten'))
+        audit['passed_filters'] = list(parallel.get('passed_filters') or [])
+        audit['selected_filter'] = str(parallel.get('selected_filter') or '')
+        audit['selected_filter_score'] = round(
+            _app244_num(parallel.get('selected_filter_score')), 2
+        )
+        audit['universal_guards'] = dict(parallel.get('universal_guards') or {})
+    if isinstance(selected, dict):
+        audit['selected_authority_filter'] = str(selected.get('filter') or '')
+        audit['selected_authority_score'] = round(
+            _app244_num(selected.get('score')), 2
+        )
+    result['app_native_quality_audit'] = audit
+    return result
+
+
+def _app244_native_quality_authority(result, symbol, timeframe):
+    """Evaluate the actual final Futures geometry through the existing Q engine.
+
+    The function is intentionally fail-closed. It can promote an already valid
+    directional package when one existing Q lane reaches the established 75
+    authority and the universal economic/operational guards are clean. It never
+    manufactures a direction or changes Entry/SL/TP.
+    """
+    if not isinstance(result, dict) or not result.get('success'):
+        return result
+
+    levels = dict(result.get('levels') or {})
+    decision = dict(result.get('decision') or {})
+    action = _app244_direction(
+        levels.get('manual_observation_action')
+        or decision.get('action')
+        or result.get('action')
+    )
+
+    if action not in ('LONG', 'SHORT'):
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='NOT_DIRECTIONAL',
+            reason_codes=['DIRECTION_UNDEFINED']
+        )
+
+    publication_status = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or ''
+    ).upper()
+    if publication_status == 'EXECUTABLE_SIGNAL' or bool(levels.get('is_executable')):
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='ALREADY_EXECUTABLE',
+            reason_codes=['ALREADY_EXECUTABLE']
+        )
+
+    # The bridge belongs to the closed-candle decision lane. Never use an open
+    # candle/intrabar snapshot as publication authority.
+    if str(result.get('analysis_mode') or '').upper() != 'CLOSED_CANDLE':
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['NOT_CLOSED_CANDLE']
+        )
+    if result.get('source_candle_closed') is not True:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['SOURCE_CANDLE_NOT_CLOSED']
+        )
+
+    market_data_is_synthetic = result.get('market_data_is_synthetic')
+    if market_data_is_synthetic is None:
+        market_data_is_synthetic = levels.get('market_data_is_synthetic')
+    if market_data_is_synthetic is not False:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['SYNTHETIC_OR_UNVERIFIED_DATA']
+        )
+
+    entry = _app244_num(levels.get('entry'))
+    stop_loss = _app244_num(levels.get('stop_loss'))
+    take_profit = _app244_num(levels.get('take_profit'))
+    geometry_ok = bool(
+        entry > 0 and stop_loss > 0 and take_profit > 0
+        and ((action == 'LONG' and stop_loss < entry < take_profit)
+             or (action == 'SHORT' and take_profit < entry < stop_loss))
+    )
+    if not geometry_ok:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['INVALID_ENTRY_SL_TP']
+        )
+
+    rr = _app244_num(levels.get('risk_reward'))
+    if rr <= 0 and entry > 0 and stop_loss > 0:
+        rr = abs(take_profit - entry) / max(abs(entry - stop_loss), 1e-12)
+    # RR remains a hard economic contract here. We do NOT reproduce the old
+    # "cluster can rescue any RR" behavior because that would alter user policy.
+    if rr < 1.8 or rr > 3.5:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['RR_OUTSIDE_HARD_RANGE']
+        )
+
+    safety = _app244_num(levels.get('execution_safety'))
+    if safety < 65.0:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['OPERATIONAL_SAFETY_BELOW_65']
+        )
+
+    risk_control = dict(levels.get('risk_control') or {})
+    loss_at_sl = _app244_num(
+        risk_control.get('estimated_sl_loss_pct_margin'),
+        _app244_num(levels.get('loss_at_sl_pct'), 0.0),
+    )
+    if loss_at_sl > 8.0:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['LOSS_AT_SL']
+        )
+
+    atr_stress = _app244_num(
+        risk_control.get('estimated_atr_stress_loss_pct_margin'),
+        _app244_num(levels.get('atr_stress_pct'), 0.0),
+    )
+    if not (0.0 < atr_stress <= 25.0):
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['ATR_STRESS']
+        )
+
+    # Some upstream variants place the context dictionaries at different
+    # levels. Prefer the real result blocks and fall back to the existing level
+    # payload instead of synthesizing values.
+    trend = result.get('trend') or levels.get('trend') or {}
+    momentum = result.get('momentum') or levels.get('momentum') or {}
+    volatility = result.get('volatility') or levels.get('volatility') or {}
+    structure = result.get('structure') or levels.get('structure') or {}
+
+    # The Q engine expects the stage explicitly. Reaching this point means the
+    # native app.py bridge has just revalidated the universal preconditions on
+    # the same final geometry. We record the derivation instead of pretending a
+    # stale legacy flag was present.
+    q_levels = dict(levels)
+    q_levels['entry'] = entry
+    q_levels['stop_loss'] = stop_loss
+    q_levels['take_profit'] = take_profit
+    q_levels['risk_reward'] = round(rr, 6)
+    q_levels['execution_safety'] = round(safety, 4)
+    q_levels['market_data_is_synthetic'] = False
+    q_levels['publication_stage'] = 'PUBLICATION_GATE'
+    q_levels['futures_publication_stage'] = 'PUBLICATION_GATE'
+    q_levels['futures_publication_gate_stage'] = 'PUBLICATION_GATE'
+    q_levels['app_native_gate_reached'] = True
+    q_levels['app_native_gate_source'] = 'COMMIT24_4_APP_PY_DETERMINISTIC_PRECHECK'
+
+    try:
+        from quality_9q_engine_21 import evaluate as _q_evaluate
+    except Exception as exc:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='UNAVAILABLE',
+            reason_codes=[f'Q_ENGINE_IMPORT:{type(exc).__name__}']
+        )
+
+    try:
+        quality = _q_evaluate(
+            q_levels,
+            trend,
+            momentum,
+            volatility,
+            structure,
+            str(timeframe or ''),
+            str(symbol or ''),
+            action,
+            market_type='futures',
+        )
+    except Exception as exc:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='ERROR',
+            reason_codes=[f'Q_EVALUATION:{type(exc).__name__}']
+        )
+
+    parallel = dict(quality.get('parallel_quality_filters') or {})
+    guards = dict(parallel.get('universal_guards') or {})
+    filters = [row for row in (parallel.get('filters') or []) if isinstance(row, dict)]
+    passed_direct = [
+        row for row in filters
+        if bool(row.get('passed')) and _app244_num(row.get('score')) >= 75.0
+    ]
+
+    selected = None
+    authority_mode = ''
+    if passed_direct:
+        selected = max(
+            passed_direct,
+            key=lambda row: (_app244_num(row.get('score')), str(row.get('filter') or '')),
+        )
+        authority_mode = 'DIRECT_ONE_Q'
+    else:
+        # Commit 24.3 cluster rule kept as a bounded secondary lane. It never
+        # lowers 75: cluster authority is valid only when the cluster itself is
+        # statistically coherent and one of the geometry-relevant raw Q lanes
+        # reaches 75 on the same Entry/SL/TP package.
+        ranked = sorted(
+            filters,
+            key=lambda row: _app244_num(row.get('score')),
+            reverse=True,
+        )
+        top3 = ranked[:3]
+        if len(top3) == 3:
+            vals = [_app244_num(row.get('score')) for row in top3]
+            avg_top3 = sum(vals) / 3.0
+            ge70 = sum(1 for value in vals if value >= 70.0)
+            mean = avg_top3
+            std = (sum((value - mean) ** 2 for value in vals) / 3.0) ** 0.5
+            qv = dict(quality.get('quality') or {})
+            geometry_q = {
+                'Q3': _app244_num(qv.get('Q3')),
+                'Q6': _app244_num(qv.get('Q6')),
+                'Q7': _app244_num(qv.get('Q7')),
+                'Q9': _app244_num(qv.get('Q9')),
+            }
+            geometry_filter = max(geometry_q, key=geometry_q.get)
+            geometry_score = geometry_q.get(geometry_filter, 0.0)
+            cluster_ok = bool(
+                avg_top3 >= 72.0
+                and ge70 >= 2
+                and std >= 5.0
+                and geometry_score >= 75.0
+            )
+            if cluster_ok:
+                selected = {
+                    'filter': geometry_filter,
+                    'score': geometry_score,
+                    'passed': True,
+                }
+                authority_mode = 'Q_CLUSTER_GEOMETRY'
+
+    if not selected:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['NO_Q_AUTHORITY'],
+            quality=quality,
+            parallel=parallel,
+        )
+
+    # Reuse the engine's own universal guard result, but also require the app.py
+    # hard RR rule above. No Q score is allowed to bypass these checks.
+    if not bool(guards.get('passed')):
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=list(guards.get('codes') or ['UNIVERSAL_GUARD']),
+            quality=quality,
+            parallel=parallel,
+            selected=selected,
+        )
+
+    selected_score = _app244_num(selected.get('score'))
+    if selected_score < 75.0:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=['SELECTED_Q_BELOW_75'],
+            quality=quality,
+            parallel=parallel,
+            selected=selected,
+        )
+
+    previous_status = str(
+        levels.get('publication_status')
+        or result.get('publication_status')
+        or 'ANALYSIS_ONLY'
+    ).upper()
+    previous_reason = str(
+        levels.get('rejected_reason')
+        or result.get('rejected_reason')
+        or 'ANALYSIS_ONLY'
+    )[:1000]
+
+    # Promote only the publication state. Entry/SL/TP/leverage/direction are
+    # untouched. The original rejection remains traceable for audit/debugging.
+    levels.update({
+        'app_native_quality_authority': True,
+        'app_native_quality_authority_version': 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_V1',
+        'quality_filter_authority': str(selected.get('filter') or ''),
+        'quality_filter_score': round(selected_score, 2),
+        'quality_filter_confirmed': True,
+        'quality_authority_mode': authority_mode,
+        'quality_q_scores': {
+            str(k): round(_app244_num(v), 2)
+            for k, v in (quality.get('quality') or {}).items()
+            if str(k).startswith('Q')
+        },
+        'quality_composite': round(_app244_num(quality.get('composite')), 2),
+        'quality_context_group_composite': round(
+            _app244_num(quality.get('context_group_composite')), 2
+        ),
+        'quality_publication_stage': 'PUBLICATION_GATE',
+        'publication_gate_reached': True,
+        'publication_gate_source': 'APP_PY_NATIVE_Q_AUTHORITY',
+        'previous_publication_status_before_q': previous_status,
+        'pre_q_authority_rejection_reason': previous_reason,
+        'publication_status': 'EXECUTABLE_SIGNAL',
+        'is_rejected': False,
+        'is_executable': True,
+        'publication_eligible': True,
+        'manual_observation_geometry': bool(levels.get('manual_observation_geometry')),
+    })
+
+    result['levels'] = levels
+    result['publication_status'] = 'EXECUTABLE_SIGNAL'
+    result['publication_eligible'] = True
+    result['is_executable'] = True
+    result['app_native_quality_authority'] = True
+    result['quality_authority'] = {
+        'filter': str(selected.get('filter') or ''),
+        'score': round(selected_score, 2),
+        'mode': authority_mode,
+        'q_scores': {
+            str(k): round(_app244_num(v), 2)
+            for k, v in (quality.get('quality') or {}).items()
+            if str(k).startswith('Q')
+        },
+        'composite': round(_app244_num(quality.get('composite')), 2),
+        'universal_guards': guards,
+        'q10_is_mandatory': False,
+    }
+
+    return _app244_quality_audit(
+        result, symbol, timeframe, status='CONFIRMED',
+        reason_codes=[], quality=quality, parallel=parallel, selected=selected,
+    )
+
+
 def _analyze_futures_all_parallel(combos_override=None):
     """
     Ejecuta los 30 análisis de Futuros de forma secuencial para limitar memoria,
@@ -40488,6 +40897,25 @@ def _analyze_futures_all_parallel(combos_override=None):
     for index, (symbol, timeframe) in enumerate(combos, start=1):
 
         combo_name = f"{symbol} {timeframe}"
+
+        # COMMIT 24.4: un warm-up/full refresh es cooperativo. Si una persona
+        # ya abrió la UI o existe una petición interactiva esperando, termina
+        # como máximo la celda actual y devuelve el heavy slot inmediatamente.
+        # Esto evita que un barrido 30xN congele el dashboard.
+        if not incremental_mode:
+            _ui_waiting = False
+            try:
+                with _PENDING_UI_ANALYSIS_LOCK:
+                    _ui_waiting = bool(_PENDING_UI_ANALYSIS_QUEUE)
+            except Exception:
+                _ui_waiting = False
+            if _ui_waiting or _system_interactive_priority_active():
+                print(
+                    f"⏸️ [APP24.4 FAIR] cediendo refresh completo a UI antes de {combo_name}"
+                )
+                with cache['lock']:
+                    cache['progress']['current'] = 'UI_PRIORITY_YIELD'
+                break
 
         # Commit 10.1: proteger el proceso ANTES de crear otro DataFrame/
         # conjunto de indicadores. Si estamos cerca del OOM dejamos intactos
@@ -40649,6 +41077,15 @@ def _analyze_futures_all_parallel(combos_override=None):
             # 17.5.7 applies on every returned closed-candle snapshot, including
             # a reused identity restored after deploy. It can only downgrade.
             r = _apply_17_5_8_preliminary_learning_prior(r, 'futures')
+
+            # COMMIT 24.4: evaluate Q on the FINAL real geometry before compacting
+            # the result. This is the missing authority bridge behind the repeated
+            # 68 / ANALYSIS_ONLY cohort seen after Commit 24.3.
+            if not r.get('_reused_closed_candle'):
+                r = _app244_native_quality_authority(
+                    r, symbol, timeframe
+                )
+
             r = _enrich_futures_public_message(r)
 
             # Hotfix 14.7: ReviewTrader already persisted the rich research
@@ -40985,7 +41422,7 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
         try:
             heavy_acquired = _acquire_heavy_analysis(
                 f'futures-incremental:{symbol}:{timeframe}',
-                timeout=5,
+                timeout=0,
             )
             if not heavy_acquired:
                 return
@@ -59611,6 +60048,7 @@ def _install_commit_17_5_11_core():
     return state
 
 _COMMIT_17_5_11_BOOTSTRAP=_install_commit_17_5_11_core()
+_APP_PY_RUNTIME_VERSION = 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_FAIR_RUNTIME_V1'
 print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flush=True)
 
 
