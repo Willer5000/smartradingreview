@@ -1,0 +1,78 @@
+{
+  "AUDITORIA_COMMIT27_PROPUESTA_PROFUNDA3.md": {
+    "sha256": "b64076138e3de71c894ab6604b3568a5d735de9fd8f2b29b982d1aea4cb98e17",
+    "bytes": 11226
+  },
+  "BACKTEST_COMMIT27_AUTHORITY.md": {
+    "sha256": "2d42456d3ab4c18950c7f768da7d420700070e91fdc2f7829e30f29a9232a47e",
+    "bytes": 3414
+  },
+  "BACKTEST_COMMIT27_RESULT.json": {
+    "sha256": "ca37ddd1ded55d322b9e9cbef0e3e98b124526c116cd3c66cf0623d5fc54af72",
+    "bytes": 12266
+  },
+  "COMMIT27_QA_REPORT.md": {
+    "sha256": "4c65f1ccce3e1ab9bd329ef0b3a4c3f8176659139fb9debf21482c00872c8738",
+    "bytes": 2166
+  },
+  "COMMIT27_ROLLBACK.md": {
+    "sha256": "4d088b97bed59088f8d03370ef1458bcd606913b2762376ccfd1f3a7b196dff2",
+    "bytes": 388
+  },
+  "IMPLEMENTACION_COMMIT27.md": {
+    "sha256": "63983f86bd8ee2a5fd480fcfc903caa0773ab1a3627e69ae0a51c4d11084ce57",
+    "bytes": 2239
+  },
+  "Procfile": {
+    "sha256": "599240572a110f8cc85b22b445d4ab407a48fa59053e443be85775ab683d9324",
+    "bytes": 169
+  },
+  "app.py": {
+    "sha256": "3d1dba83f566c6886a01d13914c9e0483fff9a90928a5023180e23b78d45638d",
+    "bytes": 2425075
+  },
+  "backtest_commit27.py": {
+    "sha256": "b31a644611f91fc074f41b404c9bbe5c38251fda4c80180a69bc4e55ae90d5dc",
+    "bytes": 9716
+  },
+  "champion_registry_commit19.py": {
+    "sha256": "99f0cacd1443ac73f3ef01a010abc73908d3d5ff8c2b0bd878cc4c520bd79074",
+    "bytes": 18933
+  },
+  "commit27_main_entrypoint.py": {
+    "sha256": "b9cfa4fdced566e0a1191d01fb808e6e07f7ecd4d8df05f2b087f435bd5d8daa",
+    "bytes": 1937
+  },
+  "contextual_quality_commit27.py": {
+    "sha256": "4d47f4a2945f422d47c0210ea128c829ee8cf80cb0e6bbe91cf9d3f67db3c841",
+    "bytes": 19968
+  },
+  "quality_9q_engine_21.py": {
+    "sha256": "9a6767a34cde5f7f2625267f0f52962128313c7ef27575681ef49ea633b70077",
+    "bytes": 51136
+  },
+  "render.yaml": {
+    "sha256": "5d44ba89a8477daa830adb5cd816a8e92986a530d73ad48258d9d1026acf4cb0",
+    "bytes": 4406
+  },
+  "test_commit22_context_quality.py": {
+    "sha256": "78f0fb22096d5d7b7b717035f08a6431bd3ec2d87180f6c48969f31010013d13",
+    "bytes": 5894
+  },
+  "test_commit23_parallel_quality.py": {
+    "sha256": "64de94abd20df95b606b1f65059a508dc8c3de532203959a3380566bce050ceb",
+    "bytes": 4663
+  },
+  "test_commit24_3_repair.py": {
+    "sha256": "cd3f9b39531d8ad4c5b2f4e010e60e5144a797dff9368ce7db665d938466d15f",
+    "bytes": 16739
+  },
+  "test_commit25_contextual_authority.py": {
+    "sha256": "5ac808aed57b77903fea02771bea34d337fc4ee09b9742c42f9cf13f2d09c869",
+    "bytes": 7337
+  },
+  "test_commit27_contextual_core.py": {
+    "sha256": "5c6995bc85c7e641ff8462a1c3315696badec37245c19f61dc7312388c5f8849",
+    "bytes": 4955
+  }
+}

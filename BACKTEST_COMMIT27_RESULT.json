@@ -1,0 +1,474 @@
+{
+  "version": "COMMIT27_BACKTEST_AUTHORITY_SET_V1",
+  "methodology": {
+    "principle": "Only evidence present in the supplied repository is used. No synthetic structural/Q/Multi fields are reconstructed.",
+    "f30_raw": "Row-level chronological DEV/HOLDOUT replay already includes 0.118R stress cost per entry in stress_net_r.",
+    "f30_execution": "Independent bundled structural execution evidence checks sweep+MSS/BOS or displacement+structural POI post-geometry.",
+    "champions": "Frozen IS/Selection/OOS evidence; promotion only if all available governed splits are positive.",
+    "multi_fast": "Fail closed because the repository contains no clean 1h/4h class-specific OOS cohort."
+  },
+  "futures_30m_raw": {
+    "is": {
+      "n": 11,
+      "net_r": 1.702,
+      "expectancy_r": 0.1547,
+      "pf": 1.2537,
+      "max_dd_r": 2.236,
+      "positive_expectancy": true
+    },
+    "oos": {
+      "n": 4,
+      "net_r": 3.928,
+      "expectancy_r": 0.982,
+      "pf": 4.5134,
+      "max_dd_r": 1.118,
+      "positive_expectancy": true
+    },
+    "combined": {
+      "n": 15,
+      "net_r": 5.63,
+      "expectancy_r": 0.3753,
+      "pf": 1.7194,
+      "max_dd_r": 2.236,
+      "positive_expectancy": true
+    },
+    "selection_contract": {
+      "trend_aligned": true,
+      "adx_min": 20.0,
+      "relative_volume_min": 1.2,
+      "rsi_long_max": 80.0,
+      "rsi_short_min": 20.0,
+      "note": "These are the fields present in the bundled row-level cohort."
+    },
+    "subgroup_diagnostic_only": {
+      "by_action": {
+        "LONG": {
+          "n": 5,
+          "net_r": 0.01,
+          "expectancy_r": 0.002,
+          "pf": 1.003,
+          "max_dd_r": 2.236,
+          "positive_expectancy": true
+        },
+        "SHORT": {
+          "n": 10,
+          "net_r": 5.62,
+          "expectancy_r": 0.562,
+          "pf": 2.2567,
+          "max_dd_r": 1.118,
+          "positive_expectancy": true
+        }
+      },
+      "by_symbol": {
+        "ADA-USDT": {
+          "n": 5,
+          "net_r": 5.61,
+          "expectancy_r": 1.122,
+          "pf": 6.0179,
+          "max_dd_r": 1.118,
+          "positive_expectancy": true
+        },
+        "BTC-USDT": {
+          "n": 1,
+          "net_r": -1.118,
+          "expectancy_r": -1.118,
+          "pf": 0.0,
+          "max_dd_r": 1.118,
+          "positive_expectancy": false
+        },
+        "ETH-USDT": {
+          "n": 4,
+          "net_r": 1.128,
+          "expectancy_r": 0.282,
+          "pf": 1.5045,
+          "max_dd_r": 2.236,
+          "positive_expectancy": true
+        },
+        "LINK-USDT": {
+          "n": 1,
+          "net_r": -1.118,
+          "expectancy_r": -1.118,
+          "pf": 0.0,
+          "max_dd_r": 1.118,
+          "positive_expectancy": false
+        },
+        "SOL-USDT": {
+          "n": 2,
+          "net_r": 0.564,
+          "expectancy_r": 0.282,
+          "pf": 1.5045,
+          "max_dd_r": 1.118,
+          "positive_expectancy": true
+        },
+        "XRP-USDT": {
+          "n": 2,
+          "net_r": 0.564,
+          "expectancy_r": 0.282,
+          "pf": 1.5045,
+          "max_dd_r": 1.118,
+          "positive_expectancy": true
+        }
+      },
+      "warning": "Small subgroups are diagnostic only and are NOT used to create symbol/direction-specific rules."
+    },
+    "bootstrap_is": {
+      "p_mean_gt_0": 0.6146,
+      "ci95_mean_r": [
+        -0.6089,
+        0.9184
+      ]
+    },
+    "bootstrap_oos": {
+      "p_mean_gt_0": 0.9493,
+      "ci95_mean_r": [
+        -0.418,
+        1.682
+      ]
+    }
+  },
+  "futures_30m_post_geometry_execution_route": {
+    "name": "LIQUIDITY_SWEEP_MSS_POI",
+    "market": "FUTURES",
+    "timeframe": "30M",
+    "is": {
+      "n": 11,
+      "tp": 7,
+      "sl": 4,
+      "expectancy_r": 0.8592,
+      "pf": 3.363
+    },
+    "oos": {
+      "n": 5,
+      "tp": 5,
+      "sl": 0,
+      "expectancy_r": 1.8,
+      "pf": null
+    },
+    "condition": "sweep + MSS/BOS or displacement + structural POI",
+    "authority": "ENTRY_RANKING_ONLY; all later gates preserved",
+    "release_evidence_pass": true
+  },
+  "governed_champions": {
+    "F30_SHARED_LIQ_SWEEP_MSS_POI_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "BTC-USDT",
+        "ETH-USDT",
+        "SOL-USDT",
+        "XRP-USDT",
+        "ADA-USDT",
+        "LINK-USDT"
+      ],
+      "timeframe": "30M",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 11,
+          "net_r": 1.702,
+          "expectancy_r": 0.1547,
+          "pf": 1.254,
+          "max_dd_r": 2.236,
+          "profitable": true
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.928,
+          "expectancy_r": 0.982,
+          "pf": 4.513,
+          "max_dd_r": 1.118,
+          "profitable": true
+        }
+      }
+    },
+    "ETH_2H_LONG_RSI_TREND_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "ETH-USDT"
+      ],
+      "timeframe": "2H",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 40,
+          "expectancy_r": 0.08658,
+          "pf": 1.1848,
+          "profitable": true
+        },
+        "selection": {
+          "n": 14,
+          "expectancy_r": 0.16459,
+          "pf": 1.4815,
+          "profitable": true
+        },
+        "oos": {
+          "n": 14,
+          "expectancy_r": 0.33306,
+          "pf": 1.9675,
+          "max_dd_r": 2.8382,
+          "profitable": true
+        }
+      }
+    },
+    "SOL_2H_SHORT_SUPERTREND_PULLBACK_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "SOL-USDT"
+      ],
+      "timeframe": "2H",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 23,
+          "expectancy_r": 0.1015,
+          "pf": 1.1378,
+          "profitable": true
+        },
+        "selection": {
+          "n": 8,
+          "expectancy_r": 0.50334,
+          "pf": 1.8731,
+          "profitable": true
+        },
+        "oos": {
+          "n": 8,
+          "expectancy_r": 0.31297,
+          "pf": 1.416,
+          "max_dd_r": 2.6281,
+          "profitable": true
+        }
+      }
+    },
+    "XRP_2H_SHORT_TREND_CONTINUATION_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "XRP-USDT"
+      ],
+      "timeframe": "2H",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 52,
+          "expectancy_r": 0.11126,
+          "pf": 1.2117,
+          "profitable": true
+        },
+        "selection": {
+          "n": 17,
+          "expectancy_r": 0.33056,
+          "pf": 1.8261,
+          "profitable": true
+        },
+        "oos": {
+          "n": 18,
+          "expectancy_r": 0.27854,
+          "pf": 1.5187,
+          "max_dd_r": 4.7945,
+          "profitable": true
+        }
+      }
+    },
+    "LINK_4H_SHORT_RSI_TREND_V1": {
+      "market": "FUTURES",
+      "symbols": [
+        "LINK-USDT"
+      ],
+      "timeframe": "4H",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 49,
+          "expectancy_r": 0.00714,
+          "pf": 1.0163,
+          "profitable": true
+        },
+        "selection": {
+          "n": 16,
+          "expectancy_r": 0.54218,
+          "pf": 3.6331,
+          "profitable": true
+        },
+        "oos": {
+          "n": 17,
+          "expectancy_r": 0.27538,
+          "pf": 1.8529,
+          "max_dd_r": 2.2538,
+          "profitable": true
+        }
+      }
+    },
+    "US_INDEX_1D_TREND_PULLBACK_RR18_V1": {
+      "market": "MULTIASSET",
+      "symbols": [
+        "SPY-USDT",
+        "QQQ-USDT"
+      ],
+      "timeframe": "1D",
+      "release_pass": true,
+      "all_available_splits_profitable": true,
+      "parts": {
+        "is": {
+          "n": 213,
+          "expectancy_r": 0.0211,
+          "pf": 1.043,
+          "profitable": true
+        },
+        "selection": {
+          "n": 71,
+          "expectancy_r": 0.013,
+          "pf": 1.03,
+          "profitable": true
+        },
+        "oos": {
+          "n": 72,
+          "expectancy_r": 0.5055,
+          "pf": 2.912,
+          "profitable": true
+        }
+      }
+    }
+  },
+  "spot_snapshot": {
+    "resolved": 16,
+    "tp": 9,
+    "sl": 7,
+    "wr_pct": 56.25,
+    "gross_expectancy_r_proxy": 1.3656,
+    "profit_factor_proxy": 4.121,
+    "avg_modeled_net_r": null,
+    "expired": 6,
+    "avg_mfe_r": 0.712,
+    "avg_mae_r": 0.483,
+    "warning": "Sample is too small for a robust profitability conclusion and does not include a complete cost/rotation accounting model.",
+    "by_pair_timeframe": {
+      "PAXG-BTC|4h": {
+        "resolved": 7,
+        "tp": 5,
+        "sl": 2,
+        "wr_pct": 71.43,
+        "gross_expectancy_r_proxy": 2.167,
+        "profit_factor_proxy": 8.585,
+        "expired": 1
+      },
+      "BTC-USDT|1D": {
+        "resolved": 2,
+        "tp": 1,
+        "sl": 1,
+        "wr_pct": 50.0,
+        "gross_expectancy_r_proxy": 1.29,
+        "profit_factor_proxy": 3.58,
+        "expired": 0
+      },
+      "BTC-USDT|4h": {
+        "resolved": 2,
+        "tp": 0,
+        "sl": 2,
+        "wr_pct": 0.0,
+        "gross_expectancy_r_proxy": -1.0,
+        "profit_factor_proxy": 0.0,
+        "expired": 2
+      },
+      "PAXG-USDT|4h": {
+        "resolved": 2,
+        "tp": 1,
+        "sl": 1,
+        "wr_pct": 50.0,
+        "gross_expectancy_r_proxy": 0.815,
+        "profit_factor_proxy": 2.63,
+        "expired": 1
+      }
+    }
+  },
+  "multiasset_generic_proxy": {
+    "production_history_available": false,
+    "source": "vivek-v-rao/OHLC-Vol prices_ohlc.csv",
+    "period": [
+      "2022-01-01",
+      "2026-04-15"
+    ],
+    "symbols": [
+      "SPY",
+      "QQQ",
+      "USO",
+      "GLD"
+    ],
+    "method": "Closed daily candle strict Structure proxy: confirmed 5x5 pivots, sweep rejection/BOS, next-open entry, structural invalidation plus 0.20 ATR buffer, nearest structural target, RR 1.8-4.5, 12-bar horizon. No volume/macro/session/order book/Strategy Bank. USO and GLD are proxies, not the exact CL/XAG contracts.",
+    "aggregate": {
+      "signals": 74,
+      "resolved": 59,
+      "tp": 10,
+      "sl": 49,
+      "expired": 15,
+      "wr_pct": 16.95,
+      "expectancy_r": -0.3714,
+      "profit_factor": 0.553,
+      "max_drawdown_r": 24.761,
+      "avg_mfe_r": 1.456,
+      "avg_mae_r": 1.687
+    },
+    "by_symbol": {
+      "SPY": {
+        "signals": 20,
+        "resolved": 16,
+        "tp": 5,
+        "sl": 11,
+        "expired": 4,
+        "wr_pct": 31.25,
+        "expectancy_r": 0.1119,
+        "profit_factor": 1.163,
+        "validation30_expectancy_r": -0.051,
+        "validation30_profit_factor": 0.936
+      },
+      "QQQ": {
+        "signals": 22,
+        "resolved": 21,
+        "tp": 2,
+        "sl": 19,
+        "expired": 1,
+        "wr_pct": 9.52,
+        "expectancy_r": -0.6244,
+        "profit_factor": 0.31,
+        "validation30_expectancy_r": -0.4345,
+        "validation30_profit_factor": 0.493
+      },
+      "USO": {
+        "signals": 19,
+        "resolved": 13,
+        "tp": 1,
+        "sl": 12,
+        "expired": 6,
+        "wr_pct": 7.69,
+        "expectancy_r": -0.5977,
+        "profit_factor": 0.352,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      },
+      "GLD": {
+        "signals": 13,
+        "resolved": 9,
+        "tp": 2,
+        "sl": 7,
+        "expired": 4,
+        "wr_pct": 22.22,
+        "expectancy_r": -0.3133,
+        "profit_factor": 0.597,
+        "validation30_expectancy_r": -1.0,
+        "validation30_profit_factor": 0.0
+      }
+    },
+    "interpretation": "A generic structure/geometry recipe is not enough for Multi-Asset. This supports preserving asset-specific Strategy Bank, macro/session/volatility routing instead of copying crypto logic. It is not a profitability backtest of the production Multi-Asset engine."
+  },
+  "commit27_release_logic": {
+    "f30_live": true,
+    "exact_champions_live": true,
+    "multi_fast_1h_4h_live": false,
+    "multi_fast_reason": "NO_CLEAN_CLASS_SPECIFIC_IS_SELECTION_OOS_IN_SUPPLIED_DATA",
+    "generic_multi_recipe_rejected": true,
+    "spot_logic_change_allowed": false
+  },
+  "guarantees_future_profit": false
+}

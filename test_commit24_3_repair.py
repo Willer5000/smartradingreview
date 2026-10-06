@@ -78,8 +78,10 @@ def install_fake_q(score=84.0, passed=True, blockers=(), filter_scores=None, qua
 def test_direct_q_promotes():
     install_fake_q()
     out, auth = mod._normalize_quality_candidate(FakeApp(), make_result(), 'BTC-USDT', '1h')
-    assert auth['confirmed'] is True
-    assert auth['authority'] == 'Q7'
+    # Commit 25/27 supersede Commit24 direct-Q authority: it remains diagnostic only.
+    assert auth['confirmed'] is False
+    assert auth['diagnostic_confirmed'] is True
+    assert auth['authority'] == 'NONE'
     assert auth['confirmation_mode'] == 'ONE_OF_TEN_QUALITY_FILTERS'
 
 
@@ -99,7 +101,9 @@ def test_cluster_promotes_with_valid_geometry():
     out, auth = mod._normalize_quality_candidate(FakeApp(), make_result(), 'BTC-USDT', '1h')
     assert auth['q_cluster']['eligible'] is True
     assert auth['q_cluster']['winner'] == 'Q7'
-    assert auth['confirmed'] is True
+    # Commit 25/27 supersede Q-cluster publication authority.
+    assert auth['confirmed'] is False
+    assert auth['diagnostic_confirmed'] is True
     assert auth['confirmation_mode'] == 'Q_CLUSTER_GEOMETRIC_REVIEW'
 
 

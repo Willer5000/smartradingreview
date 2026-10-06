@@ -15,7 +15,7 @@ import math
 from typing import Any, Dict, Mapping, Iterable
 
 VERSION = "COMMIT23_10Q_ENGINE_V4_PARALLEL_AUTHORITY"
-MODEL = "TEN_PARALLEL_QUALITY_FILTERS_PLUS_LEGACY_Q10_DIAGNOSTIC"
+MODEL = "COMMIT27_CONTEXTUAL_Q1_Q9_WITH_PARALLEL_DIAGNOSTICS"
 
 # These are inherited from the established CPQE research contract. They are not
 # fitted on live outcomes in Commit 21.
@@ -1001,6 +1001,23 @@ def evaluate(
     execution_floor = min(q["Q6"], q["Q7"])
     q9_ok = q["Q9"] >= MIN_Q9_EVIDENCE and state not in {"RETIRED", "RETIRED_ALPHA_DECAY"}
 
+    # Commit 27 separates signal quality from statistical route authority.
+    # Q9 remains visible as a diagnostic of evidence/governance, but must not
+    # be counted twice: once inside Q1..Q9 and again by the frozen Champion/OOS
+    # route gate. Q1..Q8 keep their existing weights, renormalized to 1.0, and
+    # the existing 76 / 64 / 70 quality thresholds are preserved unchanged.
+    nonstat_weight_total = sum(Q_WEIGHTS[k] for k in Q_WEIGHTS if k != "Q9") or 1.0
+    commit27_nonstat_composite = sum(
+        q[k] * Q_WEIGHTS[k] for k in Q_WEIGHTS if k != "Q9"
+    ) / nonstat_weight_total
+    commit27_quality_ready = bool(
+        direction in {"BULLISH", "BEARISH"}
+        and commit27_nonstat_composite >= MIN_COMPOSITE
+        and structural_floor >= MIN_STRUCTURAL_FLOOR
+        and execution_floor >= MIN_EXECUTION_Q6_Q7
+        and state not in {"RETIRED", "RETIRED_ALPHA_DECAY"}
+    )
+
     generic_quality_ready = bool(
         direction in {"BULLISH", "BEARISH"}
         and base_composite >= MIN_COMPOSITE
@@ -1054,6 +1071,9 @@ def evaluate(
         "structural_floor": round(structural_floor, 2),
         "execution_floor": round(execution_floor, 2),
         "quality_ready": quality_ready,
+        "commit27_nonstat_composite": round(commit27_nonstat_composite, 2),
+        "commit27_quality_ready": bool(commit27_quality_ready),
+        "commit27_q9_role": "STATISTICAL_GOVERNANCE_DIAGNOSTIC_ONLY",
         "route_family": family,
         "evidence_state": state,
         "direction": direction,
@@ -1075,8 +1095,10 @@ def evaluate(
             "uses_live_outcomes_for_fitting": False,
             "adds_network_calls": False,
             "changes_q10_safety": False,
-            "q10_is_mandatory": False,
-            "parallel_confirmation_min_filters": 1,
+            "q10_contract_enforced_by_final_hard_guards": True,
+            "parallel_quality_role": "DIAGNOSTIC_ONLY",
+            "max_parallel_q_can_publish": False,
+            "parallel_confirmation_min_filters": 0,
             "parallel_confirmation_threshold": PARALLEL_FILTER_MIN_SCORE,
         },
     }

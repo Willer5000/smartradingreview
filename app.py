@@ -36417,6 +36417,11 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
         if isinstance(result,dict):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
             result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
+            # COMMIT 27: Multi-Asset now passes through the SAME final authority
+            # closure as Futures, while contextual_quality_commit27 selects a
+            # market/asset-class-specific quality lens. No crypto rule is copied
+            # into Multi and unsupported fast routes remain Shadow.
+            result=_app244_native_quality_authority(result, symbol, timeframe)
             _runtime_levels_175104 = result.get('levels') or {}
             if (
                 isinstance(_runtime_levels_175104, dict)
@@ -37003,8 +37008,11 @@ def _multiasset_directional_diagnostics_17511(analyses):
         # well. This is diagnostic only: it does not relax or bypass the gate.
         _multi_gate=(levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
         _multi_gate_reasons=[str(x) for x in (_multi_gate.get('reasons') or []) if str(x).strip()]
-        if _multi_gate_reasons:
-            _detail='Motivo exacto: ' + '; '.join(_multi_gate_reasons[:3])
+        _c27_multi_auth=result.get('quality_authority') if isinstance(result.get('quality_authority'),dict) else {}
+        _c27_multi_codes=[str(x) for x in (_c27_multi_auth.get('reason_codes') or []) if str(x).strip()]
+        _multi_reason_codes=_c27_multi_codes[:3] if _c27_multi_codes else _multi_gate_reasons[:3]
+        if _multi_reason_codes:
+            _detail='Motivo exacto: ' + '; '.join(_multi_reason_codes)
             if _detail not in reason:
                 reason=(reason.rstrip('. ') + '. ' + _detail)[:720]
         state=_multiasset_signal_temporal_state(result)
@@ -37986,7 +37994,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_COMMIT245_NATIVE_Q_VERSION = 'COMMIT24_5R_APP_PY_NATIVE_Q_CONTEXT_REUSE_RUNTIME_V3'
+_COMMIT245_NATIVE_Q_VERSION = 'COMMIT27_UNIFIED_CONTEXTUAL_PUBLICATION_CORE_V1'
 
 
 def _compact_futures_quality_context(result):
@@ -38148,19 +38156,26 @@ def _compact_futures_runtime_result(result):
             'selected_authority_score': native_audit.get('selected_authority_score'),
             'universal_guards': dict(native_audit.get('universal_guards') or {}),
             'source_route': native_audit.get('source_route'),
-            'q10_is_mandatory': False,
+            'q10_contract_enforced_by_hard_guards': True,
+            'commit27_authority': dict(native_audit.get('commit27_authority') or {}),
         }
 
     quality_authority = result.get('quality_authority') or {}
     if isinstance(quality_authority, dict) and quality_authority:
+        # COMMIT 27 keeps only the small causal authority record required to
+        # explain a reused closed candle. No trader transcripts or bulky data.
         compact['quality_authority'] = {
-            'filter': quality_authority.get('filter'),
-            'score': quality_authority.get('score'),
-            'mode': quality_authority.get('mode'),
-            'q_scores': dict(quality_authority.get('q_scores') or {}),
-            'composite': quality_authority.get('composite'),
-            'universal_guards': dict(quality_authority.get('universal_guards') or {}),
-            'q10_is_mandatory': False,
+            'version': quality_authority.get('version'),
+            'eligible': bool(quality_authority.get('eligible')),
+            'publication_status': quality_authority.get('publication_status'),
+            'blocker': quality_authority.get('blocker'),
+            'reason_codes': list(quality_authority.get('reason_codes') or [])[:8],
+            'movement_profile': dict(quality_authority.get('movement_profile') or {}),
+            'quality_domains': dict(quality_authority.get('quality_domains') or {}),
+            'route_authority': dict(quality_authority.get('route_authority') or {}),
+            'hard_guards': dict(quality_authority.get('hard_guards') or {}),
+            'parallel_q_role': 'DIAGNOSTIC_ONLY',
+            'q10_contract_enforced_by_hard_guards': True,
         }
 
     # COMMIT 24.5R: keep a tiny signal-engineering funnel in the runtime
@@ -38981,6 +38996,9 @@ def _run_futures_ui_analysis_sync(symbol, timeframe, market='futures', pre_acqui
             result.setdefault('symbol', symbol)
             result.setdefault('timeframe', timeframe)
             result = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
+            # COMMIT 27 parity: interactive Multi analysis is classified by the
+            # same unified final authority as background/closed-candle analysis.
+            result = _app244_native_quality_authority(result, symbol, timeframe)
             levels = result.get('levels') or {}
             if levels.get('execution_runtime_failed') or levels.get('execution_runtime_error'):
                 raise RuntimeError(str(levels.get('execution_runtime_error') or 'EXECUTION_RUNTIME_FAILED'))
@@ -40710,71 +40728,86 @@ def _app244_quality_audit(
     quality=None,
     parallel=None,
     selected=None,
+    authority=None,
 ):
+    """Commit 27 compact audit record for the single final authority.
+
+    The name is retained because older compact-snapshot code calls this helper,
+    but the semantics are Commit 27: parallel Q filters are diagnostics only and
+    publication authority comes from one contextual core + the hard economic
+    contract + frozen statistical route evidence.
+    """
     result = result if isinstance(result, dict) else {}
+    quality = quality if isinstance(quality, dict) else {}
+    authority = authority if isinstance(authority, dict) else {}
+    parallel = parallel if isinstance(parallel, dict) else {}
+    q_scores = {
+        str(k): round(_app244_num(v), 2)
+        for k, v in (quality.get('quality') or {}).items()
+        if str(k).startswith('Q')
+    }
     audit = {
         'version': _COMMIT245_NATIVE_Q_VERSION,
         'status': str(status or 'NOT_EVALUATED'),
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
-        'reason_codes': list(reason_codes or []),
-        'source_route': 'APP_PY_FINAL_CLASSIFICATION_POINT',
-        'q10_is_mandatory': False,
+        'reason_codes': list(reason_codes or authority.get('reason_codes') or []),
+        'source_route': 'APP_PY_COMMIT27_SINGLE_FINAL_AUTHORITY',
+        'q_scores': q_scores,
+        'composite': round(_app244_num(quality.get('composite')), 2),
+        'base_composite': round(_app244_num(quality.get('base_composite')), 2),
+        'context_group_composite': round(_app244_num(quality.get('context_group_composite')), 2),
+        'quality_ready': bool(quality.get('commit27_quality_ready', quality.get('quality_ready'))),
+        'legacy_quality_ready': bool(quality.get('quality_ready')),
+        'q9_role': str(quality.get('commit27_q9_role') or 'STATISTICAL_GOVERNANCE_DIAGNOSTIC_ONLY'),
+        'parallel_confirmed': bool(parallel.get('confirmed_one_of_ten')),
+        'parallel_quality_role': 'DIAGNOSTIC_ONLY',
+        'q10_contract_enforced_by_hard_guards': True,
+        'max_q_can_publish': False,
+        'commit27_authority': authority,
     }
-    if isinstance(quality, dict):
-        audit['q_scores'] = {
-            str(k): round(_app244_num(v), 2)
-            for k, v in (quality.get('quality') or {}).items()
-            if str(k).startswith('Q')
-        }
-        audit['composite'] = round(_app244_num(quality.get('composite')), 2)
-        audit['context_group_composite'] = round(
-            _app244_num(quality.get('context_group_composite')), 2
-        )
-        audit['quality_ready'] = bool(quality.get('quality_ready'))
-    if isinstance(parallel, dict):
-        audit['parallel_confirmed'] = bool(parallel.get('confirmed_one_of_ten'))
-        audit['passed_filters'] = list(parallel.get('passed_filters') or [])
-        audit['selected_filter'] = str(parallel.get('selected_filter') or '')
-        audit['selected_filter_score'] = round(
-            _app244_num(parallel.get('selected_filter_score')), 2
-        )
-        audit['universal_guards'] = dict(parallel.get('universal_guards') or {})
-    if isinstance(selected, dict):
-        audit['selected_authority_filter'] = str(selected.get('filter') or '')
-        audit['selected_authority_score'] = round(
-            _app244_num(selected.get('score')), 2
-        )
-    funnel = result.get('signal_engineering_funnel')
-    if isinstance(funnel, dict):
-        funnel = dict(funnel)
-        funnel['stage'] = str(status or funnel.get('stage') or 'NOT_EVALUATED')
-        funnel['q_evaluation_reached'] = bool(quality)
-        if isinstance(quality, dict):
-            _qvals = quality.get('quality') or {}
-            funnel['q_scores'] = {
-                str(k): round(_app244_num(v), 2)
-                for k, v in _qvals.items()
-                if str(k).startswith('Q')
-            }
-            funnel['q_best'] = max((float(v) for v in funnel['q_scores'].values()), default=0.0)
-            funnel.pop('blocker', None)
-        elif reason_codes:
-            funnel['blocker'] = str((reason_codes or ['UNKNOWN'])[0])[:120]
-        result['signal_engineering_funnel'] = funnel
     result['app_native_quality_audit'] = audit
+
+    funnel = result.get('signal_engineering_funnel')
+    if not isinstance(funnel, dict):
+        funnel = {}
+    levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
+    funnel.update({
+        'version': 'COMMIT27_SIGNAL_FUNNEL_V1',
+        'symbol': str(symbol or ''),
+        'timeframe': str(timeframe or ''),
+        'action': str((result.get('decision') or {}).get('action') or levels.get('manual_observation_action') or ''),
+        'geometry_route': (
+            'FALLBACK_ANALYSIS_ONLY' if bool(levels.get('manual_geometry_fallback'))
+            else 'PRIMARY_GEOMETRY'
+        ),
+        'geometry_source': str(levels.get('manual_geometry_source') or levels.get('entry_source') or '')[:160],
+        'q_evaluation_reached': bool(quality),
+        'q_scores': q_scores,
+        'q_best': max(q_scores.values(), default=0.0),
+        'parallel_q_diagnostic_only': True,
+        'movement_profile': ((authority.get('movement_profile') or {}).get('name') if isinstance(authority, dict) else None),
+        'statistical_route': ((authority.get('route_authority') or {}).get('route_id') if isinstance(authority, dict) else None),
+        'statistical_route_live': bool((authority.get('route_authority') or {}).get('live')) if isinstance(authority, dict) else False,
+        'blocker': str((reason_codes or authority.get('reason_codes') or [''])[0] or '')[:160],
+        'stage': str(status or 'NOT_EVALUATED'),
+    })
+    result['signal_engineering_funnel'] = funnel
     return result
 
 
 def _app244_native_quality_authority(result, symbol, timeframe):
-    """Evaluate the actual final Futures geometry through the existing Q engine.
+    """Commit 27 final publication authority for Futures AND Multi-Asset.
 
-    The function is intentionally fail-closed. It can promote an already valid
-    directional package when one existing Q lane reaches the established 75
-    authority and the universal economic/operational guards are clean. It never
-    manufactures a direction or changes Entry/SL/TP.
+    One pipeline owns executability:
+      closed real data -> directional thesis -> PRIMARY Entry/SL/TP -> contextual
+      Q1..Q8 quality -> validated statistical route (Q9 diagnostic) -> hard economics/safety.
+
+    It never changes direction, Entry, SL, TP or leverage.  It may only promote
+    or demote the publication state of the package it receives.  Manual/final
+    visibility fallback geometry is permanently non-publishable.
     """
-    if not isinstance(result, dict) or not result.get('success'):
+    if not isinstance(result, dict) or result.get('success') is False:
         return result
 
     levels = dict(result.get('levels') or {})
@@ -40785,28 +40818,15 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         or result.get('action')
     )
 
-    # Seed the funnel BEFORE any hard-return so every directional hypothesis
-    # leaves a truthful reason for where it stopped. This is diagnostic only;
-    # it never upgrades a candidate.
-    _levels_route = str(
-        levels.get('manual_geometry_source')
-        or levels.get('strategy_route_family')
-        or levels.get('setup_family')
-        or ''
-    )
-    _fallback_geometry = bool(levels.get('manual_geometry_fallback'))
-    _soft_setup_warning = bool(levels.get('operational_setup_warning'))
+    # Preserve a truthful funnel even when no signal is possible.
     result['signal_engineering_funnel'] = {
-        'version': 'COMMIT24_5R_SIGNAL_FUNNEL_V1',
-        'symbol': str(symbol),
-        'timeframe': str(timeframe),
+        'version': 'COMMIT27_SIGNAL_FUNNEL_V1',
+        'symbol': str(symbol or ''),
+        'timeframe': str(timeframe or ''),
         'action': action,
-        'geometry_route': (
-            'GUARANTEED_TECHNICAL_FALLBACK' if _fallback_geometry
-            else ('PRIMARY_WITH_SOFT_SETUP_WARNING' if _soft_setup_warning else 'PRIMARY_OR_STRUCTURAL')
-        ),
-        'geometry_source': _levels_route[:120],
-        'setup_guard_soft_warning': _soft_setup_warning,
+        'geometry_route': 'FALLBACK_ANALYSIS_ONLY' if bool(levels.get('manual_geometry_fallback')) else 'PRIMARY_GEOMETRY',
+        'geometry_source': str(levels.get('manual_geometry_source') or levels.get('entry_source') or '')[:160],
+        'setup_guard_soft_warning': bool(levels.get('operational_setup_warning')),
         'q_evaluation_reached': False,
         'stage': 'DIRECTION_CLASSIFICATION',
         'blocker': None,
@@ -40815,103 +40835,15 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     if action not in ('LONG', 'SHORT'):
         return _app244_quality_audit(
             result, symbol, timeframe, status='NOT_DIRECTIONAL',
-            reason_codes=['DIRECTION_UNDEFINED']
+            reason_codes=['DIRECTION_UNDEFINED'], authority={
+                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'eligible': False,
+                'reason_codes': ['DIRECTION_UNDEFINED'],
+            },
         )
 
-    publication_status = str(
-        levels.get('publication_status')
-        or result.get('publication_status')
-        or ''
-    ).upper()
-    if publication_status == 'EXECUTABLE_SIGNAL' or bool(levels.get('is_executable')):
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='ALREADY_EXECUTABLE',
-            reason_codes=['ALREADY_EXECUTABLE']
-        )
-
-    # The bridge belongs to the closed-candle decision lane. Never use an open
-    # candle/intrabar snapshot as publication authority.
-    if str(result.get('analysis_mode') or '').upper() != 'CLOSED_CANDLE':
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['NOT_CLOSED_CANDLE']
-        )
-    if result.get('source_candle_closed') is not True:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['SOURCE_CANDLE_NOT_CLOSED']
-        )
-
-    market_data_is_synthetic = result.get('market_data_is_synthetic')
-    if market_data_is_synthetic is None:
-        market_data_is_synthetic = levels.get('market_data_is_synthetic')
-    if market_data_is_synthetic is not False:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['SYNTHETIC_OR_UNVERIFIED_DATA']
-        )
-
-    entry = _app244_num(levels.get('entry'))
-    stop_loss = _app244_num(levels.get('stop_loss'))
-    take_profit = _app244_num(levels.get('take_profit'))
-    geometry_ok = bool(
-        entry > 0 and stop_loss > 0 and take_profit > 0
-        and ((action == 'LONG' and stop_loss < entry < take_profit)
-             or (action == 'SHORT' and take_profit < entry < stop_loss))
-    )
-    if not geometry_ok:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['INVALID_ENTRY_SL_TP']
-        )
-
-    rr = _app244_num(levels.get('risk_reward'))
-    if rr <= 0 and entry > 0 and stop_loss > 0:
-        rr = abs(take_profit - entry) / max(abs(entry - stop_loss), 1e-12)
-    # RR remains a hard economic contract here. We do NOT reproduce the old
-    # "cluster can rescue any RR" behavior because that would alter user policy.
-    if rr < 1.8 or rr > 3.5:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['RR_OUTSIDE_HARD_RANGE']
-        )
-
-    safety = _app244_num(levels.get('execution_safety'))
-    if safety < 65.0:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['OPERATIONAL_SAFETY_BELOW_65']
-        )
-
-    risk_control = dict(levels.get('risk_control') or {})
-    loss_at_sl = _app244_num(
-        risk_control.get('estimated_sl_loss_pct_margin'),
-        _app244_num(levels.get('loss_at_sl_pct'), 0.0),
-    )
-    if loss_at_sl > 8.0:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['LOSS_AT_SL']
-        )
-
-    atr_stress = _app244_num(
-        risk_control.get('estimated_atr_stress_loss_pct_margin'),
-        _app244_num(levels.get('atr_stress_pct'), 0.0),
-    )
-    if not (0.0 < atr_stress <= 25.0):
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['ATR_STRESS']
-        )
-
-    # Some upstream variants place the context dictionaries at different
-    # levels. Prefer the real result blocks and fall back to the existing level
-    # payload instead of synthesizing values.
-    funnel = result.get('signal_engineering_funnel') or {}
-    if isinstance(funnel, dict):
-        funnel['stage'] = 'PRE_Q_CONTEXT_READY'
-        result['signal_engineering_funnel'] = funnel
-
+    # Build Q context from the final package.  No synthetic defaults are added;
+    # compact reused snapshots carry this context explicitly.
     quality_context = result.get('quality_context') or {}
     if not isinstance(quality_context, dict):
         quality_context = {}
@@ -40922,200 +40854,124 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     if not all(isinstance(x, dict) for x in (trend, momentum, volatility, structure)):
         return _app244_quality_audit(
             result, symbol, timeframe, status='REJECTED',
-            reason_codes=['Q_CONTEXT_INVALID']
+            reason_codes=['Q_CONTEXT_INVALID'], authority={
+                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'eligible': False,
+                'reason_codes': ['Q_CONTEXT_INVALID'],
+            },
         )
 
-    # The Q engine expects the stage explicitly. Reaching this point means the
-    # native app.py bridge has just revalidated the universal preconditions on
-    # the same final geometry. We record the derivation instead of pretending a
-    # stale legacy flag was present.
     q_levels = dict(levels)
-    q_levels['entry'] = entry
-    q_levels['stop_loss'] = stop_loss
-    q_levels['take_profit'] = take_profit
-    q_levels['risk_reward'] = round(rr, 6)
-    q_levels['execution_safety'] = round(safety, 4)
-    q_levels['market_data_is_synthetic'] = False
-    q_levels['publication_stage'] = 'PUBLICATION_GATE'
-    q_levels['futures_publication_stage'] = 'PUBLICATION_GATE'
-    q_levels['futures_publication_gate_stage'] = 'PUBLICATION_GATE'
-    q_levels['app_native_gate_reached'] = True
-    q_levels['app_native_gate_source'] = 'COMMIT24_5_APP_PY_DETERMINISTIC_PRECHECK'
+    q_levels['futures_filter_stage'] = 'PUBLICATION_GATE'
+    q_levels['publication_gate_reached'] = True
+    # Carry the frozen statistical route into Q9 diagnostics without allowing Q9
+    # to create the route or duplicate its authority.
+    op = result.get('operational_intelligence') or {}
+    if isinstance(op, dict) and isinstance(op.get('commit19_champion'), dict):
+        q_levels.setdefault('commit19_champion', dict(op.get('commit19_champion') or {}))
+    try:
+        from multiasset_system import MULTIASSET_SYMBOLS as _c27_multi_symbols
+        _c27_is_multi = str(symbol).upper().replace('/', '-') in set(_c27_multi_symbols)
+    except Exception:
+        _c27_is_multi = bool(result.get('is_multiasset'))
+    market_type = 'multiasset' if _c27_is_multi else 'futures'
 
     try:
-        from quality_9q_engine_21 import evaluate as _q_evaluate
-    except Exception as exc:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='UNAVAILABLE',
-            reason_codes=[f'Q_ENGINE_IMPORT:{type(exc).__name__}']
-        )
-
-    try:
-        quality = _q_evaluate(
-            q_levels,
-            trend,
-            momentum,
-            volatility,
-            structure,
-            str(timeframe or ''),
-            str(symbol or ''),
-            action,
-            market_type='futures',
+        import quality_9q_engine_21 as _qengine27
+        quality = _qengine27.evaluate(
+            q_levels, trend, momentum, volatility, structure,
+            str(timeframe), str(symbol), action, market_type=market_type,
         )
     except Exception as exc:
         return _app244_quality_audit(
-            result, symbol, timeframe, status='ERROR',
-            reason_codes=[f'Q_EVALUATION:{type(exc).__name__}']
+            result, symbol, timeframe, status='REJECTED',
+            reason_codes=[f'Q_ENGINE_ERROR:{type(exc).__name__}'], authority={
+                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'eligible': False,
+                'reason_codes': [f'Q_ENGINE_ERROR:{type(exc).__name__}'],
+            },
         )
 
-    parallel = dict(quality.get('parallel_quality_filters') or {})
-    guards = dict(parallel.get('universal_guards') or {})
-    filters = [row for row in (parallel.get('filters') or []) if isinstance(row, dict)]
-    passed_direct = [
-        row for row in filters
-        if bool(row.get('passed')) and _app244_num(row.get('score')) >= 75.0
-    ]
-
-    selected = None
-    authority_mode = ''
-    if passed_direct:
-        selected = max(
-            passed_direct,
-            key=lambda row: (_app244_num(row.get('score')), str(row.get('filter') or '')),
+    parallel = quality.get('parallel_quality_filters') or {}
+    try:
+        from contextual_quality_commit27 import evaluate_publication
+        authority = evaluate_publication(
+            result, symbol=str(symbol), timeframe=str(timeframe), quality=quality,
         )
-        authority_mode = 'DIRECT_ONE_Q'
+    except Exception as exc:
+        return _app244_quality_audit(
+            result, symbol, timeframe, status='REJECTED', quality=quality,
+            parallel=parallel,
+            reason_codes=[f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
+            authority={
+                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'eligible': False,
+                'reason_codes': [f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
+            },
+        )
+
+    previous_status = str(levels.get('publication_status') or result.get('publication_status') or 'ANALYSIS_ONLY').upper()
+    previous_reason = str(levels.get('rejected_reason') or result.get('rejected_reason') or '')[:1000]
+    eligible = bool(authority.get('eligible'))
+    reason_codes = list(authority.get('reason_codes') or [])
+
+    levels['commit27_contextual_quality'] = dict(authority)
+    levels['app_native_quality_authority'] = eligible
+    levels['app_native_quality_authority_version'] = _COMMIT245_NATIVE_Q_VERSION
+    levels['quality_q_scores'] = dict((authority.get('quality_domains') or {}).get('q_scores') or {})
+    levels['quality_composite'] = (authority.get('quality_domains') or {}).get('composite')
+    levels['quality_filter_authority'] = str((authority.get('movement_profile') or {}).get('name') or '')
+    levels['quality_filter_confirmed'] = eligible
+    levels['quality_authority_mode'] = 'COMMIT27_SINGLE_CONTEXTUAL_AUTHORITY'
+    levels['quality_parallel_role'] = 'DIAGNOSTIC_ONLY'
+    levels['q10_contract_enforced_by_hard_guards'] = True
+    levels['previous_publication_status_before_commit27'] = previous_status
+    levels['pre_commit27_rejection_reason'] = previous_reason
+
+    result['quality_authority'] = dict(authority)
+    result['commit27_contextual_quality'] = dict(authority)
+    result['app_native_quality_authority'] = eligible
+
+    if eligible:
+        levels.update({
+            'publication_status': 'EXECUTABLE_SIGNAL',
+            'publication_eligible': True,
+            'is_rejected': False,
+            'is_executable': True,
+            'publication_gate_reached': True,
+            'publication_gate_source': 'COMMIT27_SINGLE_CONTEXTUAL_AUTHORITY',
+        })
+        # Keep the old reason for audit, but never expose it as a current block.
+        levels.pop('rejected_reason', None)
+        result['publication_status'] = 'EXECUTABLE_SIGNAL'
+        result['publication_eligible'] = True
+        result['is_executable'] = True
+        result['is_rejected'] = False
+        result.pop('rejected_reason', None)
+        status = 'CONFIRMED'
     else:
-        # Commit 24.3 cluster rule kept as a bounded secondary lane. It never
-        # lowers 75: cluster authority is valid only when the cluster itself is
-        # statistically coherent and one of the geometry-relevant raw Q lanes
-        # reaches 75 on the same Entry/SL/TP package.
-        ranked = sorted(
-            filters,
-            key=lambda row: _app244_num(row.get('score')),
-            reverse=True,
-        )
-        top3 = ranked[:3]
-        if len(top3) == 3:
-            vals = [_app244_num(row.get('score')) for row in top3]
-            avg_top3 = sum(vals) / 3.0
-            ge70 = sum(1 for value in vals if value >= 70.0)
-            mean = avg_top3
-            std = (sum((value - mean) ** 2 for value in vals) / 3.0) ** 0.5
-            qv = dict(quality.get('quality') or {})
-            geometry_q = {
-                'Q3': _app244_num(qv.get('Q3')),
-                'Q6': _app244_num(qv.get('Q6')),
-                'Q7': _app244_num(qv.get('Q7')),
-                'Q9': _app244_num(qv.get('Q9')),
-            }
-            geometry_filter = max(geometry_q, key=geometry_q.get)
-            geometry_score = geometry_q.get(geometry_filter, 0.0)
-            cluster_ok = bool(
-                avg_top3 >= 72.0
-                and ge70 >= 2
-                and std >= 5.0
-                and geometry_score >= 75.0
-            )
-            if cluster_ok:
-                selected = {
-                    'filter': geometry_filter,
-                    'score': geometry_score,
-                    'passed': True,
-                }
-                authority_mode = 'Q_CLUSTER_GEOMETRY'
-
-    if not selected:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['NO_Q_AUTHORITY'],
-            quality=quality,
-            parallel=parallel,
-        )
-
-    # Reuse the engine's own universal guard result, but also require the app.py
-    # hard RR rule above. No Q score is allowed to bypass these checks.
-    if not bool(guards.get('passed')):
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=list(guards.get('codes') or ['UNIVERSAL_GUARD']),
-            quality=quality,
-            parallel=parallel,
-            selected=selected,
-        )
-
-    selected_score = _app244_num(selected.get('score'))
-    if selected_score < 75.0:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['SELECTED_Q_BELOW_75'],
-            quality=quality,
-            parallel=parallel,
-            selected=selected,
-        )
-
-    previous_status = str(
-        levels.get('publication_status')
-        or result.get('publication_status')
-        or 'ANALYSIS_ONLY'
-    ).upper()
-    previous_reason = str(
-        levels.get('rejected_reason')
-        or result.get('rejected_reason')
-        or 'ANALYSIS_ONLY'
-    )[:1000]
-
-    # Promote only the publication state. Entry/SL/TP/leverage/direction are
-    # untouched. The original rejection remains traceable for audit/debugging.
-    levels.update({
-        'app_native_quality_authority': True,
-        'app_native_quality_authority_version': _COMMIT245_NATIVE_Q_VERSION,
-        'quality_filter_authority': str(selected.get('filter') or ''),
-        'quality_filter_score': round(selected_score, 2),
-        'quality_filter_confirmed': True,
-        'quality_authority_mode': authority_mode,
-        'quality_q_scores': {
-            str(k): round(_app244_num(v), 2)
-            for k, v in (quality.get('quality') or {}).items()
-            if str(k).startswith('Q')
-        },
-        'quality_composite': round(_app244_num(quality.get('composite')), 2),
-        'quality_context_group_composite': round(
-            _app244_num(quality.get('context_group_composite')), 2
-        ),
-        'quality_publication_stage': 'PUBLICATION_GATE',
-        'publication_gate_reached': True,
-        'publication_gate_source': 'APP_PY_NATIVE_Q_AUTHORITY',
-        'previous_publication_status_before_q': previous_status,
-        'pre_q_authority_rejection_reason': previous_reason,
-        'publication_status': 'EXECUTABLE_SIGNAL',
-        'is_rejected': False,
-        'is_executable': True,
-        'publication_eligible': True,
-        'manual_observation_geometry': bool(levels.get('manual_observation_geometry')),
-    })
+        # Commit 27 is also allowed to DEMOTE an older overlay promotion.  This
+        # is how we eliminate contradictory parallel authorities.
+        levels['publication_status'] = 'ANALYSIS_ONLY'
+        levels['publication_eligible'] = False
+        levels['is_executable'] = False
+        levels['is_rejected'] = True
+        levels['suggested_size'] = 0
+        levels['rejected_reason'] = '; '.join(reason_codes[:8])[:1000] or 'COMMIT27_NOT_AUTHORISED'
+        result['publication_status'] = 'ANALYSIS_ONLY'
+        result['publication_eligible'] = False
+        result['is_executable'] = False
+        result['is_rejected'] = True
+        result['rejected_reason'] = levels['rejected_reason']
+        if str(authority.get('publication_status') or '').upper() == 'SHADOW_QUALITY_CANDIDATE':
+            result['commit27_shadow_candidate'] = True
+            levels['commit27_shadow_candidate'] = True
+        status = 'SHADOW' if result.get('commit27_shadow_candidate') else 'REJECTED'
 
     result['levels'] = levels
-    result['publication_status'] = 'EXECUTABLE_SIGNAL'
-    result['publication_eligible'] = True
-    result['is_executable'] = True
-    result['app_native_quality_authority'] = True
-    result['quality_authority'] = {
-        'filter': str(selected.get('filter') or ''),
-        'score': round(selected_score, 2),
-        'mode': authority_mode,
-        'q_scores': {
-            str(k): round(_app244_num(v), 2)
-            for k, v in (quality.get('quality') or {}).items()
-            if str(k).startswith('Q')
-        },
-        'composite': round(_app244_num(quality.get('composite')), 2),
-        'universal_guards': guards,
-        'q10_is_mandatory': False,
-    }
-
     return _app244_quality_audit(
-        result, symbol, timeframe, status='CONFIRMED',
-        reason_codes=[], quality=quality, parallel=parallel, selected=selected,
+        result, symbol, timeframe, status=status, reason_codes=reason_codes,
+        quality=quality, parallel=parallel, authority=authority,
     )
 
 
@@ -42566,7 +42422,10 @@ def _futures_manual_risk_profile(result):
     risk_class='MEDIUM' if medium else 'HIGH'
     _publication_gate = (levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
     _gate_reasons = [str(x) for x in (_publication_gate.get('reasons') or []) if str(x).strip()]
-    _gate_detail = (' Motivo exacto: ' + '; '.join(_gate_reasons[:3]) + '.') if _gate_reasons else ''
+    _c27_auth = result.get('quality_authority') if isinstance(result.get('quality_authority'), dict) else {}
+    _c27_codes = [str(x) for x in (_c27_auth.get('reason_codes') or []) if str(x).strip()]
+    _reason_parts = _c27_codes[:3] if _c27_codes else _gate_reasons[:3]
+    _gate_detail = (' Motivo exacto: ' + '; '.join(_reason_parts) + '.') if _reason_parts else ''
     if source=='GUARANTEED_TECHNICAL_FALLBACK':
         reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.' + _gate_detail
     elif medium:

@@ -59,7 +59,9 @@ def test_f30_backtest_contract_is_not_weakened():
     assert weak_adx["eligible_for_execution_routing"] is False
     assert "ADX" in weak_adx["reason"]
     no_structure = reg.resolve_champion(layers=layers("BULLISH", structural=False), operational=op("LONG", "TREND_UP"), symbol="ETH-USDT", timeframe="30m", system_type="FUTURES", regime="TREND_UP", volatility="NORMAL", mtf_relation=mtf("BULLISH"))
-    assert no_structure["eligible_for_execution_routing"] is False
+    # Commit 27: structure belongs to post-Entry execution parity, not pre-Entry routing.
+    assert no_structure["eligible_for_execution_routing"] is True
+    assert "POST_GEOMETRY_TRIGGER_PENDING" in no_structure["live_context_reason"]
 
 
 def test_exact_2h_and_4h_champions():

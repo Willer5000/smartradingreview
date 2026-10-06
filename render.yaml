@@ -1,10 +1,10 @@
-# COMMIT 26 — causal pre-Entry recovery; no new workers/requests; one worker / two gthreads.
+# COMMIT 27 — unified contextual signal core; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit26_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn commit27_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -54,7 +54,7 @@ services:
         value: "1"
       - key: COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED
         value: "1"
-      - key: COMMIT26_CAUSAL_PREENTRY_ENABLED
+      - key: COMMIT27_UNIFIED_AUTHORITY_ENABLED
         value: "1"
       - key: COMMIT22_WORKER_RESTART_POLICY
         value: "TIMEOUT_120S_MAX_REQUESTS_80"
@@ -63,7 +63,7 @@ services:
       - key: UI_PENDING_MAX
         value: "5"
       - key: Q_CLUSTER_ENABLED
-        value: "true"
+        value: "false"
       - key: Q_CLUSTER_MIN_AVG
         value: "72"
       - key: Q_CLUSTER_MIN_TWO
