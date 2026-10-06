@@ -57,7 +57,9 @@ def _install_champion_prepare() -> Dict[str, Any]:
                     "state": "HARD_CONFLICT" if bool((out.get("multi_timeframe") or {}).get("conflict")) else "ALIGNED_OR_NON_BLOCKING",
                     "usable": not bool((out.get("multi_timeframe") or {}).get("conflict")),
                     "original_conflict": bool((out.get("multi_timeframe") or {}).get("conflict")),
+                    "dominant_direction": (out.get("multi_timeframe") or {}).get("dominant_direction"),
                 },
+                operational=out,
             )
             out["commit19_champion"] = route
             if not route.get("eligible_for_execution_routing"):
@@ -188,6 +190,14 @@ def _install_champion_geometry_overlay() -> Dict[str, Any]:
                 levels["commit19_geometry_parity"] = True
                 levels["commit19_geometry_mode"] = "STRUCTURAL_PRODUCTION_REPLAY"
                 levels["commit19_champion_id"] = route.get("champion_id")
+                # Commit 25: preserve compact governed evidence through the
+                # Entry/SL/TP snapshot so Q9 does not see a false GAP after
+                # champion routing. No I/O and no score fabrication.
+                levels["commit19_champion"] = dict(route)
+                levels["validated_strategy_route"] = dict(route)
+                levels["setup_family"] = route.get("execution_family") or route.get("bank_family")
+                levels["strategy_family"] = route.get("execution_family") or route.get("bank_family")
+                levels["commit25_contextual_authority"] = True
                 return levels
 
             entry = _f(levels.get("entry"), current)
@@ -241,6 +251,11 @@ def _install_champion_geometry_overlay() -> Dict[str, Any]:
             levels["commit19_champion_id"] = route.get("champion_id")
             levels["commit19_historical_geometry"] = geom
             levels["commit19_never_bypass_safety"] = True
+            levels["commit19_champion"] = dict(route)
+            levels["validated_strategy_route"] = dict(route)
+            levels["setup_family"] = route.get("execution_family") or route.get("bank_family")
+            levels["strategy_family"] = route.get("execution_family") or route.get("bank_family")
+            levels["commit25_contextual_authority"] = True
             return levels
         except Exception as exc:
             levels["commit19_geometry_parity"] = False

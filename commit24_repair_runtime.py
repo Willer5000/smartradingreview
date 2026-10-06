@@ -309,7 +309,7 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         }
         universal_codes = [code for code in universal_codes if code != "NO_Q_GE75"]
 
-    confirmed = bool(
+    diagnostic_confirmed = bool(
         authority_row is not None
         and _f(authority_row.get("score")) >= Q_MIN_SCORE
         and stage == "PUBLICATION_GATE"
@@ -320,6 +320,9 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         and not universal_codes
         and (direct is not None or cluster_confirmed)
     )
+    # Commit 25: direct-Q and Q-cluster remain visible diagnostics but may not
+    # manufacture executability. Native publication economics are authoritative.
+    confirmed = False
 
     # A correlated (<5 stddev) set is rejected only from the cluster route; the
     # existing direct Q>=75 contract remains authoritative.
@@ -328,7 +331,8 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         "version": QUALITY_AUTHORITY_VERSION,
         "repair_version": VERSION,
         "confirmed": confirmed,
-        "authority": str(authority_row.get("filter") or "NONE") if confirmed else "NONE",
+        "diagnostic_confirmed": diagnostic_confirmed,
+        "authority": "NONE",
         "authority_name": str(authority_row.get("name") or "") if confirmed else "",
         "score": round(_f(authority_row.get("score")) if authority_row else 0.0, 2),
         "passed_filters": [str(r.get("filter")).upper() for r in (parallel.get("filters") or []) if isinstance(r, Mapping) and bool(r.get("passed"))],
@@ -340,7 +344,7 @@ def _build_q_evaluation(app_module: Any, result: Dict[str, Any], action: str) ->
         "safety": round(safety, 2),
         "sl_loss_pct": round(sl_loss, 2),
         "atr_stress_pct": round(atr_stress, 2),
-        "q10_required": False,
+        "q10_required": True,
         "dedupe_key": _dedupe_key(result),
         "confirmation_mode": authority_mode,
         "q_cluster": cluster,
@@ -782,7 +786,7 @@ def install(app: Any) -> Dict[str, Any]:
             "q_cluster_min_avg": Q_CLUSTER_MIN_AVG,
             "q_cluster_min_two": Q_CLUSTER_MIN_TWO,
             "q_cluster_std_min": Q_CLUSTER_STD_MIN,
-            "q10_is_mandatory": False,
+            "q10_is_mandatory": True,
             "operational_safety_floor": OPERATING_SAFETY_FLOOR,
             "max_sl_loss_pct": MAX_SL_LOSS_PCT,
             "max_atr_stress_pct": MAX_ATR_STRESS_PCT,
@@ -808,7 +812,7 @@ def audit() -> Dict[str, Any]:
         "q_cluster_enabled": Q_CLUSTER_ENABLED,
         "q_cluster_min_avg": Q_CLUSTER_MIN_AVG,
         "q_cluster_std_min": Q_CLUSTER_STD_MIN,
-        "q10_is_mandatory": False,
+        "q10_is_mandatory": True,
         "thresholds_lowered": False,
         "new_market_data_requests": False,
         "new_permanent_workers": False,

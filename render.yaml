@@ -1,10 +1,10 @@
-# COMMIT 24.3 — Q-Cluster + preemptive UI queue; one worker / two gthreads.
+# COMMIT 25 — contextual Champion recovery + anti-overfit authority; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit24_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn commit25_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -52,6 +52,8 @@ services:
         value: "COMMIT23_1_AUTHORITY_INTEGRATION_FIX_V1"
       - key: COMMIT23_1_REPROCESS_STALE_SNAPSHOTS
         value: "1"
+      - key: COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED
+        value: "1"
       - key: COMMIT22_WORKER_RESTART_POLICY
         value: "TIMEOUT_120S_MAX_REQUESTS_80"
       - key: STALL_EXIT_SECONDS
@@ -89,7 +91,7 @@ services:
       - key: OPTIONS_MM_MAX_CHAIN_ROWS
         value: "220"
       - key: AI_GROQ_DAILY_TOKEN_BUDGET
-        value: "160000"
+        value: "140000"
       - key: AI_GROQ_DAILY_TOKEN_RESERVE
         value: "8000"
       - key: AI_MANUAL_HOURLY_LIMIT

@@ -4,11 +4,10 @@ Q1..Q9 evaluate *quality of an already selected directional thesis and its
 execution package*. They do not create direction, change Entry/SL/TP, add
 market-data requests, or replace the production safety gate.
 
-The legacy Q10 contract is preserved as a diagnostic/legacy gate, but the
-publication authority is now parallel: a candidate may be confirmed when at
-least one of ten quality filters reaches 75/100 and the universal execution
-guards pass. R/R becomes a quality input for fast/contextual filters rather
-than a universal veto. No filter creates direction or changes Entry/SL/TP.
+Commit 25 keeps the ten parallel filters as diagnostics only. Publication
+authority remains the native economic/safety contract. The parallel scores help
+explain quality but cannot bypass Safety, Entry/SL/TP quality or R/R. No filter
+creates direction or changes Entry/SL/TP.
 """
 from __future__ import annotations
 
@@ -493,6 +492,12 @@ def _universal_parallel_guards(
     )
     atr_stress = _f(risk_control.get("estimated_atr_stress_loss_pct_margin"), 0.0)
     market_synthetic = bool(l.get("market_data_is_synthetic"))
+    rr = _f(l.get("risk_reward"), 0.0)
+    if rr <= 0 and entry > 0 and sl > 0 and tp > 0:
+        rr = abs(tp - entry) / max(abs(entry - sl), 1e-12)
+    tp_quality = _f(l.get("tp_quality_score"), 0.0)
+    sl_quality = _f(l.get("sl_reliability"), 0.0)
+    sl_quality = sl_quality * 100.0 if 0.0 <= sl_quality <= 1.0 else sl_quality
     codes = []
 
     if direction not in {"BULLISH", "BEARISH"}:
@@ -506,6 +511,16 @@ def _universal_parallel_guards(
         codes.append("INVALID_ENTRY_SL_TP")
     if legacy_safety < PARALLEL_OPERATIONAL_SAFETY_FLOOR:
         codes.append("OPERATIONAL_SAFETY_BELOW_65")
+    # Commit 25: diagnostic filters are measured against the same Premium
+    # economic package; no soft R/R or weak SL/TP can look publication-ready.
+    if legacy_safety < Q10_MIN_SAFETY:
+        codes.append("PREMIUM_SAFETY_BELOW_75")
+    if tp_quality < Q10_MIN_TP:
+        codes.append("TP_QUALITY_BELOW_55")
+    if sl_quality < Q10_MIN_SL:
+        codes.append("SL_QUALITY_BELOW_60")
+    if not (Q10_MIN_RR <= rr <= Q10_MAX_RR):
+        codes.append("RR_OUTSIDE_1_8_3_5")
     if planned_sl_loss > PARALLEL_MAX_SL_LOSS_PCT:
         codes.append("LOSS_AT_SL")
     if not (0 < atr_stress <= PARALLEL_MAX_ATR_STRESS_PCT):
@@ -606,7 +621,10 @@ def evaluate_parallel_quality_filters(
         "Q3": bool(_unique_tf_count(l, timeframe) >= 2 or _truth(l.get("mtf_aligned"))),
         "Q4": bool(matched or family not in {"", "UNKNOWN"}),
         "Q5": bool(l.get("volume_ratio") or l.get("relative_volume") or l.get("volume") or l.get("flow") or l.get("market_microstructure")),
-        "Q6": _f(l.get("entry_score") or l.get("entry_quality_score"), 0) >= 60 and (_f(l.get("entry_reachability") or l.get("entry_reachability_score"), 0) >= 0 or _f(l.get("entry_score"), 0) >= 70),
+        "Q6": _f(l.get("entry_score") or l.get("entry_quality_score"), 0) >= 60 and (
+            _f(l.get("entry_reachability") or l.get("entry_reachability_score") or l.get("reachability_score"), -1) > 0
+            or (_f(l.get("entry_score") or l.get("entry_quality_score"), 0) >= 70 and bool(l.get("entry_source")))
+        ),
         "Q7": _f(l.get("tp_quality_score"), 0) > 0 and _f(l.get("sl_reliability"), 0) > 0,
         "Q8": bool(_f(v.get("atr_pct") or l.get("atr_pct"), 0) > 0 or vol_state),
         "Q9": qv["Q9"] >= MIN_Q9_EVIDENCE,
@@ -675,16 +693,16 @@ def evaluate_parallel_quality_filters(
         "selected_filter_passed": bool(selected.get("passed")),
         "confirmed_one_of_ten": confirmed,
         "publication_candidate": confirmed,
-        "q10_required": False,
+        "q10_required": True,
         "legacy_q10_gate_eligible": False,
         "legacy_publication_blockers": [],
         "universal_guards": guards,
         "execution_committee_score": round(committee, 2),
         "safety_authority_score": round(safety_component, 2),
         "fast_operation_mode": bool(committee_fast),
-        "rr_role": "SOFT_QUALITY_INPUT" if committee_fast else "QUALITY_INPUT",
+        "rr_role": "DIAGNOSTIC_INPUT_HARD_NATIVE_PUBLICATION_GATE",
         "dedupe_key": f"{_u(symbol)}|{tf}",
-        "dedupe_policy": "ONE_SIGNAL_PER_MARKET_CELL_HIGHER_FILTER_SCORE_WINS",
+        "dedupe_policy": "DIAGNOSTIC_RANK_ONLY_NATIVE_GATE_OWNS_PUBLICATION",
         "summary": summary,
         "market_type": str(market_type or "futures"),
         "direction": direction,
@@ -1014,7 +1032,10 @@ def evaluate(
         native_stage=str(l.get("futures_filter_stage") or "PUBLICATION_GATE"),
     )
     parallel_quality_ready = bool(parallel_quality_filters.get("publication_candidate"))
-    quality_ready = bool(generic_quality_ready or context_quality_ready or parallel_quality_ready)
+    # Commit 25 anti-overfit policy: max(Q1..Q10) is diagnostic, never an
+    # additional publication authority. Native composite/context quality owns
+    # quality readiness; hard economic publication gates stay downstream.
+    quality_ready = bool(generic_quality_ready or context_quality_ready)
     return {
         "version": VERSION,
         "model": MODEL,

@@ -212,7 +212,7 @@ def _quality_authority_from(result: Mapping[str, Any] | None) -> Dict[str, Any]:
         "native_stage": native_stage or "PUBLICATION_GATE",
         "action": action,
         "summary": str(result.get("quality_filter_summary") or trace.get("summary") or ""),
-        "q10_is_mandatory": False,
+        "q10_is_mandatory": True,
         "hard_q10_thresholds_unchanged": True,
         "geometry_valid": bool(
             entry > 0 and sl > 0 and tp > 0
@@ -229,6 +229,13 @@ def reconcile_final_quality_authority(result: Mapping[str, Any] | None, *, symbo
     out = dict(result or {})
     levels = dict(out.get("levels") or {})
     authority = _quality_authority_from({**out, "levels": levels})
+    diagnostic_confirmed = bool(authority.get("confirmed"))
+    authority["diagnostic_confirmed"] = diagnostic_confirmed
+    authority["confirmed"] = False
+    authority["authority"] = "NONE"
+    authority["reason"] = "COMMIT25_PARALLEL_QUALITY_DIAGNOSTIC_ONLY"
+    authority["q10_is_mandatory"] = True
+    out["commit25_parallel_quality_would_confirm"] = diagnostic_confirmed
     out["final_quality_authority"] = authority
     out["final_quality_authority_version"] = VERSION
     out["quality_authority_version"] = QUALITY_AUTHORITY_VERSION
@@ -247,7 +254,7 @@ def reconcile_final_quality_authority(result: Mapping[str, Any] | None, *, symbo
             "quality_authority": authority["authority"],
             "quality_authority_name": authority["authority_name"],
             "quality_authority_score": authority["score"],
-            "q10_is_mandatory": False,
+            "q10_is_mandatory": True,
             "hard_q10_thresholds_unchanged": True,
             "final_authority_version": VERSION,
             "legacy_q10_reason_codes": authority.get("legacy_codes") or [],
@@ -270,7 +277,7 @@ def reconcile_final_quality_authority(result: Mapping[str, Any] | None, *, symbo
             "premium_blocker_stage_21": "NONE",
             "premium_blocker_codes": [],
             "premium_blocker": "",
-            "q10_is_mandatory": False,
+            "q10_is_mandatory": True,
         }.items():
             out[key] = value
             levels[key] = value
@@ -673,7 +680,7 @@ def _install_health_route(app_module: Any) -> Dict[str, Any]:
                 "operational_safety_floor": OPERATIONAL_SAFETY_MIN,
                 "max_sl_loss_pct": MAX_SL_LOSS_PCT,
                 "max_atr_stress_pct": MAX_ATR_STRESS_PCT,
-                "q10_is_mandatory": False,
+                "q10_is_mandatory": True,
                 "boot_chain": "19.1_PRE -> app.py -> CPQE_19.2.4 -> 19.1_POST -> PPE20 -> Q23 -> 23.1",
                 "no_new_network_calls": True,
                 "no_new_workers": True,
@@ -703,7 +710,7 @@ def install(app: Any) -> Dict[str, Any]:
         "health": _install_health_route(app_module),
         "policy": {
             "q_min_score": Q_MIN_SCORE,
-            "q10_is_mandatory": False,
+            "q10_is_mandatory": True,
             "operational_safety_floor": OPERATIONAL_SAFETY_MIN,
             "max_sl_loss_pct": MAX_SL_LOSS_PCT,
             "max_atr_stress_pct": MAX_ATR_STRESS_PCT,
@@ -720,7 +727,7 @@ def audit() -> Dict[str, Any]:
         "version": VERSION,
         "quality_authority_version": QUALITY_AUTHORITY_VERSION,
         "q_min_score": Q_MIN_SCORE,
-        "q10_is_mandatory": False,
+        "q10_is_mandatory": True,
         "thresholds_lowered": False,
         "new_network_calls": False,
         "new_workers": False,
