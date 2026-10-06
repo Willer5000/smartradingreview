@@ -1,0 +1,252 @@
+{
+  "commit": "COMMIT26_CAUSAL_PREENTRY_RECOVERY_PROPOSAL2_V1",
+  "methodology": {
+    "new_parameter_search": false,
+    "thresholds_changed": false,
+    "safety_changed": false,
+    "rr_changed": false,
+    "leverage_policy_changed": false,
+    "closed_candle_authority_changed": false,
+    "purpose": "Repair pre-Entry/live parity for an already-governed 30m route and refuse unvalidated 1h/Multi expansions."
+  },
+  "router_stage_parity": {
+    "real_preentry_schema_has_top_level_mss": false,
+    "real_preentry_schema_has_top_level_displacement": false,
+    "commit25_trigger_would_pass": false,
+    "commit26_trigger_passes": true,
+    "commit26_reason": "F30_CAUSAL_PREENTRY_STRUCTURE_CONFIRMED",
+    "commit26_no_strict_event_passes": false,
+    "commit26_no_strict_event_reason": "F30_STRICT_CLOSED_CANDLE_EVENT_MISSING",
+    "interpretation": "Commit 26 restores stage parity without weakening downstream execution or risk gates."
+  },
+  "raw_30m_is_oos": {
+    "contract": {
+      "route": "LIQUIDITY_SWEEP_MSS_POI",
+      "timeframe": "30M",
+      "trend_aligned": true,
+      "adx_min": 20.0,
+      "volume_ratio_min": 1.2,
+      "rsi_long_max": 80.0,
+      "rsi_short_min": 20.0,
+      "rr": 1.8,
+      "base_cost_stress_r_per_entry": 0.118,
+      "is_period": "2026-09-10..2026-09-13",
+      "oos_period": "2026-09-14..2026-09-16"
+    },
+    "is": {
+      "n": 11,
+      "net_r": 1.702,
+      "expectancy_r": 0.154727,
+      "profit_factor": 1.253727,
+      "max_drawdown_r": 2.236
+    },
+    "oos": {
+      "n": 4,
+      "net_r": 3.928,
+      "expectancy_r": 0.982,
+      "profit_factor": 4.513417,
+      "max_drawdown_r": 1.118
+    },
+    "combined": {
+      "n": 15,
+      "net_r": 5.63,
+      "expectancy_r": 0.375333,
+      "profit_factor": 1.719397,
+      "max_drawdown_r": 2.236
+    },
+    "bootstrap_combined": {
+      "iterations": 100000,
+      "seed": 2602,
+      "probability_bootstrap_mean_gt_zero": 0.90276,
+      "ci95_mean_r": [
+        -0.371333,
+        1.122
+      ]
+    },
+    "additional_cost_stress": {
+      "plus_0.05R_per_trade": {
+        "is": {
+          "n": 11,
+          "net_r": 1.152,
+          "expectancy_r": 0.104727,
+          "profit_factor": 1.164384,
+          "max_drawdown_r": 2.336
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.728,
+          "expectancy_r": 0.932,
+          "profit_factor": 4.191781,
+          "max_drawdown_r": 1.168
+        }
+      },
+      "plus_0.10R_per_trade": {
+        "is": {
+          "n": 11,
+          "net_r": 0.602,
+          "expectancy_r": 0.054727,
+          "profit_factor": 1.082375,
+          "max_drawdown_r": 2.436
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.528,
+          "expectancy_r": 0.882,
+          "profit_factor": 3.896552,
+          "max_drawdown_r": 1.218
+        }
+      },
+      "plus_0.15R_per_trade": {
+        "is": {
+          "n": 11,
+          "net_r": 0.052,
+          "expectancy_r": 0.004727,
+          "profit_factor": 1.006835,
+          "max_drawdown_r": 2.536
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.328,
+          "expectancy_r": 0.832,
+          "profit_factor": 3.624606,
+          "max_drawdown_r": 1.268
+        }
+      },
+      "plus_0.20R_per_trade": {
+        "is": {
+          "n": 11,
+          "net_r": -0.498,
+          "expectancy_r": -0.045273,
+          "profit_factor": 0.937026,
+          "max_drawdown_r": 2.636
+        },
+        "oos": {
+          "n": 4,
+          "net_r": 3.128,
+          "expectancy_r": 0.782,
+          "profit_factor": 3.373293,
+          "max_drawdown_r": 1.318
+        }
+      }
+    },
+    "pass": true,
+    "limitations": [
+      "OOS n=4 is chronologically clean but statistically small.",
+      "The row-level cohort does not persist synchronized 4h->30m relation fields or pre-Entry structure_reasons.",
+      "Commit 26 therefore restores live/backtest stage parity; it does not claim a new 4h-countertrend edge."
+    ]
+  },
+  "governed_system_evidence": {
+    "crypto_governed_is_including_30m": {
+      "n": 175,
+      "net_r_proxy": 13.635077,
+      "expectancy_r_weighted": 0.077915,
+      "profit_factor_aggregate_proxy": 1.149537,
+      "note": "Cross-route evidence aggregation, not a synchronized portfolio equity curve."
+    },
+    "crypto_governed_selection_without_30m": {
+      "n": 55,
+      "net_r_proxy": 20.62538,
+      "expectancy_r_weighted": 0.375007,
+      "profit_factor_aggregate_proxy": 2.058006,
+      "note": "Cross-route evidence aggregation, not a synchronized portfolio equity curve."
+    },
+    "crypto_governed_oos_including_30m": {
+      "n": 61,
+      "net_r_proxy": 20.78978,
+      "expectancy_r_weighted": 0.340816,
+      "profit_factor_aggregate_proxy": 1.766841,
+      "note": "Cross-route evidence aggregation, not a synchronized portfolio equity curve."
+    },
+    "all_governed_is_including_us_index": {
+      "n": 388,
+      "net_r_proxy": 18.129377,
+      "expectancy_r_weighted": 0.046725,
+      "profit_factor_aggregate_proxy": 1.092638,
+      "note": "Cross-route evidence aggregation, not a synchronized portfolio equity curve."
+    },
+    "all_governed_oos_including_us_index": {
+      "n": 133,
+      "net_r_proxy": 57.18578,
+      "expectancy_r_weighted": 0.429968,
+      "profit_factor_aggregate_proxy": 2.239223,
+      "note": "Cross-route evidence aggregation, not a synchronized portfolio equity curve."
+    },
+    "all_route_splits_positive": true
+  },
+  "anti_overfit_non_promotions": {
+    "futures_1h": {
+      "historical_all_routes": {
+        "resolved": 120,
+        "tp": 11,
+        "sl": 109,
+        "wr_pct": 9.17,
+        "gross_expectancy_r_proxy": -0.642,
+        "avg_modeled_net_r": -0.907,
+        "expired": 113,
+        "avg_mfe_r": 0.859,
+        "avg_mae_r": 0.919
+      },
+      "liquidity_shadow": {
+        "observations": 50,
+        "tp": 9,
+        "sl": 18,
+        "expired": 23,
+        "wr_pct": 33.33,
+        "avg_realized_r": 0.089,
+        "profit_factor": 1.134
+      },
+      "decision": "SHADOW_ONLY_NO_NEW_LIVE_AUTHORITY",
+      "reason": "1h aggregate history is negative and the liquidity challenger lacks a clean chronological IS/OOS split in the supplied evidence."
+    },
+    "multiasset": {
+      "generic_proxy": {
+        "signals": 74,
+        "resolved": 59,
+        "tp": 10,
+        "sl": 49,
+        "expired": 15,
+        "wr_pct": 16.95,
+        "expectancy_r": -0.3714,
+        "profit_factor": 0.553,
+        "max_drawdown_r": 24.761,
+        "avg_mfe_r": 1.456,
+        "avg_mae_r": 1.687
+      },
+      "decision": "NO_GENERIC_CRYPTO_ROUTE_COPY",
+      "reason": "Generic Multi proxy is negative; only the already-governed US_INDEX 1D route retains LIVE authority."
+    },
+    "spot": {
+      "historical": {
+        "resolved": 16,
+        "tp": 9,
+        "sl": 7,
+        "wr_pct": 56.25,
+        "gross_expectancy_r_proxy": 1.3656,
+        "profit_factor_proxy": 4.121,
+        "warning": "Sample is too small for a robust profitability conclusion and does not include a complete cost/rotation accounting model."
+      },
+      "decision": "NO_SIGNAL_LOGIC_CHANGE"
+    }
+  },
+  "resource_delta": {
+    "new_threads": 0,
+    "new_market_requests": 0,
+    "new_supabase_reads": 0,
+    "new_supabase_writes": 0,
+    "new_llm_calls": 0,
+    "new_persistent_cache": 0,
+    "algorithmic_delta": "bounded list/string inspection on the existing structure layer"
+  },
+  "release": {
+    "30m_is_positive": true,
+    "30m_oos_positive": true,
+    "all_governed_route_splits_positive": true,
+    "real_schema_reaches_router": true,
+    "invalid_no_event_still_blocked": true,
+    "new_1h_live_authority": false,
+    "new_multi_live_authority": false,
+    "pass": true,
+    "future_profit_guarantee": false
+  }
+}

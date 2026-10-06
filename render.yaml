@@ -1,10 +1,10 @@
-# COMMIT 25 — contextual Champion recovery + anti-overfit authority; one worker / two gthreads.
+# COMMIT 26 — causal pre-Entry recovery; no new workers/requests; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit25_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn commit26_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -53,6 +53,8 @@ services:
       - key: COMMIT23_1_REPROCESS_STALE_SNAPSHOTS
         value: "1"
       - key: COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED
+        value: "1"
+      - key: COMMIT26_CAUSAL_PREENTRY_ENABLED
         value: "1"
       - key: COMMIT22_WORKER_RESTART_POLICY
         value: "TIMEOUT_120S_MAX_REQUESTS_80"

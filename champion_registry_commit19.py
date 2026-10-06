@@ -14,7 +14,8 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional
 import os
 
-VERSION = "COMMIT25_CONTEXTUAL_CHAMPION_RECOVERY_V1"
+VERSION = "COMMIT26_CAUSAL_PREENTRY_CHAMPION_RECOVERY_V1"
+COMMIT26_CAUSAL_PREENTRY_ENABLED = str(os.getenv("COMMIT26_CAUSAL_PREENTRY_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 ENABLED = str(os.getenv("COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -151,6 +152,15 @@ def context_authority_matrix() -> Dict[str, Any]:
 def _mtf_ok(mtf: Mapping[str, Any] | None, action: str) -> tuple[bool, str]:
     m = dict(mtf or {})
     state = _u(m.get("state") or m.get("alignment") or m.get("status"))
+
+    # Commit 18.2 can identify a structurally valid lower-timeframe transition
+    # against the higher timeframe.  The supplied historical replay does not
+    # contain enough synchronized HTF/LTF fields to validate that branch OOS, so
+    # Commit 26 records it as a research opportunity but deliberately does NOT
+    # grant new LIVE Champion authority.
+    if state in {"REVERSAL_TRANSITION", "COUNTERTREND_VALID"} and m.get("usable") is True:
+        return False, "MTF_STRUCTURAL_TRANSITION_SHADOW_ONLY"
+
     if m.get("usable") is False or _truth(m.get("conflict")) or _truth(m.get("original_conflict")) or state in {"HARD_CONFLICT", "CONFLICT", "OPPOSITE"}:
         return False, "MTF_HARD_CONFLICT"
     dominant = _dir(m.get("dominant_direction") or m.get("direction"))
@@ -219,13 +229,113 @@ def _volume_ratio(layers: Mapping[str, Any]) -> Optional[float]:
     return None
 
 
-def _structural_trigger(layers: Mapping[str, Any]) -> bool:
+def _typed_event_matches(events: Any, expected: str) -> bool:
+    """Return True only when a typed structure event points in the candidate direction."""
+    if isinstance(events, Mapping):
+        events = [events]
+    if not isinstance(events, (list, tuple)):
+        return False
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        side = _dir(event.get("type") or event.get("direction") or event.get("side"))
+        if side == expected:
+            return True
+    return False
+
+
+def _reaction_inventory_available(structure: Mapping[str, Any], expected: str) -> bool:
+    """Check only already-observed reaction inventory; never invent a POI."""
+    s = dict(structure or {})
+    if _typed_event_matches(s.get("liquidity_sweeps"), expected):
+        return True
+    if _typed_event_matches(s.get("stop_hunts"), expected):
+        return True
+    if _typed_event_matches(s.get("order_blocks"), expected):
+        return True
+    if _typed_event_matches(s.get("fair_value_gaps"), expected):
+        return True
+    # A confirmed pivot/support-resistance inventory is also a legitimate input
+    # for the downstream reaction-zone engine.  This is inventory only; the
+    # actual Entry is still selected later and can still fail the normal gates.
+    if expected == "BULLISH" and (s.get("nearest_support") or s.get("pivot_lows") or s.get("supports")):
+        return True
+    if expected == "BEARISH" and (s.get("nearest_resistance") or s.get("pivot_highs") or s.get("resistances")):
+        return True
+    return False
+
+
+def _legacy_postentry_structure_trigger(layers: Mapping[str, Any], action: str) -> bool:
+    """Compatibility path for fixtures/snapshots that already expose post-Entry fields.
+
+    Production pre-Entry structure normally does NOT expose MSS/displacement as
+    top-level keys, so Commit 26 does not depend on this path.
+    """
     s = dict(layers.get("structure") or {})
-    sweep = _truth(_first(s, "liquidity_sweep", "liquidity_sweeps", "sweep"))
+    expected = _dir(action)
+    sdir = _dir(s.get("direction") or s.get("structure_direction"))
+    if sdir not in {"NEUTRAL", expected}:
+        return False
+    sweep = _truth(_first(s, "liquidity_sweep", "sweep")) or _typed_event_matches(s.get("liquidity_sweeps"), expected)
     mss = _truth(_first(s, "mss", "bos", "market_structure_shift", "break_of_structure"))
     displacement = _truth(_first(s, "displacement", "displacement_confirmed"))
     poi = _truth(_first(s, "order_blocks", "fair_value_gaps", "fvg", "poi", "institutional_zone"))
     return bool((sweep and mss) or (displacement and poi))
+
+
+def _preentry_structure_audit(layers: Mapping[str, Any], action: str) -> tuple[bool, str]:
+    """Causal pre-Entry structural gate for the 30m governed route.
+
+    Commit 25 requested MSS/displacement before Entry selection, while the real
+    structure layer exposes those confirmations later through Entry levels.
+    That made the governed 30m route unreachable with the real pre-Entry schema.
+
+    Commit 26 therefore consumes only evidence that *exists at this stage*:
+    - strict closed-candle Structure direction;
+    - a recent primary Structure event encoded by analyze_price_structure_layer;
+    - an observed reaction-zone inventory for the downstream Entry engine.
+
+    It does NOT create direction, Entry, SL, TP, Safety or publication authority.
+    Exact MSS/displacement/reaction quality remain downstream execution evidence.
+    """
+    if not COMMIT26_CAUSAL_PREENTRY_ENABLED:
+        ok = _legacy_postentry_structure_trigger(layers, action)
+        return ok, "COMMIT26_DISABLED_LEGACY_STRUCTURE_TRIGGER" if ok else "F30_PRIMARY_STRUCTURE_TRIGGER_MISSING"
+
+    s = dict(layers.get("structure") or {})
+    expected = _dir(action)
+    structure_direction = _dir(s.get("direction") or s.get("structure_direction"))
+
+    # Preserve compatibility with already-enriched snapshots/tests. This is not
+    # the primary production path, but avoids breaking closed snapshots that do
+    # legitimately carry these confirmations.
+    if _legacy_postentry_structure_trigger(layers, action):
+        return True, "F30_ENRICHED_STRUCTURE_CONFIRMATION"
+
+    if expected == "NEUTRAL" or structure_direction != expected:
+        return False, "F30_STRICT_STRUCTURE_DIRECTION_MISMATCH"
+
+    raw_reasons = s.get("structure_reasons") or []
+    if isinstance(raw_reasons, str):
+        raw_reasons = [raw_reasons]
+    reasons = [str(x or "").strip().upper() for x in raw_reasons]
+    primary = any(
+        reason.startswith(("SWEEP_REJECTION:", "STOP_HUNT_RECOVERY:", "BOS_CLOSE:"))
+        for reason in reasons
+    )
+    if not primary:
+        return False, "F30_STRICT_CLOSED_CANDLE_EVENT_MISSING"
+
+    if not _reaction_inventory_available(s, expected):
+        return False, "F30_REACTION_INVENTORY_MISSING"
+
+    return True, "F30_CAUSAL_PREENTRY_STRUCTURE_CONFIRMED"
+
+
+def _structural_trigger(layers: Mapping[str, Any], action: str = "") -> bool:
+    """Boolean compatibility wrapper used by older tests/callers."""
+    ok, _ = _preentry_structure_audit(layers, action or _action((layers.get("structure") or {}).get("direction")))
+    return bool(ok)
 
 
 def _pullback_evidence(layers: Mapping[str, Any], operational: Mapping[str, Any] | None) -> bool:
@@ -261,9 +371,10 @@ def _route_live_evidence(spec: Mapping[str, Any], layers: Mapping[str, Any], ope
             return False, "F30_RSI_LONG_CHASE"
         if action == "SHORT" and rsi < 20.0:
             return False, "F30_RSI_SHORT_CHASE"
-        if not _structural_trigger(layers):
-            return False, "F30_PRIMARY_STRUCTURE_TRIGGER_MISSING"
-        return True, "F30_BACKTESTED_CONTEXT_CONFIRMED"
+        structure_ok, structure_reason = _preentry_structure_audit(layers, action)
+        if not structure_ok:
+            return False, structure_reason
+        return True, "F30_BACKTESTED_CONTEXT_AND_CAUSAL_PREENTRY_CONFIRMED"
 
     family = _u(spec.get("execution_family") or spec.get("bank_family"))
     if "MOMENTUM" in family or "CONTINUATION" in family:
@@ -389,5 +500,10 @@ def audit() -> Dict[str, Any]:
         "threads": 0,
         "llm_calls": 0,
         "anti_extrapolation": True,
+        "causal_preentry_enabled": COMMIT26_CAUSAL_PREENTRY_ENABLED,
+        "new_market_data_requests": 0,
+        "new_supabase_queries": 0,
+        "new_llm_calls": 0,
+        "new_background_threads": 0,
         "context_authority": context_authority_matrix(),
     }
