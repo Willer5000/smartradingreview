@@ -30215,8 +30215,8 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit30_1():
-    """Deployment truth without secrets; lets one verify the actual live release."""
+def api_runtime_version_commit31():
+    """Deployment truth without secrets; verifies Commit31 Multi-Safety live."""
     import hashlib
     def _sha(path):
         try:
@@ -30227,27 +30227,31 @@ def api_runtime_version_commit30_1():
             return h.hexdigest()[:16]
         except Exception:
             return None
+    try:
+        from safety_profiles_commit31 import audit as _c31_safety_audit
+        _safety = _c31_safety_audit()
+    except Exception as exc:
+        _safety = {'error': type(exc).__name__}
     return jsonify({
-        'version': 'COMMIT30_1_PROPOSAL3_FAST_LANE_BRIDGE_V1',
-        'entrypoint': 'commit30_1_main_entrypoint:app',
+        'version': 'COMMIT31_MULTI_SAFETY_AUTHORITY_V1',
+        'entrypoint': 'commit31_main_entrypoint:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
         'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
+        'safety_profiles_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'safety_profiles_commit31.py')),
         'memory': _memory_runtime_state(),
+        'safety_architecture': _safety,
         'contracts': {
-            'missing_context_is_neutral': False,
-            'transitional_regime': True,
-            'directional_impulse_context': True,
-            'directional_impulse_can_publish_directly': False,
-            'impulse_bridges_to_validated_30m': True,
-            'impulse_event_persists_until_ack': True,
-            'same_symbol_30m_same_candle_recheck_once': True,
-            'ui_cooldown_can_starve_impulse_lane': False,
-            'f30_frozen_volume_min': 1.0,
+            'legacy_safety_75_publication_gate': False,
+            'q1_q10_publication_authority': False,
+            'single_specialised_safety_per_signal': True,
+            'safety_score_is_hard_gate': False,
+            'hard_risk_non_compensatory': True,
+            'validated_route_still_required': True,
             'fallback_can_publish': False,
-            'parallel_q_authority': False,
-            'safety_floor': 75,
-            'rr_range': [1.8, 3.5],
+            'directional_impulse_context': True,
+            'impulse_bridges_to_validated_30m': True,
+            'f30_frozen_volume_min': 1.0,
         },
     }), 200
 
@@ -32329,7 +32333,7 @@ def _representative_signal_score(row):
     confidence = _pct(_signal_numeric_metric(row, 'confidence'))
     entry_quality = _pct(_signal_numeric_metric(row, 'entry_quality_score', 'entry_quality'))
     reachability = _pct(_signal_numeric_metric(row, 'entry_reachability_score', 'reachability_score'))
-    safety = _pct(_signal_numeric_metric(row, 'execution_safety', 'safety_score'))
+    safety = _pct(_signal_numeric_metric(row, 'safety_profile_score', 'selected_safety_score', 'execution_safety', 'safety_score'))
     rr = max(0.0, _signal_numeric_metric(row, 'risk_reward', 'rr'))
     rr_score = min(100.0, (rr / 3.0) * 100.0)
     return (
@@ -40995,15 +40999,12 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     momentum = result.get('momentum') or quality_context.get('momentum') or levels.get('momentum') or {}
     volatility = result.get('volatility') or quality_context.get('volatility') or levels.get('volatility') or {}
     structure = result.get('structure') or quality_context.get('structure') or levels.get('structure') or {}
-    if not all(isinstance(x, dict) for x in (trend, momentum, volatility, structure)):
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=['Q_CONTEXT_INVALID'], authority={
-                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
-                'eligible': False,
-                'reason_codes': ['Q_CONTEXT_INVALID'],
-            },
-        )
+    # Commit 31: legacy Q context is diagnostic only. Invalid/missing optional
+    # Q payloads cannot veto a signal before the selected Safety profile runs.
+    trend = trend if isinstance(trend, dict) else {}
+    momentum = momentum if isinstance(momentum, dict) else {}
+    volatility = volatility if isinstance(volatility, dict) else {}
+    structure = structure if isinstance(structure, dict) else {}
 
     q_levels = dict(levels)
     q_levels['futures_filter_stage'] = 'PUBLICATION_GATE'
@@ -41027,14 +41028,14 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             str(timeframe), str(symbol), action, market_type=market_type,
         )
     except Exception as exc:
-        return _app244_quality_audit(
-            result, symbol, timeframe, status='REJECTED',
-            reason_codes=[f'Q_ENGINE_ERROR:{type(exc).__name__}'], authority={
-                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
-                'eligible': False,
-                'reason_codes': [f'Q_ENGINE_ERROR:{type(exc).__name__}'],
-            },
-        )
+        # Legacy Q1..Q10 no longer own publication authority. Preserve the
+        # diagnostic error and continue into Commit31 Multi-Safety.
+        quality = {
+            'legacy_diagnostic_error': f'Q_ENGINE_ERROR:{type(exc).__name__}',
+            'quality_ready': False,
+            'quality': {},
+            'parallel_quality_filters': {},
+        }
 
     parallel = quality.get('parallel_quality_filters') or {}
     try:
@@ -41066,9 +41067,12 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     levels['quality_composite'] = (authority.get('quality_domains') or {}).get('composite')
     levels['quality_filter_authority'] = str((authority.get('movement_profile') or {}).get('name') or '')
     levels['quality_filter_confirmed'] = eligible
-    levels['quality_authority_mode'] = 'COMMIT28_SINGLE_CONTEXTUAL_AUTHORITY'
-    levels['quality_parallel_role'] = 'DIAGNOSTIC_ONLY'
-    levels['q10_contract_enforced_by_hard_guards'] = True
+    levels['quality_authority_mode'] = 'COMMIT31_MULTI_SAFETY_AUTHORITY'
+    levels['quality_parallel_role'] = 'LEGACY_DIAGNOSTIC_ONLY'
+    levels['q10_contract_enforced_by_hard_guards'] = False
+    levels['legacy_q1_q10_publication_authority'] = False
+    levels['selected_safety_profile'] = authority.get('safety_profile')
+    levels['selected_safety_score'] = authority.get('safety_profile_score')
     levels['previous_publication_status_before_commit27'] = previous_status
     levels['pre_commit27_rejection_reason'] = previous_reason
 
@@ -41083,7 +41087,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             'is_rejected': False,
             'is_executable': True,
             'publication_gate_reached': True,
-            'publication_gate_source': 'COMMIT28_SINGLE_CONTEXTUAL_AUTHORITY',
+            'publication_gate_source': 'COMMIT31_MULTI_SAFETY_AUTHORITY',
         })
         # Keep the old reason for audit, but never expose it as a current block.
         levels.pop('rejected_reason', None)
@@ -42848,12 +42852,15 @@ def _futures_manual_risk_profile(result):
         # Official signals use the normal save path, not the manual override.
         return dict(blocked)
 
-    safety=_num(levels.get('execution_safety'))
-    minimum=_num(levels.get('execution_safety_operational_min'),65.0)
+    safety=_num(levels.get('safety_profile_score'))
+    if safety is None:
+        safety=_num(levels.get('execution_safety'))
+    safety_profile=str(levels.get('safety_profile') or levels.get('selected_safety_profile') or 'LEGACY').upper()
+    minimum=None  # Commit31 has no universal Safety score publication threshold.
     stage=str(((levels.get('futures_filter_trace') or {}).get('stage') or levels.get('futures_filter_stage') or '')).upper()
     source=str(levels.get('manual_geometry_source') or ('PRIMARY_EXECUTION_COMMITTEE' if not levels.get('manual_geometry_fallback') else 'GUARANTEED_TECHNICAL_FALLBACK'))
 
-    medium=bool(safety is not None and minimum is not None and safety>=minimum and stage=='PUBLICATION_GATE')
+    medium=bool(stage=='PUBLICATION_GATE' and not levels.get('manual_geometry_fallback'))
     risk_class='MEDIUM' if medium else 'HIGH'
     _publication_gate = (levels.get('futures_publication_gate') or result.get('futures_publication_gate') or {})
     _gate_reasons = [str(x) for x in (_publication_gate.get('reasons') or []) if str(x).strip()]
@@ -42864,9 +42871,9 @@ def _futures_manual_risk_profile(result):
     if source=='GUARANTEED_TECHNICAL_FALLBACK':
         reason='Geometría técnica completa de último recurso; no alcanzó autoridad Premium. Puede guardarse bajo tu riesgo y Guardian la seguirá.' + _gate_detail
     elif medium:
-        reason='Geometría completa y Safety mínimo superado, pero no alcanzó publicación Premium. Guardado manual opcional.' + _gate_detail
+        reason=f'Geometría completa evaluada con Safety {safety_profile}, pero otra autoridad (ruta/riesgo/setup) impidió publicación Premium. Guardado manual opcional.' + _gate_detail
     elif safety is not None:
-        reason=f'Geometría Entry/SL/TP completa; Safety {safety:.1f} no habilitó publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
+        reason=f'Geometría Entry/SL/TP completa; Safety {safety_profile}={safety:.1f}/100 es diagnóstico/riesgo, no un veto único. La publicación falló por otra autoridad indicada. Guardado manual bajo tu riesgo.' + _gate_detail
     else:
         reason='Geometría Entry/SL/TP completa sin publicación oficial. Guardado manual bajo tu riesgo.' + _gate_detail
     return {
@@ -42876,7 +42883,8 @@ def _futures_manual_risk_profile(result):
         'requires_ack': True,
         'system_executable': False,
         'execution_safety': round(safety,2) if safety is not None else None,
-        'execution_safety_minimum': round(minimum,2) if minimum is not None else None,
+        'execution_safety_minimum': None,
+        'safety_profile': safety_profile,
         'risk_reward': round(float(rr),4),
         'rejection_stage': stage or 'ANALYSIS_ONLY',
         'rejection_codes': [engine_status] if engine_status else ['ANALYSIS_ONLY'],

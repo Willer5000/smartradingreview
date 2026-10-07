@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "COMMIT28_CONTEXTUAL_QUALITY_CORE_V1"
+VERSION = "COMMIT31_MULTI_SAFETY_PUBLICATION_V1"
 
 PREMIUM_SAFETY_MIN = 75.0
 OPERATIONAL_SAFETY_MIN = 65.0
@@ -332,6 +332,37 @@ def evaluate_publication(
     profile = _movement_profile(result, symbol, timeframe, action)
     qdomains = _quality_domains(quality or {})
 
+    # Commit 31 — Q1..Q10 remain legacy diagnostics only. Publication quality
+    # is evaluated by exactly one setup-specific Safety selected before score.
+    quality_context = result.get('quality_context') or {}
+    if not isinstance(quality_context, dict):
+        quality_context = {}
+    _trend = result.get('trend') or quality_context.get('trend') or levels.get('trend') or {}
+    _momentum = result.get('momentum') or quality_context.get('momentum') or levels.get('momentum') or {}
+    _volatility = result.get('volatility') or quality_context.get('volatility') or levels.get('volatility') or {}
+    _structure = result.get('structure') or quality_context.get('structure') or levels.get('structure') or {}
+    try:
+        from multiasset_system import MULTIASSET_SYMBOLS as _c31_multi_symbols
+        _c31_market = 'multiasset' if str(symbol).upper().replace('/', '-') in set(_c31_multi_symbols) else 'futures'
+    except Exception:
+        _c31_market = 'multiasset' if bool(result.get('is_multiasset')) else 'futures'
+    try:
+        from safety_profiles_commit31 import evaluate_safety
+        specialised_safety = evaluate_safety(
+            levels=levels, trend=_trend if isinstance(_trend, dict) else {},
+            momentum=_momentum if isinstance(_momentum, dict) else {},
+            volatility=_volatility if isinstance(_volatility, dict) else {},
+            structure=_structure if isinstance(_structure, dict) else {},
+            action=action, symbol=symbol, timeframe=timeframe, market_type=_c31_market,
+        )
+    except Exception as _c31_safety_exc:
+        specialised_safety = {
+            'version': 'COMMIT31_MULTI_SAFETY_ERROR', 'profile': 'BALANCED_STRUCTURAL',
+            'score': 0.0, 'ready': False,
+            'critical_failures': [f'PROFILE_ENGINE_ERROR:{type(_c31_safety_exc).__name__}'],
+            'rr_floor': RR_MIN, 'rr_ceiling': RR_MAX,
+        }
+
     reasons = []
     hard_reasons = []
     shadow_reasons = []
@@ -361,8 +392,10 @@ def evaluate_publication(
     if fallback:
         hard_reasons.append("FALLBACK_GEOMETRY_NOT_PUBLISHABLE")
 
-    if geometry_ok and not (RR_MIN <= rr <= RR_MAX):
-        hard_reasons.append("RR_OUTSIDE_HARD_RANGE")
+    _c31_rr_floor = _f(specialised_safety.get('rr_floor'), RR_MIN)
+    _c31_rr_ceiling = _f(specialised_safety.get('rr_ceiling'), RR_MAX)
+    if geometry_ok and not (_c31_rr_floor <= rr <= _c31_rr_ceiling):
+        hard_reasons.append("RR_OUTSIDE_PROFILE_ECONOMIC_RANGE")
 
     safety = _f(levels.get("execution_safety"))
     risk_control = dict(levels.get("risk_control") or {})
@@ -379,22 +412,18 @@ def evaluate_publication(
     # values for diagnostics, but evaluate economic/quality guards only on a
     # primary execution geometry.  No fallback can publish.
     if not fallback:
-        if safety < PREMIUM_SAFETY_MIN:
-            hard_reasons.append("PREMIUM_SAFETY_BELOW_75")
+        # Commit 31: the legacy weighted Safety>=75 and Q1..Q10 are no longer
+        # publication gates. They duplicated the same Entry/SL/TP/structure
+        # evidence and produced false negatives. The selected Safety profile
+        # owns setup-fit readiness; hard risk remains non-compensatory.
         if sl_loss > MAX_SL_LOSS_PCT:
             hard_reasons.append("LOSS_AT_SL")
         if not (0.0 < atr_stress <= MAX_ATR_STRESS_PCT):
             hard_reasons.append("ATR_STRESS")
-        if entry_q < ENTRY_QUALITY_MIN:
-            hard_reasons.append("ENTRY_QUALITY_BELOW_65")
-        if sl_q < SL_QUALITY_MIN:
-            hard_reasons.append("SL_QUALITY_BELOW_60")
-        if tp_q < TP_QUALITY_MIN:
-            hard_reasons.append("TP_QUALITY_BELOW_55")
-        # Quality is one contextual assessment of an already-built package.
-        # The parallel max-Q scores are intentionally ignored here.
-        if not qdomains.get("quality_ready"):
-            hard_reasons.append("CONTEXTUAL_Q1_Q9_QUALITY_NOT_READY")
+        if not bool(specialised_safety.get('ready')):
+            hard_reasons.append("SAFETY_PROFILE_NOT_READY")
+            for _reason in list(specialised_safety.get('critical_failures') or [])[:5]:
+                hard_reasons.append(f"SAFETY_PROFILE:{_reason}"[:180])
 
     route_live = _route_is_live(route)
     if not route_live:
@@ -432,6 +461,11 @@ def evaluate_publication(
         "asset_class": asset_class,
         "movement_profile": profile,
         "quality_domains": qdomains,
+        "specialised_safety": specialised_safety,
+        "safety_profile": specialised_safety.get("profile"),
+        "safety_profile_score": specialised_safety.get("score"),
+        "legacy_safety_75_is_gate": False,
+        "q1_q10_are_gates": False,
         "office_evidence": _office_evidence_map(result, levels),
         "route_authority": {
             "live": route_live,
@@ -449,7 +483,10 @@ def evaluate_publication(
         "hard_guards": {
             "primary_geometry": bool(geometry_ok and not fallback),
             "rr": round(rr, 4),
-            "safety": round(safety, 2),
+            "legacy_safety_diagnostic": round(safety, 2),
+            "selected_safety_profile": specialised_safety.get("profile"),
+            "selected_safety_score": specialised_safety.get("score"),
+            "selected_safety_ready": specialised_safety.get("ready"),
             "sl_loss_pct": round(sl_loss, 4),
             "atr_stress_pct": round(atr_stress, 4),
             "entry_quality": round(entry_q, 2),
@@ -459,7 +496,10 @@ def evaluate_publication(
             "closed_candle": result.get("source_candle_closed") is True,
         },
         "policy": {
-            "parallel_q_role": "DIAGNOSTIC_ONLY",
+            "parallel_q_role": "LEGACY_DIAGNOSTIC_ONLY",
+            "selected_safety_profile_is_authority": True,
+            "safety_score_is_hard_gate": False,
+            "legacy_safety_75_is_gate": False,
             "max_q_can_publish": False,
             "llm_can_publish": False,
             "fallback_can_publish": False,
@@ -475,13 +515,17 @@ def audit() -> Dict[str, Any]:
     return {
         "version": VERSION,
         "thresholds": {
-            "premium_safety_min": PREMIUM_SAFETY_MIN,
-            "rr": [RR_MIN, RR_MAX],
-            "entry_quality_min": ENTRY_QUALITY_MIN,
-            "sl_quality_min": SL_QUALITY_MIN,
-            "tp_quality_min": TP_QUALITY_MIN,
+            "legacy_premium_safety_min_diagnostic_only": PREMIUM_SAFETY_MIN,
+            "legacy_rr_range_diagnostic_only": [RR_MIN, RR_MAX],
             "max_sl_loss_pct": MAX_SL_LOSS_PCT,
             "max_atr_stress_pct": MAX_ATR_STRESS_PCT,
+        },
+        "commit31": {
+            "legacy_safety_75_is_publication_gate": False,
+            "q1_q10_are_publication_gates": False,
+            "profile_safety_ready_required": True,
+            "hard_risk_non_compensatory": True,
+            "route_authority_still_required": True,
         },
         "new_requests": 0,
         "new_threads": 0,

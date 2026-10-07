@@ -6313,11 +6313,58 @@ class FuturesAnalysis(TradingExpertSystem):
             'label',
             'RECHAZAR'
         )
-        
+
+        # ==============================================================
+        # COMMIT 31 — SAFETY ESPECIALIZADO POR TIPO DE MOVIMIENTO
+        # ==============================================================
+        # El Safety legacy se conserva para auditoría histórica, pero deja de
+        # ser un veto universal >=75. Primero se identifica UN solo arquetipo
+        # de movimiento y luego se evalúa su Safety específico. El score no
+        # publica: sirve para ranking/leverage; los floors críticos, riesgo
+        # duro y autoridad estadística siguen siendo no compensatorios.
+        specialised_safety = {}
+        try:
+            from safety_profiles_commit31 import evaluate_safety
+            try:
+                from multiasset_system import MULTIASSET_SYMBOLS as _c31_multi_symbols
+                _c31_market_type = (
+                    'multiasset'
+                    if str(symbol or '').upper().replace('/', '-') in set(_c31_multi_symbols)
+                    else 'futures'
+                )
+            except Exception:
+                _c31_market_type = 'futures'
+            specialised_safety = evaluate_safety(
+                levels=levels, trend=trend or {}, momentum=momentum or {},
+                volatility=volatility or {}, structure=structure or {},
+                action=str(decision or '').upper(), symbol=str(symbol or ''),
+                timeframe=str(timeframe or ''), market_type=_c31_market_type,
+            )
+        except Exception as _c31_safety_error:
+            specialised_safety = {
+                'version': 'COMMIT31_MULTI_SAFETY_ERROR',
+                'profile': 'BALANCED_STRUCTURAL',
+                'score': safety_score,
+                'ready': False,
+                'critical_failures': [f'PROFILE_ENGINE_ERROR:{type(_c31_safety_error).__name__}'],
+                'score_is_hard_gate': False,
+            }
+
+        specialised_safety_score = float(
+            specialised_safety.get('score', safety_score) or safety_score
+        )
+        operational_safety_score = specialised_safety_score
+        levels['specialised_safety'] = dict(specialised_safety)
+        levels['safety_profile'] = str(specialised_safety.get('profile') or 'BALANCED_STRUCTURAL')
+        levels['safety_profile_score'] = round(specialised_safety_score, 2)
+        levels['legacy_execution_safety'] = round(safety_score, 2)
+        levels['legacy_execution_safety_is_publication_gate'] = False
+
         print(
-            f"   🛡️ Execution Safety: "
-            f"{safety_score:.1f}/100 "
-            f"({safety_label})"
+            f"   🛡️ Safety legacy: {safety_score:.1f}/100 ({safety_label}) "
+            f"| Safety perfil={levels['safety_profile']} "
+            f"{specialised_safety_score:.1f}/100 "
+            f"ready={bool(specialised_safety.get('ready'))}"
         )
         
         # ==============================================================
@@ -6353,7 +6400,7 @@ class FuturesAnalysis(TradingExpertSystem):
         )
 
         leverage_safety_score = (
-            safety_score
+            operational_safety_score
         )
 
         execution_calibration = {
@@ -6369,8 +6416,11 @@ class FuturesAnalysis(TradingExpertSystem):
             'raw_safety':
                 safety_score,
 
+            'specialised_safety':
+                specialised_safety_score,
+
             'leverage_safety_score':
-                safety_score,
+                operational_safety_score,
 
             'leverage_factor':
                 1.0,
@@ -6390,7 +6440,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 review_trader
                 .get_execution_safety_operational_policy(
                     timeframe=timeframe,
-                    safety_score=safety_score,
+                    safety_score=operational_safety_score,
                     default_min_safety=(
                         base_minimum_safety
                     )
@@ -6434,7 +6484,7 @@ class FuturesAnalysis(TradingExpertSystem):
 
                 # Nunca permitir una bonificación.
                 leverage_safety_score = min(
-                    safety_score,
+                    operational_safety_score,
                     learned_leverage_safety
                 )
 
@@ -6450,7 +6500,7 @@ class FuturesAnalysis(TradingExpertSystem):
             )
 
             leverage_safety_score = (
-                safety_score
+                operational_safety_score
             )
 
         # ==============================================================
@@ -6807,55 +6857,23 @@ class FuturesAnalysis(TradingExpertSystem):
                 f"{execution_calibration.get('leverage_factor', 1.0):.3f}"
             )
 
+        # ==============================================================
+        # COMMIT 31 — LEGACY SAFETY YA NO ES VETO DE PUBLICACIÓN
+        # ==============================================================
+        # Se conserva el antiguo umbral únicamente para auditoría histórica.
+        # La elegibilidad final se decide por: Safety especializado ready +
+        # hard-risk universal + ruta estadística LIVE, en la autoridad final.
+        levels['legacy_safety_below_old_threshold'] = bool(
+            safety_score < minimum_safety
+        )
+        levels['legacy_safety_old_threshold'] = round(minimum_safety, 2)
+        levels['legacy_safety_gate_bypassed_by_commit31'] = True
         if safety_score < minimum_safety:
-
             print(
-                f"   ⚠️ FUTUROS ANALYSIS_ONLY: "
-                f"Execution Safety "
-                f"{safety_score:.1f} < "
-                f"{minimum_safety:.1f}"
+                f"   ℹ️ [C31] Safety legacy {safety_score:.1f} < {minimum_safety:.1f}: "
+                "diagnóstico/leverage solamente; no veto universal."
             )
 
-            # ==========================================================
-            # CONSERVAR NIVELES TÉCNICOS
-            # ==========================================================
-            # Entry / SL / TP / RR siguen siendo información válida
-            # del análisis aunque la operación NO sea ejecutable.
-            # ==========================================================
-
-            levels['execution_safety'] = round(
-                safety_score,
-                1
-            )
-
-            levels['execution_safety_label'] = (
-                safety_label
-            )
-
-            rejection_reason = (
-                f"Execution Safety insuficiente "
-                f"({safety_score:.1f}/100)"
-            )
-
-            traced_levels = (
-                self
-                ._stamp_futures_filter_trace(
-                    levels,
-                    stage='PRE_GATE',
-                    reason_codes=[
-                        'HARD_SAFETY'
-                    ],
-                    reason=rejection_reason,
-                    reached_publication_gate=False,
-                    outcome='ANALYSIS_ONLY'
-                )
-            )
-
-            return self._mark_levels_non_executable(
-                traced_levels,
-                rejection_reason
-            )
-        
         # ==============================================================
         # APALANCAMIENTO TÉCNICO ESTÁNDAR V6 + SIZING INDEPENDIENTE
         # ==============================================================

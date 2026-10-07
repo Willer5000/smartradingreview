@@ -1,0 +1,50 @@
+{
+  "commit": "COMMIT31_MULTI_SAFETY_AUTHORITY_V1",
+  "f30_route_regression": {
+    "DEV": {
+      "n": 11,
+      "net_stress_r": 1.702,
+      "expectancy_r": 0.15473
+    },
+    "HOLDOUT": {
+      "n": 4,
+      "net_stress_r": 3.928,
+      "expectancy_r": 0.982
+    },
+    "ALL": {
+      "n": 15,
+      "net_stress_r": 5.63,
+      "expectancy_r": 0.37533
+    }
+  },
+  "safety_architecture": {
+    "version": "COMMIT31_MULTI_SAFETY_V1",
+    "profile_count": 8,
+    "profiles": [
+      "DIRECTIONAL_IMPULSE",
+      "TREND_CONTINUATION",
+      "TREND_PULLBACK",
+      "BREAKOUT_EXPANSION",
+      "LIQUIDITY_REVERSAL",
+      "RANGE_REVERSION",
+      "EVENT_SESSION",
+      "BALANCED_STRUCTURAL"
+    ],
+    "single_profile_per_signal": true,
+    "highest_score_selection_forbidden": true,
+    "universal_score_threshold": null,
+    "legacy_safety_75_is_publication_gate": false,
+    "q1_q10_are_publication_gates": false,
+    "asset_classes_are_modifiers_not_new_safeties": true,
+    "direction_symmetric": true,
+    "missing_optional_evidence_reweighted": true,
+    "new_io": 0,
+    "new_threads": 0,
+    "new_llm_calls": 0
+  },
+  "claim_limits": {
+    "route_alpha_reoptimized": false,
+    "safety_weights_backtested_on_outcomes": false,
+    "reason": "Historical rows do not contain the complete component vector for the 8 specialised Safety profiles."
+  }
+}

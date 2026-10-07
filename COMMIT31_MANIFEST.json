@@ -1,0 +1,196 @@
+{
+  "commit": "COMMIT31_MULTI_SAFETY_AUTHORITY_V1",
+  "file_count": 38,
+  "files": [
+    {
+      "path": "AUDITORIA_COMMIT30_1_PROPUESTA3_AJUSTE.md",
+      "bytes": 4510,
+      "sha256": "78269ff48c6b0f6c77c81c87c2ec08e80f37eef25c1fb9c46dd1ea368db0ce43"
+    },
+    {
+      "path": "AUDITORIA_COMMIT31_MULTI_SAFETY.md",
+      "bytes": 3847,
+      "sha256": "56e055767722b383a198c683496db2461bb929838ab47fe0ff4901528e048a2a"
+    },
+    {
+      "path": "BACKTEST_COMMIT30_1_RESULT.json",
+      "bytes": 1673,
+      "sha256": "1267cc1739bde207a2bfd6cd23a440178846aa0f2936832e63244f146109d38b"
+    },
+    {
+      "path": "BACKTEST_COMMIT30_1_ROUTE_STABILITY.md",
+      "bytes": 1493,
+      "sha256": "87e6ec74b0ed7d5e4476b701a559c6a9f6486b25c5d08bc9c8ece23e8f6915f2"
+    },
+    {
+      "path": "BACKTEST_COMMIT31_REGRESSION.md",
+      "bytes": 1076,
+      "sha256": "f56f488d19d7e1883c68e659f5d051f60c70eabc299134a84b269069b1e45e97"
+    },
+    {
+      "path": "BACKTEST_COMMIT31_RESULT.json",
+      "bytes": 1357,
+      "sha256": "a7757b6a3fd23dd0d0f6683051f87f8bccc8abbeb57d4ee96b7b25216a8eacc0"
+    },
+    {
+      "path": "BACKTEST_PARAMETER_STABILITY_17_5_10.json",
+      "bytes": 1224,
+      "sha256": "bd2a774b5a89e83c3909b03b019d0e0f8c5f88ffa53eaa96ef0fce745c716df1"
+    },
+    {
+      "path": "BACKTEST_ROWS_17_5_10_PROFITABILITY.csv",
+      "bytes": 2552,
+      "sha256": "44be62ac39e69b3ab775c4883aa406f0dd2a0f2b3b153ce36989ba41aebbe8e7"
+    },
+    {
+      "path": "COMMIT30_1_MANIFEST.json",
+      "bytes": 4257,
+      "sha256": "401d25c15020d1b9fa5be6ee35357a2da21966da4c013315cfb4efc883133b9a"
+    },
+    {
+      "path": "COMMIT30_1_QA_REPORT.md",
+      "bytes": 2251,
+      "sha256": "3764936ce33eb3b057b0904b27ab88580584dde2f52a6b69a697b063bd364e0e"
+    },
+    {
+      "path": "COMMIT30_1_ROLLBACK.md",
+      "bytes": 411,
+      "sha256": "07a83f1f3a3451bd28b190a800a0fea909b5a5c40ae67c5669f5c07aa8a65b4c"
+    },
+    {
+      "path": "COMMIT31_QA_REPORT.md",
+      "bytes": 2456,
+      "sha256": "bda129249a2d6eab1a3e46394038cef9cc476c14b5640b90cac26715bb4e2c2b"
+    },
+    {
+      "path": "COMMIT31_ROLLBACK.md",
+      "bytes": 290,
+      "sha256": "650e191f23a412304ded1d58998470ad9f3814ae0b72fd11925e190ccb9cdeb4"
+    },
+    {
+      "path": "IMPLEMENTACION_COMMIT30_1.md",
+      "bytes": 1746,
+      "sha256": "acc7eda41f3064f566630e4ccee1f1c16e63fd7e50a596fabe0cd8c6c0aba459"
+    },
+    {
+      "path": "IMPLEMENTACION_COMMIT31.md",
+      "bytes": 1366,
+      "sha256": "d3458886c89c10ae2713f5d4b7fde5092e172c81205ec35d1232ea5c382b7cdd"
+    },
+    {
+      "path": "Procfile",
+      "bytes": 169,
+      "sha256": "849e0a9de934b17070c573daf024cae8bcaab3c2159cce1ce1024262747fb074"
+    },
+    {
+      "path": "app.py",
+      "bytes": 2449925,
+      "sha256": "b00ff40907d072efa021fef6063b377e89fb8f3b76808b880c4ee863de71c4af"
+    },
+    {
+      "path": "backtest_commit30_1_route_stability.py",
+      "bytes": 2946,
+      "sha256": "61638eb42a4faea39073a57b110226e18931202decad0f19057ee44051fa52f6"
+    },
+    {
+      "path": "backtest_commit31_regression.py",
+      "bytes": 987,
+      "sha256": "08b1db47035807b1f1312b3ffc991e0847ee97391ed09040a48b47c25076645c"
+    },
+    {
+      "path": "champion_registry_commit19.py",
+      "bytes": 19994,
+      "sha256": "599ec0c74bd7608087c2e0a87f7063fe38eac8b168e72645f8614fa61b6ba319"
+    },
+    {
+      "path": "commit28_core.py",
+      "bytes": 2030,
+      "sha256": "5568b900c052afd10e9930f3cfe8ab0746e4cd662208ff7d5e5320bf92221a02"
+    },
+    {
+      "path": "commit29_core.py",
+      "bytes": 4387,
+      "sha256": "1a4e895f4cdf000af0ff999b2594ba9057269c0cf0c2009e78fc9d288a51830b"
+    },
+    {
+      "path": "commit30_1_core.py",
+      "bytes": 2798,
+      "sha256": "39645b9bfd5bc5da57d5416c6f7b126b94db69b277ced60e8dbf7602aafcc8ee"
+    },
+    {
+      "path": "commit30_1_main_entrypoint.py",
+      "bytes": 4342,
+      "sha256": "45ab4cc960459e0b9dc0815f04444f863b227f4159e8dad0168057db76fd40b7"
+    },
+    {
+      "path": "commit30_core.py",
+      "bytes": 10793,
+      "sha256": "909120f09f98edda9fcfa239cd21cc8c9bc976c8565166e71695671dc2cc4007"
+    },
+    {
+      "path": "commit31_main_entrypoint.py",
+      "bytes": 4255,
+      "sha256": "d9a63050c4dd6f01a25c50c251dbec81fd069f7129a148372bc4a0db88c79894"
+    },
+    {
+      "path": "contextual_quality_commit28.py",
+      "bytes": 24409,
+      "sha256": "0f7c32640e448b274544d872354050e311a1682cd8af46909f18da781eb0a712"
+    },
+    {
+      "path": "futures_system.py",
+      "bytes": 275493,
+      "sha256": "c2c34dc4c0aec238da9d89a25e75137204b9abae3147e3258071010d1015f792"
+    },
+    {
+      "path": "operational_intelligence.py",
+      "bytes": 50148,
+      "sha256": "f3cfb946fe191c688f6af009dab5792f008a7fe425cd1ac76f9e20ccaff55945"
+    },
+    {
+      "path": "pipeline_integrity_175102.py",
+      "bytes": 39073,
+      "sha256": "05f181b2189248858c76828e40b3e7a2d4de9e3d2366da462d8bde4affa8413c"
+    },
+    {
+      "path": "render.yaml",
+      "bytes": 4658,
+      "sha256": "887dc787bac9f032c1dc824f925d314e4e6100306e0bec567a241fd4dd17ba1c"
+    },
+    {
+      "path": "safety_profiles_commit31.py",
+      "bytes": 21017,
+      "sha256": "e6d05d8f50d6707511b51907f1f480d97135a7096d0dc29941e35da14bf8585f"
+    },
+    {
+      "path": "static/script.js",
+      "bytes": 472037,
+      "sha256": "d0b4cc24d89adb13d96af51a2219f40d24d44098024f4647d36f7360cc055a52"
+    },
+    {
+      "path": "templates/index.html",
+      "bytes": 218537,
+      "sha256": "430a5c4abbf65ffe8199a0155d4d3a8e4690aa46b08cee5d4094a531743ab4b8"
+    },
+    {
+      "path": "test_commit30_1_proposal3_adjustment.py",
+      "bytes": 5444,
+      "sha256": "cd5ca6dbeba90ed15cbab3e69d38b313b032432d47605ddb98142625dcfb5f9e"
+    },
+    {
+      "path": "test_commit30_proposal3.py",
+      "bytes": 5930,
+      "sha256": "61a0b25ee3744e9829169fe45695bf37d8cc113db4556f88b7f18df9d475530b"
+    },
+    {
+      "path": "test_commit31_multi_safety.py",
+      "bytes": 8690,
+      "sha256": "505b3f22b7b6de3717c7b08d566af65023ac4068a2102bc256d489805983d576"
+    },
+    {
+      "path": "worker_orchestration.py",
+      "bytes": 15315,
+      "sha256": "f1ad7328feee67e1445afb17abf71d4e71dd5a46c9044e3e2f503e477b73de23"
+    }
+  ]
+}
