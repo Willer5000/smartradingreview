@@ -107,6 +107,7 @@ def canonical_regime(value: Any) -> str:
     mapping = {
         "TRENDING_BULL": "TREND_UP", "BULL_TREND": "TREND_UP", "BULLISH": "TREND_UP",
         "TRENDING_BEAR": "TREND_DOWN", "BEAR_TREND": "TREND_DOWN", "BEARISH": "TREND_DOWN",
+        "DIRECTIONAL_IMPULSE_BULL": "TREND_UP", "DIRECTIONAL_IMPULSE_BEAR": "TREND_DOWN",
         "RANGING": "BALANCE", "RANGE": "BALANCE", "SIDEWAYS": "BALANCE", "LATERAL": "BALANCE",
         "HIGH_VOLATILITY": "VOLATILITY_SHOCK", "VOLATILITY_SHOCK": "VOLATILITY_SHOCK",
         "TREND_UP": "TREND_UP", "TREND_DOWN": "TREND_DOWN", "BALANCE": "BALANCE", "TRANSITION": "TRANSITION", "VOLATILITY_SHOCK": "VOLATILITY_SHOCK",
@@ -502,12 +503,29 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     trend_score = 0.0
     if trend_dir == "BULLISH": trend_score = 0.55
     elif trend_dir == "BEARISH": trend_score = -0.55
+    impulse = {}
+    try:
+        from commit30_core import detect_directional_impulse
+        impulse = detect_directional_impulse(trend, momentum, volume, structure)
+    except Exception:
+        impulse = {}
     if adx >= 25:
         if plus_di > minus_di + 2: trend_score = max(trend_score, 0.85)
         elif minus_di > plus_di + 2: trend_score = min(trend_score, -0.85)
+    elif impulse.get("active"):
+        # Commit 30: ADX can lag the first bars of a directional displacement.
+        # This strengthens the existing TREND family only; it does NOT create a
+        # new independent family and therefore cannot double-count DMI.
+        if impulse.get("direction") == "bullish":
+            trend_score = max(trend_score, 0.72)
+        elif impulse.get("direction") == "bearish":
+            trend_score = min(trend_score, -0.72)
     elif adx < 18:
         trend_score *= 0.45
-    add_family("trend", trend_score, f"ADX {adx:.1f}; +DI {plus_di:.1f}; -DI {minus_di:.1f}", 1.0)
+    impulse_note = ""
+    if impulse.get("active"):
+        impulse_note = f"; early impulse {impulse.get('direction')} strength={_f(impulse.get('strength')):.2f}; ADX lag allowed"
+    add_family("trend", trend_score, f"ADX {adx:.1f}; +DI {plus_di:.1f}; -DI {minus_di:.1f}{impulse_note}", 1.0)
 
     # Structure/liquidity family.
     struct_dir = _norm_direction(structure.get("direction") or structure.get("structure_direction"))
@@ -610,6 +628,7 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
         "timeframe": _u(timeframe),
         "required_independent_families": min_families,
         "required_direction_margin": round(margin_required, 3),
+        "directional_impulse": dict(impulse) if impulse.get("active") else {},
         "anti_overfit_rule": "ONE_REPRESENTATIVE_EFFECT_PER_CORRELATED_FAMILY",
     }
 

@@ -233,6 +233,17 @@ def _live_evidence(
     expansion = breakout or displacement
     direction_anchor = structure_aligned or trend_aligned or mtf_aligned
 
+    # Commit 30: early directional displacement is a setup role, not a new
+    # publication authority. It allows primary geometry / Shadow learning when
+    # ADX is still lagging, while contextual_quality keeps the live-route gate.
+    try:
+        from commit30_core import detect_directional_impulse
+        _impulse = detect_directional_impulse(trend, momentum, volume, structure)
+        dmi_impulse = bool(_impulse.get("active") and _direction(_impulse.get("direction")) == desired)
+    except Exception:
+        _impulse = {}
+        dmi_impulse = False
+
     return {
         "trend": trend_aligned,
         "mtf": mtf_aligned,
@@ -254,6 +265,8 @@ def _live_evidence(
         "extreme": extreme,
         "mean_reversion_location": mean_reversion_location,
         "direction_anchor": direction_anchor,
+        "dmi_impulse": dmi_impulse,
+        "impulse_strength": round(_f(_impulse.get("strength"), 0.0), 3),
         "adx": round(adx, 3),
         "rsi": round(rsi, 3),
         "volume_ratio": round(vol_ratio, 3),
@@ -304,6 +317,14 @@ def _evaluate_particular_side(
 ) -> Dict[str, Any]:
     ev = _live_evidence(layers, operational, direction)
     contracts = [
+        _contract_result(
+            name="DIRECTIONAL_IMPULSE_CONTINUATION",
+            preferred_family="BREAKOUT_RETEST",
+            ev=ev,
+            core=("dmi_impulse", "direction_anchor", "momentum"),
+            support=("structure", "volume", "mtf", "displacement", "breakout"),
+            min_support=1,
+        ),
         _contract_result(
             name="SWEEP_REVERSAL",
             preferred_family="SWEEP_REVERSAL",

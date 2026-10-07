@@ -1,0 +1,91 @@
+{
+  "DEV": {
+    "n": 11,
+    "net_r": 1.702,
+    "expectancy_r": 0.1547,
+    "pf": 1.2537,
+    "maxdd_r": 2.236
+  },
+  "HOLDOUT": {
+    "n": 4,
+    "net_r": 3.928,
+    "expectancy_r": 0.982,
+    "pf": 4.5134,
+    "maxdd_r": 1.118
+  },
+  "COMBINED": {
+    "n": 15,
+    "net_r": 5.63,
+    "expectancy_r": 0.3753,
+    "pf": 1.7194,
+    "maxdd_r": 2.236
+  },
+  "historical_1h_guardrail": {
+    "resolved": 120,
+    "tp": 11,
+    "sl": 109,
+    "wr_pct": 9.17,
+    "gross_expectancy_r_proxy": -0.642,
+    "avg_modeled_net_r": -0.907,
+    "expired": 113,
+    "avg_mfe_r": 0.859,
+    "avg_mae_r": 0.919
+  },
+  "historical_1h_liquidity_challenger": {
+    "observations": 50,
+    "tp": 9,
+    "sl": 18,
+    "expired": 23,
+    "wr_pct": 33.33,
+    "avg_realized_r": 0.089,
+    "profit_factor": 1.134
+  },
+  "incident_replay": {
+    "input": {
+      "symbol": "BTC-USDT",
+      "timeframe": "1h",
+      "direction": "bearish",
+      "adx": 17.7,
+      "plus_di": 9.5,
+      "minus_di": 42.2,
+      "rsi": 23.9,
+      "volume_ratio": 2.82,
+      "mtf_operational_context_available": false
+    },
+    "commit29": {
+      "action": "NO_OPERAR",
+      "quality": 56.0,
+      "short_families": [
+        "structure",
+        "momentum",
+        "volume"
+      ],
+      "short_score": 2.968
+    },
+    "commit30": {
+      "action": "SHORT",
+      "quality": 98.5,
+      "short_families": [
+        "trend",
+        "structure",
+        "momentum",
+        "volume"
+      ],
+      "short_score": 3.44,
+      "regime": "DIRECTIONAL_IMPULSE_BEAR",
+      "impulse_active": true,
+      "impulse_strength": 1.0
+    }
+  },
+  "proposal3_governance": {
+    "direct_1h_live_promotion": false,
+    "reason": "NO_CLEAN_IS_SELECTION_OOS_FOR_DIRECTIONAL_IMPULSE_1H",
+    "live_bridge_target": "EXISTING_VALIDATED_30M_CHAMPION_ONLY",
+    "same_signal_quota": null,
+    "safety_changed": false,
+    "rr_changed": false,
+    "new_threads": 0,
+    "new_llm_calls": 0,
+    "new_supabase_queries": 0
+  }
+}

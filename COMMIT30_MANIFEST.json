@@ -1,0 +1,126 @@
+{
+  "release": "COMMIT30_PROPOSAL3_DIRECTIONAL_IMPULSE_RECOVERY_V1",
+  "entrypoint": "commit30_main_entrypoint:app",
+  "files": [
+    {
+      "path": "Procfile",
+      "size": 169,
+      "sha256": "32df727e339f47a35c681251a4d65c8fd8f64b62b9d0f412348ee7bc68d75668"
+    },
+    {
+      "path": "render.yaml",
+      "size": 4593,
+      "sha256": "0147c7c57c51d449e726cc94341f0548da4dad3fc8da46cfb72a8f1e02b700bc"
+    },
+    {
+      "path": "app.py",
+      "size": 2438826,
+      "sha256": "5d69fa799a0d235911bb693500be37275e80753d90fb0b4076a6c11d35f76106"
+    },
+    {
+      "path": "futures_system.py",
+      "size": 273400,
+      "sha256": "15bda7305c58c4cdd44c310cfcd4eeeddf71c67e8c2b3e148c71408c67da0375"
+    },
+    {
+      "path": "worker_orchestration.py",
+      "size": 15315,
+      "sha256": "f1ad7328feee67e1445afb17abf71d4e71dd5a46c9044e3e2f503e477b73de23"
+    },
+    {
+      "path": "operational_intelligence.py",
+      "size": 50148,
+      "sha256": "f3cfb946fe191c688f6af009dab5792f008a7fe425cd1ac76f9e20ccaff55945"
+    },
+    {
+      "path": "pipeline_integrity_175102.py",
+      "size": 39073,
+      "sha256": "05f181b2189248858c76828e40b3e7a2d4de9e3d2366da462d8bde4affa8413c"
+    },
+    {
+      "path": "contextual_quality_commit28.py",
+      "size": 21261,
+      "sha256": "662b835eb6475227ac75c9fc0d02c6b87cdc5d6f6bf63c38e2253ac3038b1736"
+    },
+    {
+      "path": "champion_registry_commit19.py",
+      "size": 18933,
+      "sha256": "99f0cacd1443ac73f3ef01a010abc73908d3d5ff8c2b0bd878cc4c520bd79074"
+    },
+    {
+      "path": "commit28_core.py",
+      "size": 2030,
+      "sha256": "5568b900c052afd10e9930f3cfe8ab0746e4cd662208ff7d5e5320bf92221a02"
+    },
+    {
+      "path": "commit29_core.py",
+      "size": 4387,
+      "sha256": "1a4e895f4cdf000af0ff999b2594ba9057269c0cf0c2009e78fc9d288a51830b"
+    },
+    {
+      "path": "commit29_main_entrypoint.py",
+      "size": 2830,
+      "sha256": "91e3e5b1b6095fe97aa937893188a01501de0818a08664d12ab8b80f05e3d38f"
+    },
+    {
+      "path": "commit30_core.py",
+      "size": 10793,
+      "sha256": "909120f09f98edda9fcfa239cd21cc8c9bc976c8565166e71695671dc2cc4007"
+    },
+    {
+      "path": "commit30_main_entrypoint.py",
+      "size": 3403,
+      "sha256": "0927c599e0ca6c8a6215fd33bcc1edb9353c4a472e5d9b68fd6881922509a7db"
+    },
+    {
+      "path": "test_commit30_proposal3.py",
+      "size": 5804,
+      "sha256": "cb14b3e3fae50b323942592ebbbc90501a433bee1a2c12842e0b755b166190e9"
+    },
+    {
+      "path": "validate_commit30_proposal3.py",
+      "size": 1626,
+      "sha256": "40a6f3a0deadcf2a6eb8f9d11b149e3ee54db8b8a52239b627b83df5d9fbdc1a"
+    },
+    {
+      "path": "BACKTEST_ROWS_17_5_10_PROFITABILITY.csv",
+      "size": 2552,
+      "sha256": "44be62ac39e69b3ab775c4883aa406f0dd2a0f2b3b153ce36989ba41aebbe8e7"
+    },
+    {
+      "path": "BACKTEST_DATA_SNAPSHOT_20260928.json",
+      "size": 10165,
+      "sha256": "c9321bb40d06dc1dd777fa0bb315673d39439278235104f909c62892c753047b"
+    },
+    {
+      "path": "AUDITORIA_PROPUESTA3_COMMIT30.md",
+      "size": 3688,
+      "sha256": "7bb1941e6e70648b41298129444e51af6c2de66839a66b52826f3d694a88dbea"
+    },
+    {
+      "path": "BACKTEST_COMMIT30_PROPOSAL3.md",
+      "size": 2853,
+      "sha256": "2517a87029025943a5263d36b25f5f70e6ff44cd0905c031d695176fb7d8953e"
+    },
+    {
+      "path": "BACKTEST_COMMIT30_RESULT.json",
+      "size": 1970,
+      "sha256": "562222dd7ec65969db9c400c6c9305e592456e6f2225f34472b4930f56b6c529"
+    },
+    {
+      "path": "COMMIT30_QA_REPORT.md",
+      "size": 1844,
+      "sha256": "b50143455fb08ff8c56d78d019990ff63e66b4c6c9fa8ac4aee57b4cb0ef4fef"
+    },
+    {
+      "path": "COMMIT30_ROLLBACK.md",
+      "size": 259,
+      "sha256": "b42c608e27af4a8a6e63539e704785ae285336b59d7f648c66e79359ee6bf74e"
+    },
+    {
+      "path": "IMPLEMENTACION_COMMIT30.md",
+      "size": 2289,
+      "sha256": "4358def139aad4e9f14bf557b6927d98a16eec47823b66370d6f9e2481a25630"
+    }
+  ]
+}

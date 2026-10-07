@@ -10324,12 +10324,19 @@ class TradingExpertSystem:
     # Ubicación: Reemplazar entre línea ~1250 y línea ~1320 aproximadamente
         
     def detect_market_regime(self, trend, momentum, volatility, structure):
-        """Commit 29: causal regime classifier. Strong conflicted ADX is TRANSITIONAL, never mislabeled RANGING."""
+        """Commit 30: distinguish an early directional impulse from a quiet range.
+
+        ADX remains the sustained-trend metric, but low ADX cannot veto a fast
+        displacement when DMI dominance and momentum already agree. The impulse
+        state is context only; publication still needs a validated route + Safety.
+        """
         try:
-            from commit29_core import classify_market_regime
-            return classify_market_regime(trend, volatility)
+            from commit30_core import classify_market_regime
+            return classify_market_regime(
+                trend, volatility, momentum=momentum, volume={}, structure=structure,
+            )
         except Exception as e:
-            print(f"⚠️ Error detectando régimen Commit29: {e}")
+            print(f"⚠️ Error detectando régimen Commit30: {e}")
             return {'regime': 'TRANSITIONAL', 'confidence': 30.0,
                     'reasoning': ['Fallback por error; sin asumir rango'], 'adx': 0, 'atr_pct': 0}
 
@@ -26894,6 +26901,30 @@ class TraderTecnico(TraderBase):
             bb_position = volatility.get('bb_position', 0.5)
             
             print(f"   📊 ADX: {adx:.1f}, Dirección: {direccion_trend}, RSI: {rsi:.1f}, RSI_M: {rsi_maverick:.2f}")
+
+            # COMMIT 30 / PROPUESTA 3 — impulso DMI temprano.
+            # ADX puede rezagarse durante la primera vela de desplazamiento.
+            # Este voto es evidencia del especialista; NO tiene autoridad de publicación.
+            try:
+                from commit30_core import detect_directional_impulse
+                _c30_impulse = detect_directional_impulse(
+                    trend, momentum, capas.get('volume', {}) or {}, capas.get('structure', {}) or {}
+                )
+            except Exception:
+                _c30_impulse = {}
+            if _c30_impulse.get('active'):
+                _is_fut = str(capas.get('system_type') or '').lower() == 'futures'
+                _idir = str(_c30_impulse.get('direction') or '')
+                if _idir == 'bearish':
+                    accion = 'SHORT' if _is_fut else 'VENTA_SPOT'
+                    estrategias.append('IMPULSO_DMI_BAJISTA')
+                elif _idir == 'bullish':
+                    accion = 'LONG' if _is_fut else 'COMPRA_SPOT'
+                    estrategias.append('IMPULSO_DMI_ALCISTA')
+                if accion != 'NO_OPERAR':
+                    confianza = min(82.0, 70.0 + 14.0 * float(_c30_impulse.get('strength') or 0.0))
+                    razones.append('Impulso direccional temprano: DMI+momentum alineados; ADX aún rezagado')
+                    print(f"   ⚡ [C30] {estrategias[-1]} - {accion} ({confianza:.0f}%)")
             
             # ============ ESTRATEGIA 1: PULLBACK TENDENCIA ============
             if (adx > 25 and 
@@ -28899,18 +28930,42 @@ class TraderMultiframe(TraderBase):
             print(f"\n📊 TRADER MULTIFRAME REAL - {symbol} {timeframe}→{higher_tf}")
             print(f"   Actual: {current_direction} | Superior: {higher_direction}")
 
+            try:
+                from commit30_core import detect_directional_impulse
+                _c30_mtf_impulse = detect_directional_impulse(
+                    trend, momentum, capas.get('volume', {}) or {}, capas.get('structure', {}) or {}
+                )
+            except Exception:
+                _c30_mtf_impulse = {}
+            _impulse_aligned = bool(
+                _c30_mtf_impulse.get('active')
+                and str(_c30_mtf_impulse.get('direction') or '') == current_direction
+            )
+
             if (current_direction == higher_direction
-                    and current_direction in ('bullish', 'bearish') and adx >= 18):
-                accion = 'COMPRA_SPOT' if current_direction == 'bullish' else 'VENTA_SPOT'
-                confianza = min(86.0, 62.0 + adx * 0.55)
-                estrategias.append(
-                    'ALINEACION_BULLISH_COMPLETA'
-                    if current_direction == 'bullish'
-                    else 'ALINEACION_BEARISH_COMPLETA'
-                )
-                razones.append(
-                    f"Alineación real {timeframe}→{higher_tf} en {system_type}; ADX {adx:.1f}"
-                )
+                    and current_direction in ('bullish', 'bearish') and (adx >= 18 or _impulse_aligned)):
+                if system_type == 'futures':
+                    accion = 'LONG' if current_direction == 'bullish' else 'SHORT'
+                else:
+                    accion = 'COMPRA_SPOT' if current_direction == 'bullish' else 'VENTA_SPOT'
+                if _impulse_aligned and adx < 18:
+                    confianza = min(82.0, 70.0 + 12.0 * float(_c30_mtf_impulse.get('strength') or 0.0))
+                    estrategias.append(
+                        'IMPULSO_MTF_BULLISH' if current_direction == 'bullish' else 'IMPULSO_MTF_BEARISH'
+                    )
+                    razones.append(
+                        f"Alineación real {timeframe}→{higher_tf} durante impulso temprano; ADX {adx:.1f} rezagado"
+                    )
+                else:
+                    confianza = min(86.0, 62.0 + adx * 0.55)
+                    estrategias.append(
+                        'ALINEACION_BULLISH_COMPLETA'
+                        if current_direction == 'bullish'
+                        else 'ALINEACION_BEARISH_COMPLETA'
+                    )
+                    razones.append(
+                        f"Alineación real {timeframe}→{higher_tf} en {system_type}; ADX {adx:.1f}"
+                    )
             elif (current_direction in ('bullish', 'bearish')
                   and higher_direction in ('bullish', 'bearish')
                   and current_direction != higher_direction):
@@ -30160,7 +30215,7 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit29():
+def api_runtime_version_commit30():
     """Deployment truth without secrets; lets one verify the actual live release."""
     import hashlib
     def _sha(path):
@@ -30173,14 +30228,18 @@ def api_runtime_version_commit29():
         except Exception:
             return None
     return jsonify({
-        'version': 'COMMIT29_SYSTEM_RECOVERY_V1',
-        'entrypoint': 'commit29_main_entrypoint:app',
+        'version': 'COMMIT30_PROPOSAL3_DIRECTIONAL_IMPULSE_RECOVERY_V1',
+        'entrypoint': 'commit30_main_entrypoint:app',
+        'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
         'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
         'memory': _memory_runtime_state(),
         'contracts': {
             'missing_context_is_neutral': False,
             'transitional_regime': True,
+            'directional_impulse_context': True,
+            'directional_impulse_can_publish_directly': False,
+            'impulse_bridges_to_validated_30m': True,
             'fallback_can_publish': False,
             'parallel_q_authority': False,
             'safety_floor': 75,
@@ -38272,6 +38331,7 @@ def _compact_futures_runtime_result(result):
                 'direction': thesis.get('direction'),
                 'quality': thesis.get('quality'),
                 'independent_support_families': thesis.get('independent_support_families'),
+                'directional_impulse': dict(thesis.get('directional_impulse') or {}),
             },
             'default_strategy': {
                 'id': (operational.get('default_strategy') or {}).get('id'),
@@ -38279,6 +38339,11 @@ def _compact_futures_runtime_result(result):
                 'quality': (operational.get('default_strategy') or {}).get('quality'),
             },
         }
+
+    # Commit30: persist only the tiny event/bridge audit, never bulky layers.
+    if isinstance(result.get('commit30_directional_impulse'), dict):
+        compact['commit30_directional_impulse'] = dict(result.get('commit30_directional_impulse') or {})
+        compact['commit30_impulse_priority_targets'] = list(result.get('commit30_impulse_priority_targets') or [])[:6]
 
     message = result.get('message')
     if message is not None:
@@ -41309,6 +41374,14 @@ def _analyze_futures_all_parallel(combos_override=None):
                     r, symbol, timeframe
                 )
 
+            # Commit 30: detect early 1h directional displacement after all
+            # real layers exist. This only prioritizes existing validated 30m
+            # cells; direct 1h publication remains governed by route/OOS Safety.
+            try:
+                _commit30_enqueue_impulse_priority(r, symbol, timeframe)
+            except Exception as _c30_impulse_err:
+                print(f"⚠️ [C30 IMPULSE] telemetry error {combo_name}: {_c30_impulse_err}")
+
             r = _enrich_futures_public_message(r)
 
             # Hotfix 14.7: ReviewTrader already persisted the rich research
@@ -41519,6 +41592,64 @@ def _analyze_futures_all_parallel(combos_override=None):
 
 _FUTURES_INCREMENTAL_CURSOR = 0
 _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
+# COMMIT 30 — bounded event-priority lane. No extra worker and no signal quota:
+# it only reorders normal 30m closed-candle scans after a confirmed 1h impulse.
+_FUTURES_IMPULSE_PRIORITY_QUEUE = []
+_FUTURES_IMPULSE_PRIORITY_LOCK = threading.Lock()
+_FUTURES_IMPULSE_PRIORITY_MAX = 12
+
+
+def _commit30_f30_validated_symbols():
+    try:
+        from champion_registry_commit19 import route_registry
+        for spec in (route_registry() or {}).values():
+            if (str((spec or {}).get('market') or '').upper() == 'FUTURES'
+                    and str((spec or {}).get('timeframe') or '').upper() == '30M'
+                    and str((spec or {}).get('action') or '').upper() == 'DYNAMIC'):
+                return tuple(sorted(str(x) for x in ((spec or {}).get('symbols') or [])))
+    except Exception:
+        pass
+    return ('ADA-USDT','BTC-USDT','ETH-USDT','LINK-USDT','SOL-USDT','XRP-USDT')
+
+
+def _commit30_enqueue_impulse_priority(result, symbol, timeframe):
+    """Turn a 1h impulse into scan priority, never into publication authority."""
+    if str(timeframe) != '1h' or not isinstance(result, dict):
+        return None
+    try:
+        from commit30_core import detect_directional_impulse
+        impulse = detect_directional_impulse(
+            result.get('trend') or {}, result.get('momentum') or {},
+            result.get('volume') or {}, result.get('structure') or {},
+        )
+    except Exception:
+        return None
+    if not impulse.get('active'):
+        return impulse
+    valid = set(_commit30_f30_validated_symbols())
+    targets = list(valid) if str(symbol) == 'BTC-USDT' else ([str(symbol)] if str(symbol) in valid else [])
+    if not targets:
+        return impulse
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        _now = time.time()
+        _existing_cells = {(x[0], x[1]) for x in _FUTURES_IMPULSE_PRIORITY_QUEUE if isinstance(x, tuple) and len(x) >= 2}
+        for target in targets:
+            cell = (target, '30m')
+            if cell not in _existing_cells:
+                # Timestamp keeps an impulse event alive until the next eligible
+                # closed 30m candle instead of dropping it if that candle was
+                # scanned moments before the 1h close. It expires after 90 min.
+                _FUTURES_IMPULSE_PRIORITY_QUEUE.append((target, '30m', _now))
+                _existing_cells.add(cell)
+        if len(_FUTURES_IMPULSE_PRIORITY_QUEUE) > _FUTURES_IMPULSE_PRIORITY_MAX:
+            del _FUTURES_IMPULSE_PRIORITY_QUEUE[:-_FUTURES_IMPULSE_PRIORITY_MAX]
+    result['commit30_directional_impulse'] = dict(impulse)
+    result['commit30_impulse_priority_targets'] = list(targets)
+    print(
+        f"⚡ [C30 IMPULSE] {symbol} {timeframe} {impulse.get('direction')} "
+        f"→ prioridad 30m {','.join(targets)}; no publica por sí solo"
+    )
+    return impulse
 _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
 if _LOW_MEMORY_MODE:
@@ -41578,6 +41709,40 @@ def _next_futures_incremental_combo():
         FUTURES_RESEARCH_ENABLED,
         futures_timeframe_allowed,
     )
+    # Commit 30: a detected 1h impulse reorders the NORMAL 30m scan. We do
+    # not force a second analysis of an unchanged candle and do not bypass the
+    # 30m Champion contract.
+    _now_impulse = time.time()
+    _chosen_impulse = None
+    _keep_impulse = []
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        _queued = list(_FUTURES_IMPULSE_PRIORITY_QUEUE)
+        _FUTURES_IMPULSE_PRIORITY_QUEUE.clear()
+    for _item in _queued:
+        try:
+            _sym, _tf = _item[0], _item[1]
+            _created = float(_item[2]) if len(_item) >= 3 else _now_impulse
+        except Exception:
+            continue
+        # Context should be fresh enough to inform the next one or two 30m closes.
+        if (_now_impulse - _created) > 5400.0:
+            continue
+        if _chosen_impulse is None and _futures_combo_due_for_closed_candle(_sym, _tf, now_ts=_now_impulse):
+            _chosen_impulse = (_sym, _tf)
+        else:
+            _keep_impulse.append((_sym, _tf, _created))
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        # Preserve cells that are not due yet and the remaining due cells; only
+        # one heavy analysis is consumed per scheduler cycle. This is essential
+        # under the Render 512 MB single-heavy-slot policy.
+        for _item in _keep_impulse:
+            if _item not in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+                _FUTURES_IMPULSE_PRIORITY_QUEUE.append(_item)
+        if len(_FUTURES_IMPULSE_PRIORITY_QUEUE) > _FUTURES_IMPULSE_PRIORITY_MAX:
+            del _FUTURES_IMPULSE_PRIORITY_QUEUE[:-_FUTURES_IMPULSE_PRIORITY_MAX]
+    if _chosen_impulse is not None:
+        return _chosen_impulse
+
     # Production universe keeps all six TF. Commit 15 adds only six research
     # combinations (LINK/BNB × 30m/1h), bounded for the V1 active universe.
     combos = [
