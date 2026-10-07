@@ -1,0 +1,90 @@
+{
+  "version": "COMMIT28_CORE_EXECUTION_RECOVERY_V1",
+  "delivery": "FULL_FILES_DRAG_REPLACE",
+  "base": "COMMIT27_DEEP_CORE",
+  "files": [
+    {
+      "file": "AUDITORIA_COMMIT28_CORE_RECOVERY.md",
+      "bytes": 5299,
+      "sha256": "5d1fd30d0585b86fc8961e3e13e01e9694d0bae369b58faf2d50418f8986889d"
+    },
+    {
+      "file": "BACKTEST_COMMIT28_REGRESSION.md",
+      "bytes": 1267,
+      "sha256": "cb79a35fbd3af04142f5955b5333c4615821df3e1c644d468527e61b44b7eb3e"
+    },
+    {
+      "file": "BACKTEST_COMMIT28_RESULT.json",
+      "bytes": 10705,
+      "sha256": "2f5c947576d1d77a03f9f369f9330fdf3a4cfcfde440747cc0931062eb01d093"
+    },
+    {
+      "file": "COMMIT28_QA_REPORT.md",
+      "bytes": 1787,
+      "sha256": "35591011bf021975e93def25c8c322289ce5882dffacaadeb26b66c6ee0e31ca"
+    },
+    {
+      "file": "COMMIT28_ROLLBACK.md",
+      "bytes": 383,
+      "sha256": "35f01e072bafe53477cf65ab0a47bbc062af2426a8f5d91196b6791311dcc7a8"
+    },
+    {
+      "file": "IMPLEMENTACION_COMMIT28.md",
+      "bytes": 1069,
+      "sha256": "0d8add0e8902db56d0417163e33401e97e557be19774b4f953300541b5973472"
+    },
+    {
+      "file": "Procfile",
+      "bytes": 169,
+      "sha256": "26bddd20c223251fca95aa773344c986dacea7a17a5ad7af0db92eb4391d6a77"
+    },
+    {
+      "file": "app.py",
+      "bytes": 2426790,
+      "sha256": "6f5cb944a13d6ce996d3f09f57cdd35083c38bb93a3165043bc6c19c10e0578d"
+    },
+    {
+      "file": "commit28_core.py",
+      "bytes": 2030,
+      "sha256": "5568b900c052afd10e9930f3cfe8ab0746e4cd662208ff7d5e5320bf92221a02"
+    },
+    {
+      "file": "commit28_main_entrypoint.py",
+      "bytes": 2709,
+      "sha256": "d19e784ef76230ffc5b3b96a8e63d3f8a6f4a39bf0612e7e82423e7f65346212"
+    },
+    {
+      "file": "contextual_quality_commit28.py",
+      "bytes": 21261,
+      "sha256": "662b835eb6475227ac75c9fc0d02c6b87cdc5d6f6bf63c38e2253ac3038b1736"
+    },
+    {
+      "file": "futures_system.py",
+      "bytes": 273400,
+      "sha256": "15bda7305c58c4cdd44c310cfcd4eeeddf71c67e8c2b3e148c71408c67da0375"
+    },
+    {
+      "file": "render.yaml",
+      "bytes": 4406,
+      "sha256": "6ef7dce796722d0dd31be476f76b6274f57a9374a30761f4535b2bb1c2f7c1d8"
+    },
+    {
+      "file": "test_commit28_core_recovery.py",
+      "bytes": 4668,
+      "sha256": "19665960626c217059109e030e66bc7effacc769a30ef175faabd23e971e18d2"
+    },
+    {
+      "file": "worker_orchestration.py",
+      "bytes": 15315,
+      "sha256": "f1ad7328feee67e1445afb17abf71d4e71dd5a46c9044e3e2f503e477b73de23"
+    }
+  ],
+  "resource_delta": {
+    "market_data_requests": 0,
+    "supabase_queries": 0,
+    "llm_calls": 0,
+    "background_threads": 0
+  },
+  "hard_guards_lowered": false,
+  "spot_signal_logic_changed": false
+}

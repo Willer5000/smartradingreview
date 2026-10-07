@@ -198,7 +198,7 @@ def build_worker_desk_snapshot(
         confidence = max(0.0, min(100.0, _f(
             raw.get("confianza_original") or raw.get("confianza") or raw.get("confianza_ponderada"), 0.0
         )))
-        relation = "NEUTRAL"
+        relation = "NOT_APPLICABLE" if observed_action in {"ABSTAIN", "NO_APLICA"} else "NEUTRAL"
         if thesis_dir in {"BULLISH", "BEARISH"} and observed_dir in {"BULLISH", "BEARISH"}:
             relation = "ALIGNED" if observed_dir == thesis_dir else "COUNTER_EVIDENCE"
         reasons = [str(x)[:260] for x in (raw.get("razones") or raw.get("reasons") or []) if str(x).strip()][:6]
@@ -217,6 +217,7 @@ def build_worker_desk_snapshot(
             "timeframe_emphasis": round(float(emphasis.get(desk, 1.0)), 3),
             "legacy_direction_hint": observed_dir,
             "legacy_confidence": round(confidence, 2),
+            "applicable": observed_action not in {"ABSTAIN", "NO_APLICA"},
             "relation_to_thesis": relation,
             "strategies_observed": strategies,
             "work_notes": reasons,

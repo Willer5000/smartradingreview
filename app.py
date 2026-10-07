@@ -29404,8 +29404,12 @@ class Moderador:
                     estrategias = []
                 if razones is None:
                     razones = []
-                accion_original = str(accion or 'NO_OPERAR').upper()
-                accion = self._normalize_action_for_market(accion, system_type)
+                from commit28_core import normalize_specialist_action as _c28_normalize_specialist_action
+                _c28_action, _legacy_action_before_abstain, _c28_is_abstention = (
+                    _c28_normalize_specialist_action(accion, confianza)
+                )
+                accion_original = 'ABSTAIN' if _c28_is_abstention else _c28_action
+                accion = self._normalize_action_for_market(_c28_action, system_type)
                 
                 # ============ APLICAR PESO DEL TRADER + AJUSTES DE CONTEXTO ============
                 # Fórmula: peso_efectivo = peso_base × mult_régimen × mult_review
@@ -29488,6 +29492,8 @@ class Moderador:
                     'trader': trader.nombre,
                     'accion': accion,
                     'accion_original': accion_original,
+                    'accion_legacy_pre_abstain': _legacy_action_before_abstain,
+                    'is_abstention': bool(_c28_is_abstention),
                     'accion_normalizada': accion,
                     'confianza': confianza_ponderada,
                     'confianza_original': confianza,
@@ -29561,8 +29567,9 @@ class Moderador:
             voto['incluido_en_conteo'] = False
             voto['confianza_contabilizada'] = None
 
-            # NEUTRAL de cualquier especialista no entra al conteo direccional.
-            if accion == 'NEUTRAL':
+            # COMMIT 28 — NEUTRAL/ABSTAIN/NO_APLICA are absence of
+            # directional evidence and never count as anti-trade votes.
+            if accion in ('NEUTRAL', 'ABSTAIN', 'NO_APLICA'):
                 continue
                 
             confianza = voto['confianza']
@@ -29918,6 +29925,8 @@ class Moderador:
                     'confianza_ponderada': v['confianza_ponderada'],
                     'confianza_contabilizada': v.get('confianza_contabilizada'),
                     'accion_original': v['accion_original'],
+                    'accion_legacy_pre_abstain': v.get('accion_legacy_pre_abstain'),
+                    'is_abstention': bool(v.get('is_abstention')),
                     'accion_normalizada': v['accion_normalizada'],
                     'estrategias': v['estrategias'],
                     'razones': v['razones'],
@@ -36418,7 +36427,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
             result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
             # COMMIT 27: Multi-Asset now passes through the SAME final authority
-            # closure as Futures, while contextual_quality_commit27 selects a
+            # closure as Futures, while contextual_quality_commit28 selects a
             # market/asset-class-specific quality lens. No crypto rule is copied
             # into Multi and unsupported fast routes remain Shadow.
             result=_app244_native_quality_authority(result, symbol, timeframe)
@@ -37994,7 +38003,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_COMMIT245_NATIVE_Q_VERSION = 'COMMIT27_UNIFIED_CONTEXTUAL_PUBLICATION_CORE_V1'
+_COMMIT245_NATIVE_Q_VERSION = 'COMMIT28_CORE_EXECUTION_RECOVERY_V1'
 
 
 def _compact_futures_quality_context(result):
@@ -40752,7 +40761,7 @@ def _app244_quality_audit(
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'reason_codes': list(reason_codes or authority.get('reason_codes') or []),
-        'source_route': 'APP_PY_COMMIT27_SINGLE_FINAL_AUTHORITY',
+        'source_route': 'APP_PY_COMMIT28_SINGLE_FINAL_AUTHORITY',
         'q_scores': q_scores,
         'composite': round(_app244_num(quality.get('composite')), 2),
         'base_composite': round(_app244_num(quality.get('base_composite')), 2),
@@ -40773,7 +40782,7 @@ def _app244_quality_audit(
         funnel = {}
     levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
     funnel.update({
-        'version': 'COMMIT27_SIGNAL_FUNNEL_V1',
+        'version': 'COMMIT28_SIGNAL_FUNNEL_V1',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': str((result.get('decision') or {}).get('action') or levels.get('manual_observation_action') or ''),
@@ -40820,7 +40829,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
 
     # Preserve a truthful funnel even when no signal is possible.
     result['signal_engineering_funnel'] = {
-        'version': 'COMMIT27_SIGNAL_FUNNEL_V1',
+        'version': 'COMMIT28_SIGNAL_FUNNEL_V1',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': action,
@@ -40836,7 +40845,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         return _app244_quality_audit(
             result, symbol, timeframe, status='NOT_DIRECTIONAL',
             reason_codes=['DIRECTION_UNDEFINED'], authority={
-                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
                 'eligible': False,
                 'reason_codes': ['DIRECTION_UNDEFINED'],
             },
@@ -40855,7 +40864,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         return _app244_quality_audit(
             result, symbol, timeframe, status='REJECTED',
             reason_codes=['Q_CONTEXT_INVALID'], authority={
-                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
                 'eligible': False,
                 'reason_codes': ['Q_CONTEXT_INVALID'],
             },
@@ -40886,7 +40895,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         return _app244_quality_audit(
             result, symbol, timeframe, status='REJECTED',
             reason_codes=[f'Q_ENGINE_ERROR:{type(exc).__name__}'], authority={
-                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
                 'eligible': False,
                 'reason_codes': [f'Q_ENGINE_ERROR:{type(exc).__name__}'],
             },
@@ -40894,7 +40903,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
 
     parallel = quality.get('parallel_quality_filters') or {}
     try:
-        from contextual_quality_commit27 import evaluate_publication
+        from contextual_quality_commit28 import evaluate_publication
         authority = evaluate_publication(
             result, symbol=str(symbol), timeframe=str(timeframe), quality=quality,
         )
@@ -40904,7 +40913,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             parallel=parallel,
             reason_codes=[f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
             authority={
-                'version': 'COMMIT27_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
                 'eligible': False,
                 'reason_codes': [f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
             },
@@ -40922,7 +40931,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     levels['quality_composite'] = (authority.get('quality_domains') or {}).get('composite')
     levels['quality_filter_authority'] = str((authority.get('movement_profile') or {}).get('name') or '')
     levels['quality_filter_confirmed'] = eligible
-    levels['quality_authority_mode'] = 'COMMIT27_SINGLE_CONTEXTUAL_AUTHORITY'
+    levels['quality_authority_mode'] = 'COMMIT28_SINGLE_CONTEXTUAL_AUTHORITY'
     levels['quality_parallel_role'] = 'DIAGNOSTIC_ONLY'
     levels['q10_contract_enforced_by_hard_guards'] = True
     levels['previous_publication_status_before_commit27'] = previous_status
@@ -40939,7 +40948,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             'is_rejected': False,
             'is_executable': True,
             'publication_gate_reached': True,
-            'publication_gate_source': 'COMMIT27_SINGLE_CONTEXTUAL_AUTHORITY',
+            'publication_gate_source': 'COMMIT28_SINGLE_CONTEXTUAL_AUTHORITY',
         })
         # Keep the old reason for audit, but never expose it as a current block.
         levels.pop('rejected_reason', None)
@@ -40957,7 +40966,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         levels['is_executable'] = False
         levels['is_rejected'] = True
         levels['suggested_size'] = 0
-        levels['rejected_reason'] = '; '.join(reason_codes[:8])[:1000] or 'COMMIT27_NOT_AUTHORISED'
+        levels['rejected_reason'] = '; '.join(reason_codes[:8])[:1000] or 'COMMIT28_NOT_AUTHORISED'
         result['publication_status'] = 'ANALYSIS_ONLY'
         result['publication_eligible'] = False
         result['is_executable'] = False
@@ -41142,12 +41151,28 @@ def _analyze_futures_all_parallel(combos_override=None):
                         f"🔄 [APP24.5 Q] {combo_name}: snapshot antiguo/sin contexto Q; "
                         "recalculando la misma vela cerrada una sola vez."
                     )
+                # COMMIT 28 — reuse the already-computed BTC snapshot for
+                # the SAME timeframe instead of feeding neutral synthetic
+                # defaults to non-BTC Futures cells.  This opens no new request:
+                # full refresh processes BTC first and incremental refresh may
+                # reuse the previous compact cache.
+                _commit28_btc_context = None
+                _commit28_btc_context_source = 'NONE'
+                if str(symbol).upper() != 'BTC-USDT':
+                    from commit28_core import select_cached_btc_context as _c28_select_btc
+                    _commit28_btc_context, _commit28_btc_context_source = _c28_select_btc(
+                        results, previous_analysis, timeframe
+                    )
                 r = futures.analyze_futures_market(
                     symbol,
                     timeframe,
+                    btc_analysis=_commit28_btc_context,
                     closed_candle_only=True,
                     prepared_context=prepared,
                 )
+                if isinstance(r, dict):
+                    r['commit28_btc_context_source'] = _commit28_btc_context_source
+                    r['commit28_btc_context_available'] = bool(_commit28_btc_context)
 
             if not isinstance(r, dict):
                 raise ValueError(

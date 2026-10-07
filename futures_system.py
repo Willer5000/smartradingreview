@@ -5874,7 +5874,7 @@ class FuturesAnalysis(TradingExpertSystem):
     # ========================================================================
     
     def calculate_entry_levels(self, decision, trend, momentum, volatility, structure, 
-                                symbol, timeframe, liquidation=None):
+                                symbol, timeframe, liquidation=None, execution_observations=None):
         """
         Override específico para futuros.
         
@@ -5921,6 +5921,39 @@ class FuturesAnalysis(TradingExpertSystem):
             }
         
         # ==============================================================
+        # COMMIT 28 — MULTI-ASSET PRE-EXECUTION CONTEXT PRESERVATION
+        # ==============================================================
+        # The old ABI adapter also injected the already-computed Multi-Asset
+        # Strategy Bank family before Entry/SL/TP.  Now that the ABI is native,
+        # preserve that behavior explicitly so fixing the TypeError does not
+        # regress Multi execution routing.  No I/O and no direction creation.
+        _commit28_preexec_route = {}
+        try:
+            if isinstance(structure, dict):
+                from execution_abi_175104 import _multiasset_pre_execution_route
+                _commit28_preexec_route = _multiasset_pre_execution_route(
+                    self,
+                    decision=str(decision or '').upper(),
+                    trend=dict(trend or {}),
+                    momentum=dict(momentum or {}),
+                    volatility=dict(volatility or {}),
+                    structure=structure,
+                    symbol=str(symbol or ''),
+                    timeframe=str(timeframe or ''),
+                ) or {}
+                if _commit28_preexec_route.get('engine_family'):
+                    _playbook = dict(structure.get('_contingency_playbook') or {})
+                    _playbook['active'] = bool(_playbook.get('active', True))
+                    _playbook['setup_family'] = _commit28_preexec_route['engine_family']
+                    _playbook['multiasset_pre_execution_route_commit28'] = dict(_commit28_preexec_route)
+                    structure['_contingency_playbook'] = _playbook
+        except Exception as _commit28_preexec_error:
+            _commit28_preexec_route = {
+                'error': type(_commit28_preexec_error).__name__,
+                'creates_direction': False,
+            }
+
+        # ==============================================================
         # Q1 / MOTOR PADRE
         # ==============================================================
         #
@@ -5934,6 +5967,11 @@ class FuturesAnalysis(TradingExpertSystem):
         # Q2 trabaja DESPUÉS de esto y ANTES de Execution Safety.
         # ==============================================================
 
+        # COMMIT 28 — NATIVE EXECUTION ABI.
+        # app.py already passes execution_observations with the complete, already-loaded
+        # analysis context.  Accept and forward it natively so Futures/Multi cannot
+        # fail before primary Entry/SL/TP geometry with a TypeError.  This is pure
+        # plumbing: no threshold, direction, Safety, RR or leverage is changed.
         levels = super().calculate_entry_levels(
             decision,
             trend,
@@ -5942,8 +5980,14 @@ class FuturesAnalysis(TradingExpertSystem):
             structure,
             symbol,
             timeframe,
-            liquidation
+            liquidation=liquidation,
+            execution_observations=execution_observations,
         )
+        if isinstance(levels, dict):
+            levels['execution_abi_commit28_native'] = True
+            if _commit28_preexec_route.get('engine_family'):
+                levels['_execution_setup_family_commit28'] = _commit28_preexec_route.get('engine_family')
+                levels['_multiasset_pre_execution_route_commit28'] = dict(_commit28_preexec_route)
 
         # ==============================================================
         # QUALITY ENGINE Q2
