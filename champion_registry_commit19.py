@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Optional
 import os
 
-VERSION = "COMMIT27_CONTEXTUAL_CHAMPION_ROUTER_PARITY_V1"
+VERSION = "COMMIT30_1_F30_BROAD_STABILITY_ROUTER_V1"
 ENABLED = str(os.getenv("COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
 
 
@@ -82,8 +82,20 @@ _CHAMPIONS: Dict[str, Dict[str, Any]] = {
         "timeframe": "30M", "action": "DYNAMIC", "required_regime": "ANY", "bank_family": "SWEEP_MSS_POI",
         "execution_family": "SWEEP_MSS_POI", "strategy_id": "F30_SHARED_LIQ_SWEEP_MSS_POI_V1",
         "historical_geometry": {"entry_style": "STRUCTURAL_POI", "sl_mode": "STRUCTURAL_INVALIDATION", "tp_mode": "STRUCTURAL_REACHABLE", "rr": None},
-        "evidence": {"is_n": 11, "is_expectancy_r": 0.1547, "is_pf": 1.254, "oos_n": 4, "oos_expectancy_r": 0.9820, "oos_pf": 4.513},
-        "source_type": "RAW_COHORT_REPLAY_IN_ZIP",
+        # Commit 30.1 uses the *pre-existing* broader stability point from
+        # BACKTEST_PARAMETER_STABILITY_17_5_10.json. It was frozen before the
+        # 2026-10-06 incident and therefore is not fitted to the missed crash.
+        # ADX and RSI contracts are unchanged; only relative-volume minimum is
+        # widened from 1.20 to 1.00 because the broader point had MORE samples
+        # and stayed positive in both development and chronological holdout.
+        "routing_contract": {"adx_min": 20.0, "volume_ratio_min": 1.0, "rsi_long_max": 80.0, "rsi_short_min": 20.0},
+        "evidence": {
+            "is_n": 16, "is_net_stress_r": 2.563, "is_expectancy_r": 0.16019,
+            "oos_n": 5, "oos_net_stress_r": 5.610, "oos_expectancy_r": 1.1220,
+            "profit_factor_available": False,
+            "evidence_note": "Frozen parameter-stability point ADX20/Vol1.00/RSI80; broader than prior live point, not selected from current incident"
+        },
+        "source_type": "FROZEN_PARAMETER_STABILITY_PRE_INCIDENT",
     },
     "ETH_2H_LONG_RSI_TREND_V1": {
         "market": "FUTURES", "symbols": {"ETH-USDT"}, "timeframe": "2H", "action": "LONG", "required_regime": "TREND_UP",
@@ -251,17 +263,20 @@ def _route_live_evidence(spec: Mapping[str, Any], layers: Mapping[str, Any], ope
         if trend != expected:
             return False, "F30_TREND_NOT_ALIGNED"
         adx, vr = _adx(layers), _volume_ratio(layers)
-        if adx is None or adx < 20.0:
-            return False, "F30_ADX_BELOW_BACKTEST_CONTRACT"
-        if vr is None or vr < 1.20:
-            return False, "F30_VOLUME_BELOW_BACKTEST_CONTRACT"
+        contract = dict(spec.get("routing_contract") or {})
+        adx_min = float(contract.get("adx_min", 20.0))
+        volume_min = float(contract.get("volume_ratio_min", 1.0))
+        if adx is None or adx < adx_min:
+            return False, "F30_ADX_BELOW_FROZEN_STABILITY_CONTRACT"
+        if vr is None or vr < volume_min:
+            return False, "F30_VOLUME_BELOW_FROZEN_STABILITY_CONTRACT"
         if rsi is None:
             return False, "F30_RSI_MISSING"
         if action == "LONG" and rsi > 80.0:
             return False, "F30_RSI_LONG_CHASE"
         if action == "SHORT" and rsi < 20.0:
             return False, "F30_RSI_SHORT_CHASE"
-        return True, "F30_PREENTRY_BACKTEST_CONTRACT_CONFIRMED_POST_GEOMETRY_TRIGGER_PENDING"
+        return True, "F30_PREENTRY_FROZEN_STABILITY_CONTRACT_CONFIRMED_POST_GEOMETRY_TRIGGER_PENDING"
 
     # Exact non-30m Champions keep their existing contextual consistency.
     if trend != expected:

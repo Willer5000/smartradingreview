@@ -1,0 +1,47 @@
+{
+  "version": "COMMIT30_1_PROPOSAL3_FAST_LANE_BRIDGE_V1",
+  "source": "BACKTEST_PARAMETER_STABILITY_17_5_10.json",
+  "source_frozen_before_2026_10_06_incident": true,
+  "old_live_point": {
+    "adx_min": 20,
+    "volume_min": 1.2,
+    "rsi_cap": 80,
+    "dev_n": 11,
+    "dev_net_stress_r": 1.702,
+    "holdout_n": 4,
+    "holdout_net_stress_r": 3.928,
+    "selected": true,
+    "dev_expectancy_r": 0.154727,
+    "holdout_expectancy_r": 0.982,
+    "combined_n": 15,
+    "combined_net_stress_r": 5.63,
+    "combined_expectancy_r": 0.375333
+  },
+  "broader_frozen_point": {
+    "adx_min": 20,
+    "volume_min": 1.0,
+    "rsi_cap": 80,
+    "dev_n": 16,
+    "dev_net_stress_r": 2.563,
+    "holdout_n": 5,
+    "holdout_net_stress_r": 5.61,
+    "dev_expectancy_r": 0.160188,
+    "holdout_expectancy_r": 1.122,
+    "combined_n": 21,
+    "combined_net_stress_r": 8.173,
+    "combined_expectancy_r": 0.38919
+  },
+  "acceptance": {
+    "same_adx_floor": true,
+    "same_rsi_cap": true,
+    "broader_has_more_dev_samples": true,
+    "broader_has_more_holdout_samples": true,
+    "broader_dev_positive": true,
+    "broader_holdout_positive": true,
+    "profit_factor_available_for_broader_point": false,
+    "direct_1h_live_authority_added": false,
+    "multiasset_fast_live_authority_added": false,
+    "future_profit_guarantee": false
+  },
+  "methodology_note": "Vol1.00 is a pre-existing frozen neighboring point, but it also has higher net R than the old selected point. Commit30.1 therefore uses it only as a broader PRE-ENTRY routing eligibility contract; hard geometry/Safety/RR gates remain unchanged. Prospective monitoring remains required and this is not clean new OOS."
+}

@@ -1,7 +1,7 @@
 /* static/script.js - Frontend interactivo del sistema experto */
 /* VERSIÓN DEFINITIVA - TODOS LOS GRÁFICOS CORREGIDOS */
 console.log(
-    '✅ SmartTrading CORE JS 20261003-COMMIT21-9Q-FIX1 cargado'
+    '✅ SmartTrading CORE JS 20261007-COMMIT30-1-PROPOSAL3-BRIDGE cargado'
 );
 
 let currentAnalysis = null;

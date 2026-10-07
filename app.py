@@ -10323,7 +10323,7 @@ class TradingExpertSystem:
     # === FUNCIÓN COMPLETA:  ===
     # Ubicación: Reemplazar entre línea ~1250 y línea ~1320 aproximadamente
         
-    def detect_market_regime(self, trend, momentum, volatility, structure):
+    def detect_market_regime(self, trend, momentum, volatility, structure, volume=None):
         """Commit 30: distinguish an early directional impulse from a quiet range.
 
         ADX remains the sustained-trend metric, but low ADX cannot veto a fast
@@ -10333,7 +10333,7 @@ class TradingExpertSystem:
         try:
             from commit30_core import classify_market_regime
             return classify_market_regime(
-                trend, volatility, momentum=momentum, volume={}, structure=structure,
+                trend, volatility, momentum=momentum, volume=(volume or {}), structure=structure,
             )
         except Exception as e:
             print(f"⚠️ Error detectando régimen Commit30: {e}")
@@ -21071,7 +21071,7 @@ class TradingExpertSystem:
             # Nueva "capa 11": clasifica el mercado en TRENDING_BULL / TRENDING_BEAR
             # / RANGING / HIGH_VOLATILITY. El Moderador usa este régimen para
             # ajustar los pesos de los 9 especialistas técnicos (ver Moderador.procesar_votacion).
-            market_regime = self.detect_market_regime(trend, momentum, volatility, structure)
+            market_regime = self.detect_market_regime(trend, momentum, volatility, structure, volume=volume)
             print(f"📊 Régimen detectado: {market_regime['regime']} (confianza {market_regime['confidence']}%)")
             for r in market_regime.get('reasoning', []):
                 print(f"   • {r}")
@@ -30215,7 +30215,7 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit30():
+def api_runtime_version_commit30_1():
     """Deployment truth without secrets; lets one verify the actual live release."""
     import hashlib
     def _sha(path):
@@ -30228,8 +30228,8 @@ def api_runtime_version_commit30():
         except Exception:
             return None
     return jsonify({
-        'version': 'COMMIT30_PROPOSAL3_DIRECTIONAL_IMPULSE_RECOVERY_V1',
-        'entrypoint': 'commit30_main_entrypoint:app',
+        'version': 'COMMIT30_1_PROPOSAL3_FAST_LANE_BRIDGE_V1',
+        'entrypoint': 'commit30_1_main_entrypoint:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
         'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
@@ -30240,6 +30240,10 @@ def api_runtime_version_commit30():
             'directional_impulse_context': True,
             'directional_impulse_can_publish_directly': False,
             'impulse_bridges_to_validated_30m': True,
+            'impulse_event_persists_until_ack': True,
+            'same_symbol_30m_same_candle_recheck_once': True,
+            'ui_cooldown_can_starve_impulse_lane': False,
+            'f30_frozen_volume_min': 1.0,
             'fallback_can_publish': False,
             'parallel_q_authority': False,
             'safety_floor': 75,
@@ -31594,6 +31598,14 @@ def _acquire_heavy_analysis(owner, timeout=None):
 
     owner = str(owner or 'heavy-analysis')
     interactive_owner = owner.startswith(('futures-ui:', 'spot-ui:', 'multi-ui:', 'multiasset-ui:'))
+    # COMMIT30.1: a persisted 1h->30m impulse bridge is not ordinary background.
+    # It may bypass UI/cooldown deferral, but NEVER memory preflight or the shared
+    # heavy lock. Runtime lookup avoids an import-order dependency.
+    _c30_priority_fn = globals().get('_commit30_1_is_priority_owner')
+    try:
+        commit30_1_priority_owner = bool(_c30_priority_fn(owner)) if callable(_c30_priority_fn) else False
+    except Exception:
+        commit30_1_priority_owner = False
 
     # RC9.7.14 FREE-runtime: never let background jobs pile up waiting for the
     # only heavy slot. On a 512 MB worker a queue of waiting threads can make
@@ -31676,18 +31688,23 @@ def _acquire_heavy_analysis(owner, timeout=None):
                 else bool(fallback_fn()) if callable(fallback_fn)
                 else False
             )
-            if priority_active:
+            if priority_active and not commit30_1_priority_owner:
                 print(
                     f"⏸️ [PRIORITY] {owner}: cede turno a la interfaz activa."
                 )
                 return False
+            if priority_active and commit30_1_priority_owner:
+                print(
+                    f"⚡ [C30.1 BRIDGE] {owner}: prioridad de impulso evita sólo el cooldown UI; "
+                    "heavy-lock y memoria siguen siendo obligatorios."
+                )
         except Exception:
             pass
 
     # Hotfix 16.1: los jobs de fondo no pueden encadenarse sin pausa.
     # La UI nunca queda bloqueada por este cooldown.
     if (not interactive_owner) and _background_heavy_owner(owner):
-        if _background_heavy_cooldown_active():
+        if _background_heavy_cooldown_active() and not commit30_1_priority_owner:
             print(f"⏸️ [BACKGROUND] {owner}: cooldown operativo; cede CPU/red a la UI.")
             return False
 
@@ -36418,10 +36435,23 @@ def _technical_signal_funnel_row(result):
         'strategy_family': ((oi.get('default_strategy') or {}).get('family')),
         'strategy_quality': ((oi.get('default_strategy') or {}).get('quality')),
         'coverage_route_state': oi.get('coverage_route_state'),
-        'validated_route_matched': bool((oi.get('validated_strategy_route') or {}).get('matched')),
-        'validated_route_execution_eligible': bool((oi.get('validated_strategy_route') or {}).get('eligible_for_execution_routing')),
-        'validated_route_family': ((oi.get('validated_strategy_route') or {}).get('research_family')),
-        'validated_route_reason': ((oi.get('validated_strategy_route') or {}).get('reason')),
+        'validated_route_matched': bool(
+            (oi.get('commit19_champion') or {}).get('matched')
+            or (oi.get('validated_strategy_route') or {}).get('matched')
+        ),
+        'validated_route_execution_eligible': bool(
+            (oi.get('commit19_champion') or {}).get('eligible_for_execution_routing')
+            or (oi.get('validated_strategy_route') or {}).get('eligible_for_execution_routing')
+        ),
+        'validated_route_family': (
+            (oi.get('commit19_champion') or {}).get('execution_family')
+            or (oi.get('validated_strategy_route') or {}).get('research_family')
+        ),
+        'validated_route_reason': (
+            (oi.get('commit19_champion') or {}).get('live_context_reason')
+            or (oi.get('commit19_champion') or {}).get('reason')
+            or (oi.get('validated_strategy_route') or {}).get('reason')
+        ),
         'opportunity_recovery_attempted': bool(levels.get('opportunity_recovery_attempted')),
         'opportunity_recovery_applied': bool(levels.get('opportunity_recovery_applied')),
         'opportunity_recovery_reason': levels.get('opportunity_recovery_reason'),
@@ -38084,7 +38114,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_COMMIT245_NATIVE_Q_VERSION = 'COMMIT28_CORE_EXECUTION_RECOVERY_V1'
+_COMMIT245_NATIVE_Q_VERSION = 'COMMIT30_1_PUBLICATION_AUDIT_V1'
 
 
 def _compact_futures_quality_context(result):
@@ -38300,6 +38330,22 @@ def _compact_futures_runtime_result(result):
             'candidate_action': operational.get('candidate_action'),
             'candidate_ready': operational.get('candidate_ready'),
             'coverage_route_state': operational.get('coverage_route_state'),
+            # COMMIT 30.1: preserve the exact failed/live Champion router output
+            # in compact snapshots. Without this, a reused closed candle loses
+            # F30_ADX/F30_VOLUME/F30_RSI causes and degrades to the opaque
+            # NO_VALIDATED_LIVE_ROUTE message seen in production.
+            'commit19_champion': {
+                'matched': ((operational.get('commit19_champion') or {}).get('matched')),
+                'eligible_for_execution_routing': ((operational.get('commit19_champion') or {}).get('eligible_for_execution_routing')),
+                'champion_id': ((operational.get('commit19_champion') or {}).get('champion_id')),
+                'strategy_id': ((operational.get('commit19_champion') or {}).get('strategy_id')),
+                'action': ((operational.get('commit19_champion') or {}).get('action')),
+                'authority': ((operational.get('commit19_champion') or {}).get('authority')),
+                'reason': ((operational.get('commit19_champion') or {}).get('reason')),
+                'live_context_reason': ((operational.get('commit19_champion') or {}).get('live_context_reason')),
+                'source_type': ((operational.get('commit19_champion') or {}).get('source_type')),
+                'routing_contract': dict(((operational.get('commit19_champion') or {}).get('routing_contract') or {})),
+            },
             'validated_strategy_route': {
                 'matched': ((operational.get('validated_strategy_route') or {}).get('matched')),
                 'eligible_for_execution_routing': ((operational.get('validated_strategy_route') or {}).get('eligible_for_execution_routing')),
@@ -38344,6 +38390,8 @@ def _compact_futures_runtime_result(result):
     if isinstance(result.get('commit30_directional_impulse'), dict):
         compact['commit30_directional_impulse'] = dict(result.get('commit30_directional_impulse') or {})
         compact['commit30_impulse_priority_targets'] = list(result.get('commit30_impulse_priority_targets') or [])[:6]
+    if isinstance(result.get('commit30_1_parent_impulse_context'), dict):
+        compact['commit30_1_parent_impulse_context'] = dict(result.get('commit30_1_parent_impulse_context') or {})
 
     message = result.get('message')
     if message is not None:
@@ -41202,6 +41250,11 @@ def _analyze_futures_all_parallel(combos_override=None):
             )
 
             existing = previous_analysis.get((symbol, timeframe))
+            _c30_1_impulse_context = _commit30_1_active_impulse_context(symbol, timeframe)
+            _c30_1_force_context_recompute = bool(
+                _c30_1_impulse_context
+                and _c30_1_impulse_context.get('force_same_candle_once')
+            )
             same_closed_candle = (
                 isinstance(existing, dict)
                 and existing.get('success')
@@ -41212,7 +41265,13 @@ def _analyze_futures_all_parallel(combos_override=None):
                 )
                 and str(existing.get('source_candle_timestamp') or '')
                 == str(prepared.get('source_candle_timestamp') or '')
+                and not _c30_1_force_context_recompute
             )
+            if _c30_1_force_context_recompute:
+                print(
+                    f"⚡ [C30.1 BRIDGE] {combo_name}: reevalúa la misma vela 30m una sola vez "
+                    "porque acaba de cerrar un nuevo contexto 1h direccional"
+                )
             existing_q_audit = existing.get('app_native_quality_audit') if isinstance(existing, dict) else None
             existing_q_context = existing.get('quality_context') if isinstance(existing, dict) else None
             reusable_quality_snapshot = bool(
@@ -41265,6 +41324,21 @@ def _analyze_futures_all_parallel(combos_override=None):
                 raise ValueError(
                     f"Resultado inválido para {combo_name}"
                 )
+
+            # Commit 30.1 audit provenance. This parent event is CONTEXT ONLY;
+            # it never changes the route/Safety decision by itself.
+            if _c30_1_impulse_context:
+                r['commit30_1_parent_impulse_context'] = {
+                    'event_id': _c30_1_impulse_context.get('event_id'),
+                    'source_symbol': _c30_1_impulse_context.get('source_symbol'),
+                    'source_timeframe': _c30_1_impulse_context.get('source_timeframe'),
+                    'direction': _c30_1_impulse_context.get('direction'),
+                    'strength': _c30_1_impulse_context.get('strength'),
+                    'attempts': _c30_1_impulse_context.get('attempts'),
+                    'force_same_candle_once': bool(_c30_1_impulse_context.get('force_same_candle_once')),
+                    'role': 'CONTEXT_ONLY',
+                    'can_publish': False,
+                }
 
             # Commit 17.5.10.4: a caught execution exception is still a failed
             # analysis. Do not publish/cache it as a successful NO_SIGNAL cycle.
@@ -41592,11 +41666,16 @@ def _analyze_futures_all_parallel(combos_override=None):
 
 _FUTURES_INCREMENTAL_CURSOR = 0
 _FUTURES_INCREMENTAL_CURSOR_LOCK = threading.Lock()
-# COMMIT 30 — bounded event-priority lane. No extra worker and no signal quota:
-# it only reorders normal 30m closed-candle scans after a confirmed 1h impulse.
+# COMMIT 30.1 — durable event-priority lane.  Proposal 3 originally only
+# reordered scans; it did not preserve the 1h event context, could lose the
+# event when the heavy slot was busy, and UI-priority cooldown could starve the
+# queued 30m cell.  30.1 keeps the event until successful acknowledgement.
 _FUTURES_IMPULSE_PRIORITY_QUEUE = []
 _FUTURES_IMPULSE_PRIORITY_LOCK = threading.Lock()
 _FUTURES_IMPULSE_PRIORITY_MAX = 12
+_FUTURES_ACTIVE_IMPULSE_CONTEXT = {}
+_FUTURES_IMPULSE_TTL_SECONDS = 5400.0  # 90 min: current + next 30m close
+_FUTURES_IMPULSE_SELECTION_TIMEOUT_SECONDS = 180.0
 
 
 def _commit30_f30_validated_symbols():
@@ -41612,8 +41691,24 @@ def _commit30_f30_validated_symbols():
     return ('ADA-USDT','BTC-USDT','ETH-USDT','LINK-USDT','SOL-USDT','XRP-USDT')
 
 
+def _commit30_1_event_id(result, symbol, impulse):
+    close_id = str(
+        (result or {}).get('source_candle_timestamp')
+        or (result or {}).get('source_candle_close_timestamp')
+        or (result or {}).get('previous_candle_timestamp')
+        or ''
+    )
+    return f"{symbol}|1h|{close_id}|{str((impulse or {}).get('direction') or 'neutral')}"
+
+
 def _commit30_enqueue_impulse_priority(result, symbol, timeframe):
-    """Turn a 1h impulse into scan priority, never into publication authority."""
+    """Persist a 1h impulse until the required 30m refresh actually completes.
+
+    The event NEVER grants publication authority.  Same-symbol 30m is first and
+    may be recalculated once on the same closed candle because its 1h MTF setup
+    context has just changed.  Cross-symbol Champion cells are only reprioritized
+    on their next normal closed-candle evaluation.
+    """
     if str(timeframe) != '1h' or not isinstance(result, dict):
         return None
     try:
@@ -41626,30 +41721,160 @@ def _commit30_enqueue_impulse_priority(result, symbol, timeframe):
         return None
     if not impulse.get('active'):
         return impulse
+
     valid = set(_commit30_f30_validated_symbols())
-    targets = list(valid) if str(symbol) == 'BTC-USDT' else ([str(symbol)] if str(symbol) in valid else [])
+    source_symbol = str(symbol)
+    if source_symbol == 'BTC-USDT':
+        # Source symbol first; remaining validated cells are merely reprioritized.
+        targets = [source_symbol] + [x for x in sorted(valid) if x != source_symbol]
+    else:
+        targets = [source_symbol] if source_symbol in valid else []
     if not targets:
         return impulse
+
+    now_ts = time.time()
+    event_id = _commit30_1_event_id(result, source_symbol, impulse)
+    direction = str(impulse.get('direction') or 'neutral')
+    strength = float(impulse.get('strength') or 0.0)
     with _FUTURES_IMPULSE_PRIORITY_LOCK:
-        _now = time.time()
-        _existing_cells = {(x[0], x[1]) for x in _FUTURES_IMPULSE_PRIORITY_QUEUE if isinstance(x, tuple) and len(x) >= 2}
-        for target in targets:
-            cell = (target, '30m')
-            if cell not in _existing_cells:
-                # Timestamp keeps an impulse event alive until the next eligible
-                # closed 30m candle instead of dropping it if that candle was
-                # scanned moments before the 1h close. It expires after 90 min.
-                _FUTURES_IMPULSE_PRIORITY_QUEUE.append((target, '30m', _now))
-                _existing_cells.add(cell)
+        # Remove stale records and superseded records for the same cell.
+        kept = []
+        for row in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+            if not isinstance(row, dict):
+                continue
+            created = float(row.get('created_at') or now_ts)
+            if (now_ts - created) > _FUTURES_IMPULSE_TTL_SECONDS:
+                continue
+            if row.get('event_id') == event_id:
+                continue
+            kept.append(row)
+        _FUTURES_IMPULSE_PRIORITY_QUEUE[:] = kept
+
+        for rank, target in enumerate(targets):
+            # A newer systemic event supersedes an older queued event for the same
+            # 30m cell.  The source cell gets one same-candle context re-evaluation.
+            _FUTURES_IMPULSE_PRIORITY_QUEUE[:] = [
+                row for row in _FUTURES_IMPULSE_PRIORITY_QUEUE
+                if not (isinstance(row, dict) and row.get('symbol') == target and row.get('timeframe') == '30m')
+            ]
+            _FUTURES_IMPULSE_PRIORITY_QUEUE.append({
+                'symbol': target,
+                'timeframe': '30m',
+                'created_at': now_ts,
+                'event_id': event_id,
+                'source_symbol': source_symbol,
+                'source_timeframe': '1h',
+                'direction': direction,
+                'strength': strength,
+                'rank': rank,
+                'force_same_candle_once': bool(target == source_symbol),
+                'selected_at': 0.0,
+                'attempts': 0,
+            })
+        _FUTURES_IMPULSE_PRIORITY_QUEUE.sort(key=lambda row: (int(row.get('rank') or 99), float(row.get('created_at') or now_ts)))
         if len(_FUTURES_IMPULSE_PRIORITY_QUEUE) > _FUTURES_IMPULSE_PRIORITY_MAX:
-            del _FUTURES_IMPULSE_PRIORITY_QUEUE[:-_FUTURES_IMPULSE_PRIORITY_MAX]
+            del _FUTURES_IMPULSE_PRIORITY_QUEUE[_FUTURES_IMPULSE_PRIORITY_MAX:]
+
     result['commit30_directional_impulse'] = dict(impulse)
     result['commit30_impulse_priority_targets'] = list(targets)
+    result['commit30_1_event_id'] = event_id
     print(
-        f"⚡ [C30 IMPULSE] {symbol} {timeframe} {impulse.get('direction')} "
-        f"→ prioridad 30m {','.join(targets)}; no publica por sí solo"
+        f"⚡ [C30.1 IMPULSE] {source_symbol} 1h {direction} "
+        f"→ prioridad 30m {','.join(targets)}; contexto persistente, sin auto-publicación"
     )
     return impulse
+
+
+def _commit30_1_has_priority_work(now_ts=None):
+    now_ts = float(now_ts or time.time())
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        for row in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+            if not isinstance(row, dict):
+                continue
+            if (now_ts - float(row.get('created_at') or now_ts)) > _FUTURES_IMPULSE_TTL_SECONDS:
+                continue
+            selected_at = float(row.get('selected_at') or 0.0)
+            if selected_at and (now_ts - selected_at) <= _FUTURES_IMPULSE_SELECTION_TIMEOUT_SECONDS:
+                continue
+            return True
+    return False
+
+
+def _commit30_1_select_priority(now_ts=None):
+    """Select but do not remove. Ack occurs only after a successful heavy pass."""
+    now_ts = float(now_ts or time.time())
+    chosen = None
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        kept = []
+        for row in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+            if not isinstance(row, dict):
+                continue
+            if (now_ts - float(row.get('created_at') or now_ts)) > _FUTURES_IMPULSE_TTL_SECONDS:
+                continue
+            selected_at = float(row.get('selected_at') or 0.0)
+            if selected_at and (now_ts - selected_at) > _FUTURES_IMPULSE_SELECTION_TIMEOUT_SECONDS:
+                row['selected_at'] = 0.0
+            kept.append(row)
+        _FUTURES_IMPULSE_PRIORITY_QUEUE[:] = kept
+
+        for row in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+            if float(row.get('selected_at') or 0.0) > 0:
+                continue
+            sym, tf = str(row.get('symbol')), str(row.get('timeframe') or '30m')
+            force_once = bool(row.get('force_same_candle_once'))
+            due = force_once or _futures_combo_due_for_closed_candle(sym, tf, now_ts=now_ts)
+            if not due:
+                continue
+            row['selected_at'] = now_ts
+            row['attempts'] = int(row.get('attempts') or 0) + 1
+            chosen = dict(row)
+            _FUTURES_ACTIVE_IMPULSE_CONTEXT[(sym, tf)] = dict(row)
+            break
+    return chosen
+
+
+def _commit30_1_release_priority_attempt(symbol, timeframe):
+    cell = (str(symbol), str(timeframe))
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        for row in _FUTURES_IMPULSE_PRIORITY_QUEUE:
+            if isinstance(row, dict) and (str(row.get('symbol')), str(row.get('timeframe'))) == cell:
+                row['selected_at'] = 0.0
+        _FUTURES_ACTIVE_IMPULSE_CONTEXT.pop(cell, None)
+
+
+def _commit30_1_ack_priority(symbol, timeframe):
+    cell = (str(symbol), str(timeframe))
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        _FUTURES_IMPULSE_PRIORITY_QUEUE[:] = [
+            row for row in _FUTURES_IMPULSE_PRIORITY_QUEUE
+            if not (isinstance(row, dict) and (str(row.get('symbol')), str(row.get('timeframe'))) == cell)
+        ]
+        _FUTURES_ACTIVE_IMPULSE_CONTEXT.pop(cell, None)
+
+
+def _commit30_1_active_impulse_context(symbol, timeframe):
+    with _FUTURES_IMPULSE_PRIORITY_LOCK:
+        row = _FUTURES_ACTIVE_IMPULSE_CONTEXT.get((str(symbol), str(timeframe)))
+        return dict(row) if isinstance(row, dict) else {}
+
+def _commit30_1_is_priority_owner(owner):
+    """True only for the actively selected persisted impulse cell.
+
+    This is intentionally narrow: it bypasses only UI/background cooldowns. It
+    does not bypass RSS preflight, in-job memory guards, or the global heavy lock.
+    """
+    text = str(owner or '')
+    prefix = 'futures-incremental:'
+    if not text.startswith(prefix):
+        return False
+    payload = text[len(prefix):]
+    try:
+        symbol, timeframe = payload.rsplit(':', 1)
+    except ValueError:
+        return False
+    ctx = _commit30_1_active_impulse_context(symbol, timeframe)
+    return bool(ctx and ctx.get('event_id'))
+
 _FUTURES_INCREMENTAL_INTERVAL_SECONDS = max(10, int(os.environ.get('FUTURES_INCREMENTAL_INTERVAL_SECONDS', '30') or 30))
 _FUTURES_INCREMENTAL_START_DELAY_SECONDS = max(60, int(os.environ.get('FUTURES_INCREMENTAL_START_DELAY_SECONDS', '180') or 180))
 if _LOW_MEMORY_MODE:
@@ -41709,39 +41934,13 @@ def _next_futures_incremental_combo():
         FUTURES_RESEARCH_ENABLED,
         futures_timeframe_allowed,
     )
-    # Commit 30: a detected 1h impulse reorders the NORMAL 30m scan. We do
-    # not force a second analysis of an unchanged candle and do not bypass the
-    # 30m Champion contract.
-    _now_impulse = time.time()
-    _chosen_impulse = None
-    _keep_impulse = []
-    with _FUTURES_IMPULSE_PRIORITY_LOCK:
-        _queued = list(_FUTURES_IMPULSE_PRIORITY_QUEUE)
-        _FUTURES_IMPULSE_PRIORITY_QUEUE.clear()
-    for _item in _queued:
-        try:
-            _sym, _tf = _item[0], _item[1]
-            _created = float(_item[2]) if len(_item) >= 3 else _now_impulse
-        except Exception:
-            continue
-        # Context should be fresh enough to inform the next one or two 30m closes.
-        if (_now_impulse - _created) > 5400.0:
-            continue
-        if _chosen_impulse is None and _futures_combo_due_for_closed_candle(_sym, _tf, now_ts=_now_impulse):
-            _chosen_impulse = (_sym, _tf)
-        else:
-            _keep_impulse.append((_sym, _tf, _created))
-    with _FUTURES_IMPULSE_PRIORITY_LOCK:
-        # Preserve cells that are not due yet and the remaining due cells; only
-        # one heavy analysis is consumed per scheduler cycle. This is essential
-        # under the Render 512 MB single-heavy-slot policy.
-        for _item in _keep_impulse:
-            if _item not in _FUTURES_IMPULSE_PRIORITY_QUEUE:
-                _FUTURES_IMPULSE_PRIORITY_QUEUE.append(_item)
-        if len(_FUTURES_IMPULSE_PRIORITY_QUEUE) > _FUTURES_IMPULSE_PRIORITY_MAX:
-            del _FUTURES_IMPULSE_PRIORITY_QUEUE[:-_FUTURES_IMPULSE_PRIORITY_MAX]
-    if _chosen_impulse is not None:
-        return _chosen_impulse
+    # COMMIT 30.1: event-priority selection is durable. The record stays in
+    # queue until a successful heavy analysis ACKs it. Same-symbol 30m may be
+    # recalculated once on the same closed candle because the 1h setup context
+    # has changed; cross-symbol cells wait for their normal next closed candle.
+    _chosen_impulse = _commit30_1_select_priority(time.time())
+    if isinstance(_chosen_impulse, dict):
+        return (str(_chosen_impulse.get('symbol')), str(_chosen_impulse.get('timeframe') or '30m'))
 
     # Production universe keeps all six TF. Commit 15 adds only six research
     # combinations (LINK/BNB × 30m/1h), bounded for the V1 active universe.
@@ -41821,7 +42020,12 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
     """
     global _futures_analysis_cache
 
-    if _futures_interactive_priority_active():
+    # COMMIT 30.1: a queued directional-impulse fast lane must not be
+    # starved by the *cooldown flag* created by normal UI navigation. Actual
+    # concurrent heavy work is still impossible because the shared heavy lock
+    # below remains authoritative. Memory backoff is NEVER bypassed.
+    _c30_1_priority_pending = _commit30_1_has_priority_work()
+    if _futures_interactive_priority_active() and not _c30_1_priority_pending:
         return False
     if _free_runtime_background_backoff_active():
         return False
@@ -41857,6 +42061,7 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
                 timeout=0,
             )
             if not heavy_acquired:
+                _commit30_1_release_priority_attempt(symbol, timeframe)
                 return
             _log_memory_runtime(f'futures-incremental:{symbol}:{timeframe}:before')
             data = _analyze_futures_all_parallel(
@@ -41864,12 +42069,16 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
             )
             if not data.get('memory_guard_abort'):
                 cache['ts'] = time.time()
+                _commit30_1_ack_priority(symbol, timeframe)
                 try:
                     _save_futures_cache_to_disk()
                 except Exception as save_err:
                     print(f'⚠️ [FUT INC] Snapshot save falló: {save_err}')
+            else:
+                _commit30_1_release_priority_attempt(symbol, timeframe)
             _log_memory_runtime(f'futures-incremental:{symbol}:{timeframe}:after')
         except Exception as exc:
+            _commit30_1_release_priority_attempt(symbol, timeframe)
             print(f'❌ [FUT INC] {symbol} {timeframe}: {exc}')
         finally:
             if heavy_acquired:

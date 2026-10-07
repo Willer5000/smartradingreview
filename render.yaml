@@ -1,10 +1,10 @@
-# COMMIT 30 — Proposal 3 directional-impulse recovery; one worker / two gthreads.
+# COMMIT 30.1 — Proposal 3 fast-lane bridge repair; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit30_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
+    startCommand: gunicorn commit30_1_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -57,6 +57,8 @@ services:
       - key: COMMIT27_UNIFIED_AUTHORITY_ENABLED
         value: "1"
       - key: COMMIT30_PROPOSAL3_ENABLED
+        value: "1"
+      - key: COMMIT30_1_FAST_LANE_BRIDGE_ENABLED
         value: "1"
       - key: MEMORY_IN_JOB_ABORT_MB
         value: "315"

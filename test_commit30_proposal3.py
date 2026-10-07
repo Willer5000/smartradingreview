@@ -79,14 +79,14 @@ def test_no_direct_1h_champion_is_invented():
 def test_commit30_routes_impulse_only_to_existing_validated_30m_lane():
     text=Path(__file__).with_name('app.py').read_text(encoding='utf-8')
     assert '_commit30_enqueue_impulse_priority' in text
-    assert "(target, '30m', _now)" in text
-    assert 'no publica por sí solo' in text
+    assert "'force_same_candle_once': bool(target == source_symbol)" in text
+    assert 'CONTEXT ONLY' in text or 'no auto-publicación' in text
 
 
-def test_deploy_files_target_commit30():
+def test_deploy_files_target_commit30_1():
     root=Path(__file__).resolve().parent
-    assert 'commit30_main_entrypoint:app' in (root/'Procfile').read_text(encoding='utf-8')
-    assert 'commit30_main_entrypoint:app' in (root/'render.yaml').read_text(encoding='utf-8')
+    assert 'commit30_1_main_entrypoint:app' in (root/'Procfile').read_text(encoding='utf-8')
+    assert 'commit30_1_main_entrypoint:app' in (root/'render.yaml').read_text(encoding='utf-8')
 
 
 def test_hard_safety_contract_unchanged():
@@ -113,11 +113,12 @@ def test_technical_and_multiframe_specialists_are_impulse_aware():
     assert 'IMPULSO_MTF_BEARISH' in text and 'IMPULSO_MTF_BULLISH' in text
 
 
-def test_impulse_priority_queue_preserves_not_due_cells():
+def test_impulse_priority_queue_is_durable_until_ack():
     text=Path(__file__).with_name('app.py').read_text(encoding='utf-8')
-    assert '_keep_impulse.append((_sym, _tf, _created))' in text
-    assert '5400.0' in text
-    assert '_chosen_impulse' in text
+    assert '_FUTURES_IMPULSE_TTL_SECONDS = 5400.0' in text
+    assert '_commit30_1_ack_priority' in text
+    assert '_commit30_1_release_priority_attempt' in text
+    assert 'selected_at' in text
 
 def test_observed_btc_1h_impulse_survives_when_mtf_context_is_temporarily_unavailable():
     # Exact causal class observed in production: the independent thesis arrived

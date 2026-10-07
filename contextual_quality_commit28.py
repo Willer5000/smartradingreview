@@ -92,7 +92,9 @@ def _route_block(result: Mapping[str, Any]) -> Dict[str, Any]:
         levels.get("commit19_champion"),
         levels.get("validated_strategy_route"),
         operational.get("commit19_champion"),
+        operational.get("validated_strategy_route"),
         result.get("commit19_champion"),
+        result.get("validated_strategy_route"),
     )
     for row in candidates:
         if isinstance(row, Mapping) and row:
@@ -396,10 +398,12 @@ def evaluate_publication(
 
     route_live = _route_is_live(route)
     if not route_live:
-        shadow_reasons.append("NO_VALIDATED_LIVE_ROUTE")
         _route_reason = str(route.get("live_context_reason") or route.get("reason") or "").strip().upper()
-        if _route_reason and _route_reason != "NO_VALIDATED_LIVE_ROUTE":
+        # Prefer the exact router reason over the generic umbrella.  This is
+        # auditability only; it does not relax authority.
+        if _route_reason and _route_reason not in {"NO_VALIDATED_LIVE_ROUTE", "NO_POSITIVE_IS_OOS_CHAMPION_FOR_EXACT_CELL"}:
             shadow_reasons.append(f"ROUTE_CONTEXT:{_route_reason}"[:180])
+        shadow_reasons.append("NO_VALIDATED_LIVE_ROUTE")
 
     profile_ok, profile_reason = _profile_essential_ok(profile, rid)
     if not profile_ok:
