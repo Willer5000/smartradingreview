@@ -10324,103 +10324,15 @@ class TradingExpertSystem:
     # Ubicación: Reemplazar entre línea ~1250 y línea ~1320 aproximadamente
         
     def detect_market_regime(self, trend, momentum, volatility, structure):
-        """
-        Detector de RÉGIMEN DE MERCADO — devuelve uno de 4 regímenes clásicos.
-        
-        El régimen se usa por el Moderador para ajustar pesos de los traders:
-        un TraderBallenas debe pesar más en BREAKOUT que en RANGING; un
-        TraderTecnico debe pesar más en TRENDING que en RANGING; etc.
-        
-        Regímenes:
-          - 'TRENDING_BULL':  ADX > 25, DMI +DI dominante, EMAs alineadas alcistas
-          - 'TRENDING_BEAR':  ADX > 25, DMI -DI dominante, EMAs alineadas bajistas
-          - 'RANGING':        ADX < 20, BB width baja, oscilación en rango
-          - 'HIGH_VOLATILITY': ATR% > 4%, volumen elevado, movimiento errático
-        
-        Retorna:
-          {'regime': str, 'confidence': float, 'reasoning': [str, ...]}
-        """
+        """Commit 29: causal regime classifier. Strong conflicted ADX is TRANSITIONAL, never mislabeled RANGING."""
         try:
-            adx = float((trend or {}).get('adx', 0) or 0)
-            plus_di = float((trend or {}).get('plus_di', 0) or 0)
-            minus_di = float((trend or {}).get('minus_di', 0) or 0)
-            direction = (trend or {}).get('direction', 'neutral')
-            
-            atr_pct = float((volatility or {}).get('atr_pct', 0) or 0)
-            
-            # BB width pertenece a la capa de volatilidad, no a momentum.
-            bb_width = float((volatility or {}).get('bb_width', 0) or 0)
-            volatility_percentile = float(
-                (volatility or {}).get('volatility_percentile', 50) or 50
-            )
-            volatility_ratio = float(
-                (volatility or {}).get('volatility_ratio', 1) or 1
-            )
-            
-            reasoning = []
-            regime = 'RANGING'  # default conservador
-            confidence = 50.0
-            
-            # ============ HIGH VOLATILITY (prioridad — mercado errático) ============
-            if (
-                volatility_percentile >= 93
-                and volatility_ratio >= 1.5
-            ) or atr_pct > 8.0:
-                regime = 'HIGH_VOLATILITY'
-                confidence = min(
-                    90.0,
-                    55 + max(0, volatility_percentile - 90) * 2
-                )
-                reasoning.append(
-                    f'Volatilidad en percentil {volatility_percentile:.1f} '
-                    f'y {volatility_ratio:.2f}x su ATR normal'
-                )
-                return {'regime': regime, 'confidence': round(confidence, 1),
-                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
-            
-            # ============ TRENDING (ADX fuerte + DMI dominante) ============
-            if adx > 25 and abs(plus_di - minus_di) > 8:
-                if plus_di > minus_di and direction == 'bullish':
-                    regime = 'TRENDING_BULL'
-                    confidence = min(90.0, 60 + (adx - 25) * 1.5)
-                    reasoning.append(f'ADX {adx:.1f} > 25 con +DI {plus_di:.1f} > -DI {minus_di:.1f}')
-                    reasoning.append(f'Direction confirmada: {direction}')
-                elif minus_di > plus_di and direction == 'bearish':
-                    regime = 'TRENDING_BEAR'
-                    confidence = min(90.0, 60 + (adx - 25) * 1.5)
-                    reasoning.append(f'ADX {adx:.1f} > 25 con -DI {minus_di:.1f} > +DI {plus_di:.1f}')
-                    reasoning.append(f'Direction confirmada: {direction}')
-                else:
-                    # ADX alto pero DMI y direction no coinciden → indeterminado
-                    regime = 'HIGH_VOLATILITY'
-                    confidence = 60.0
-                    reasoning.append(f'ADX fuerte pero DMI/direction inconsistentes')
-                return {'regime': regime, 'confidence': round(confidence, 1),
-                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
-            
-            # ============ RANGING (ADX débil o BB estrecho) ============
-            if adx < 20:
-                regime = 'RANGING'
-                confidence = min(85.0, 60 + (20 - adx) * 1.5)
-                reasoning.append(f'ADX {adx:.1f} < 20 (sin tendencia)')
-                if bb_width > 0 and bb_width < 3.0:
-                    confidence = min(90.0, confidence + 10)
-                    reasoning.append(f'BB width {bb_width:.2f}% (contracción)')
-                return {'regime': regime, 'confidence': round(confidence, 1),
-                        'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
-            
-            # ============ ZONA GRIS (ADX 20-25) → RANGING por defecto ============
-            regime = 'RANGING'
-            confidence = 50.0
-            reasoning.append(f'ADX {adx:.1f} en zona gris (20-25); asumiendo RANGING')
-            return {'regime': regime, 'confidence': round(confidence, 1),
-                    'reasoning': reasoning, 'adx': adx, 'atr_pct': atr_pct}
-        
+            from commit29_core import classify_market_regime
+            return classify_market_regime(trend, volatility)
         except Exception as e:
-            print(f"⚠️ Error detectando régimen: {e}")
-            return {'regime': 'RANGING', 'confidence': 30.0,
-                    'reasoning': ['Fallback por error'], 'adx': 0, 'atr_pct': 0}
-    
+            print(f"⚠️ Error detectando régimen Commit29: {e}")
+            return {'regime': 'TRANSITIONAL', 'confidence': 30.0,
+                    'reasoning': ['Fallback por error; sin asumir rango'], 'adx': 0, 'atr_pct': 0}
+
     def analyze_price_structure_layer(self, df, timeframe='1D', symbol=None):  # <--- CAMBIO: Añadir parámetro timeframe con valor por defecto
         """Capa 5: Análisis de Precio y Estructura - VERSIÓN COMPLETA con FVGs y OB"""
         try:
@@ -11265,9 +11177,22 @@ class TradingExpertSystem:
             print(f"   BTC: acción={btc_action} (conf {btc_confidence:.0f}%), tendencia={btc_trend}, ADX={btc_adx:.1f}")
             print(f"   RATIO: acción={ratio_action} (conf {ratio_confidence:.0f}%), tendencia={ratio_trend}, ADX={ratio_adx:.1f}")
             print(f"   PAXG: tendencia={paxg_trend}, ADX={paxg_adx:.1f}")
+
+            # COMMIT 29 — datos faltantes se abstienen. ADX=0 por ausencia no
+            # equivale a un mercado lateral observado.
+            from commit29_core import context_available as _c29_context_available
+            btc_available = _c29_context_available(btc_analysis)
+            paxg_available = _c29_context_available(paxg_analysis)
+            ratio_available = _c29_context_available(paxg_btc_analysis)
+            context_missing = [
+                name for name, ok in (('BTC', btc_available), ('PAXG', paxg_available), ('RATIO', ratio_available))
+                if not ok
+            ]
+            if context_missing:
+                print(f"   ℹ️ [C29 CONTEXT] no disponible: {', '.join(context_missing)}; se abstiene, no se interpreta como neutral")
             
             # ============ CONDICIÓN 1: ROTACIÓN POR DECISIONES ============
-            if btc_confidence >= 60 and ratio_confidence >= 55:
+            if btc_available and ratio_available and btc_confidence >= 60 and ratio_confidence >= 55:
                 if btc_action in ['COMPRA_SPOT', 'LONG'] and ratio_action in ['VENTA_SPOT', 'SHORT']:
                     rotation_signal = 'RISK_ON'
                     correlation_score = 50
@@ -11283,7 +11208,7 @@ class TradingExpertSystem:
 
             # v24: Detectar divergencia extrema para super-peso en TraderMacro
             extreme_divergence = False
-            if btc_confidence >= 80 and ratio_confidence >= 80:
+            if btc_available and ratio_available and btc_confidence >= 80 and ratio_confidence >= 80:
                 if (btc_action in ['COMPRA_SPOT', 'LONG'] and ratio_action in ['VENTA_SPOT', 'SHORT']) or \
                    (btc_action in ['VENTA_SPOT', 'SHORT'] and ratio_action in ['COMPRA_SPOT', 'LONG']):
                     extreme_divergence = True
@@ -11291,7 +11216,7 @@ class TradingExpertSystem:
             
 
             # ============ CONDICIÓN 2: ROTACIÓN POR TENDENCIAS ============
-            if rotation_signal == 'NEUTRAL' and btc_trend_confidence >= 50 and ratio_trend_confidence >= 50:
+            if rotation_signal == 'NEUTRAL' and btc_available and ratio_available and btc_trend_confidence >= 50 and ratio_trend_confidence >= 50:
                 if btc_trend == 'bullish' and ratio_trend == 'bearish':
                     rotation_signal = 'RISK_ON'
                     correlation_score = 40
@@ -11305,7 +11230,7 @@ class TradingExpertSystem:
                     print(f"   ✅ ROTACIÓN POR TENDENCIAS: RISK_OFF")
             
             # ============ CONDICIÓN 3: CORRELACIÓN ============
-            if rotation_signal == 'NEUTRAL' and btc_trend_confidence >= 40 and ratio_trend_confidence >= 40:
+            if rotation_signal == 'NEUTRAL' and btc_available and ratio_available and btc_trend_confidence >= 40 and ratio_trend_confidence >= 40:
                 if btc_trend == 'bullish' and ratio_trend == 'bullish':
                     rotation_signal = 'POSITIVE_CORRELATION'
                     correlation_score = 30
@@ -11320,8 +11245,8 @@ class TradingExpertSystem:
             
             # ============ CONDICIÓN 4: FORTALEZA RELATIVA ============
             # v24: Filtro ADX >= 20 para evitar rotaciones falsas en mercados laterales
-            if rotation_signal == 'NEUTRAL':
-                if btc_adx >= 20 or paxg_adx >= 20:
+            if rotation_signal == 'NEUTRAL' and (btc_available or paxg_available):
+                if (btc_available and btc_adx >= 20) or (paxg_available and paxg_adx >= 20):
                     if paxg_trend == 'bullish' and btc_trend == 'bearish':
                         rotation_signal = 'PAXG_STRONGER'
                         correlation_score = 25
@@ -11336,29 +11261,31 @@ class TradingExpertSystem:
                             weight_modifier = 1.15
                         print(f"   ✅ BTC MÁS FUERTE")
                 else:
-                    print(f"   ⏸️ CONDICIÓN 4 BLOQUEADA: ADX bajo (BTC ADX={btc_adx:.1f}, PAXG ADX={paxg_adx:.1f}) — mercado lateral, sin rotación")
+                    print(f"   ⏸️ CONDICIÓN 4: contexto disponible pero ADX observado bajo (BTC={btc_adx:.1f}, PAXG={paxg_adx:.1f})")
+            elif rotation_signal == 'NEUTRAL' and not (btc_available or paxg_available):
+                print("   ℹ️ CONDICIÓN 4 omitida: BTC/PAXG context no disponible")
             
             # ============ CONDICIÓN 5: DECISIONES UNILATERALES ============
             if rotation_signal == 'NEUTRAL':
-                if btc_action in ['COMPRA_SPOT', 'LONG'] and btc_confidence >= 70:
+                if btc_available and btc_action in ['COMPRA_SPOT', 'LONG'] and btc_confidence >= 70:
                     rotation_signal = 'BTC_BULLISH'
                     correlation_score = 20
                     weight_modifier = 1.1 if current_symbol == 'BTC-USDT' else 1.0
                     print(f"   ✅ BTC ALCISTA UNILATERAL")
                 
-                elif btc_action in ['VENTA_SPOT', 'SHORT'] and btc_confidence >= 70:
+                elif btc_available and btc_action in ['VENTA_SPOT', 'SHORT'] and btc_confidence >= 70:
                     rotation_signal = 'BTC_BEARISH'
                     correlation_score = 20
                     weight_modifier = 0.9 if current_symbol == 'BTC-USDT' else 1.0
                     print(f"   ✅ BTC BAJISTA UNILATERAL")
                 
-                elif ratio_action in ['COMPRA_SPOT', 'LONG'] and ratio_confidence >= 70:
+                elif ratio_available and ratio_action in ['COMPRA_SPOT', 'LONG'] and ratio_confidence >= 70:
                     rotation_signal = 'RATIO_BULLISH'
                     correlation_score = 20
                     weight_modifier = 1.1 if current_symbol == 'PAXG-BTC' else 1.0
                     print(f"   ✅ RATIO ALCISTA UNILATERAL")
                 
-                elif ratio_action in ['VENTA_SPOT', 'SHORT'] and ratio_confidence >= 70:
+                elif ratio_available and ratio_action in ['VENTA_SPOT', 'SHORT'] and ratio_confidence >= 70:
                     rotation_signal = 'RATIO_BEARISH'
                     correlation_score = 20
                     weight_modifier = 0.9 if current_symbol == 'PAXG-BTC' else 1.0
@@ -11434,6 +11361,10 @@ class TradingExpertSystem:
                 'extreme_divergence': extreme_divergence,
                 'symbol_recommendation': symbol_recommendation,
                 'symbol_score': symbol_score,
+                'context_availability': {
+                    'btc': bool(btc_available), 'paxg': bool(paxg_available), 'ratio': bool(ratio_available),
+                    'missing': context_missing, 'missing_is_neutral_evidence': False,
+                },
                 'btc_analysis': {
                     'decision': {'action': btc_action, 'confidence': btc_confidence},
                     'trend': {
@@ -20939,6 +20870,18 @@ class TradingExpertSystem:
             
             print(f"📊 Calculando capa de estructura...")
             structure = self.analyze_price_structure_layer(df, timeframe, symbol)
+
+            # COMMIT 29 — intra-job peak guard. The pre-start RSS guard cannot
+            # see temporary NumPy/Pandas/structure allocations. Abort this cell
+            # before heatmap/traders if the process is already near the cgroup cliff.
+            if _LOW_MEMORY_MODE:
+                _rss_mid = _process_rss_mb()
+                _peak_abort = float(os.environ.get('MEMORY_IN_JOB_ABORT_MB', '315') or 315)
+                if _rss_mid is not None and float(_rss_mid) >= _peak_abort:
+                    _shed_recreatable_memory(reason=f'{symbol}:{timeframe}:mid-analysis', aggressive=True)
+                    _rss_mid = _process_rss_mb()
+                    if _rss_mid is not None and float(_rss_mid) >= _peak_abort:
+                        raise RuntimeError(f'RESOURCE_PRESSURE_ABORT:{_rss_mid:.1f}MB')
             
             # ============ AÑADIR INFORMACIÓN ADICIONAL A STRUCTURE ============
             if structure and isinstance(structure, dict):
@@ -20982,6 +20925,30 @@ class TradingExpertSystem:
                 print(f"   🔍 Heatmap {timeframe} existente para {symbol}")
             
             heatmap = self.liquidation_heatmaps[timeframe][symbol]
+
+            # COMMIT 29 — los heatmaps OHLCV son reconstruibles. En Render 512 MB
+            # no retenemos las 60+ combinaciones para siempre. Limitar el set
+            # residente evita que cada round-robin eleve el baseline RSS.
+            if _LOW_MEMORY_MODE:
+                try:
+                    _heatmap_cells = [
+                        (tf0, sym0)
+                        for tf0, bucket in self.liquidation_heatmaps.items()
+                        if isinstance(bucket, dict)
+                        for sym0 in list(bucket.keys())
+                    ]
+                    _heatmap_keep = max(4, int(os.environ.get('LIQUIDATION_HEATMAP_MAX_RESIDENT', '8') or 8))
+                    while len(_heatmap_cells) > _heatmap_keep:
+                        _tf_old, _sym_old = _heatmap_cells.pop(0)
+                        if (_tf_old, _sym_old) == (timeframe, symbol):
+                            _heatmap_cells.append((_tf_old, _sym_old))
+                            continue
+                        try:
+                            self.liquidation_heatmaps[_tf_old].pop(_sym_old, None)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
             
             # ============ OBTENER DATOS DE LA VELA ACTUAL ============
             current_idx = len(df) - 1
@@ -21042,7 +21009,8 @@ class TradingExpertSystem:
             else:
                 print(f"   ⚠️ btc_analysis no válido, creando por defecto")
                 btc_analysis = {
-                    'success': True,
+                    'success': False,
+                    'context_available': False,
                     'symbol': 'BTC-USDT',
                     'timeframe': timeframe,
                     'decision': {'action': 'NO_OPERAR', 'confidence': 0},
@@ -21062,7 +21030,8 @@ class TradingExpertSystem:
             else:
                 print(f"   ⚠️ paxg_analysis no válido, creando por defecto")
                 paxg_analysis = {
-                    'success': True,
+                    'success': False,
+                    'context_available': False,
                     'symbol': 'PAXG-USDT',
                     'timeframe': timeframe,
                     'decision': {'action': 'NO_OPERAR', 'confidence': 0},
@@ -21082,7 +21051,8 @@ class TradingExpertSystem:
             else:
                 print(f"   ⚠️ ratio_analysis no válido, creando por defecto")
                 paxg_btc_analysis = {
-                    'success': True,
+                    'success': False,
+                    'context_available': False,
                     'symbol': 'PAXG-BTC',
                     'timeframe': timeframe,
                     'decision': {'action': 'NO_OPERAR', 'confidence': 0},
@@ -29343,6 +29313,14 @@ class Moderador:
             'Cazador de Ballenas': 0.7, 'Chartista': 0.8, 'Smart Money': 0.9,
             'Técnico Puro': 0.9, 'Multiframe': 0.9, 'Pullback': 0.8,
         },
+        'TRANSITIONAL': {
+            # No side is presumed. Timing/structure specialists get a small
+            # role while direction remains owned by the governed thesis.
+            'Pullback': 1.10, 'Smart Money': 1.10, 'Escéptico': 1.10,
+            'Técnico Puro': 1.00, 'Chartista': 1.00, 'Multiframe': 1.00,
+            'Cazador de Ballenas': 0.90, 'Macroeconomista': 1.00,
+            'El Liquidador': 1.05, 'Trader de Revisión': 1.00,
+        },
     }
     
     def _get_regime_multiplier(self, trader_name, regime):
@@ -30181,6 +30159,36 @@ def health():
 # === CORRECCIÓN: app.py - Manejo de errores en rutas API ===
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
+@app.route('/api/runtime/version')
+def api_runtime_version_commit29():
+    """Deployment truth without secrets; lets one verify the actual live release."""
+    import hashlib
+    def _sha(path):
+        try:
+            h=hashlib.sha256()
+            with open(path,'rb') as fh:
+                for chunk in iter(lambda: fh.read(1024*1024), b''):
+                    h.update(chunk)
+            return h.hexdigest()[:16]
+        except Exception:
+            return None
+    return jsonify({
+        'version': 'COMMIT29_SYSTEM_RECOVERY_V1',
+        'entrypoint': 'commit29_main_entrypoint:app',
+        'app_sha256_16': _sha(__file__),
+        'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
+        'memory': _memory_runtime_state(),
+        'contracts': {
+            'missing_context_is_neutral': False,
+            'transitional_regime': True,
+            'fallback_can_publish': False,
+            'parallel_q_authority': False,
+            'safety_floor': 75,
+            'rr_range': [1.8, 3.5],
+        },
+    }), 200
+
+
 @app.route('/api/futures/visuals')
 def api_futures_visuals():
     """Commit 21.1 — lightweight visual payload, no trader analysis.
@@ -30213,6 +30221,17 @@ def api_futures_visuals():
         if isinstance(cached, dict) and isinstance(cached.get('df'), dict) and cached['df'].get('time'):
             df = cached['df']
         else:
+            # COMMIT 29 — UI never competes with heavy analysis near memory
+            # pressure. Preserve the last chart in the browser and retry later.
+            _visual_rss = _process_rss_mb()
+            with _HEAVY_ANALYSIS_STATE_LOCK:
+                _visual_heavy = _HEAVY_ANALYSIS_OWNER
+            if _LOW_MEMORY_MODE and (_visual_heavy or (_visual_rss is not None and _visual_rss >= 210.0)):
+                return jsonify({
+                    'success': True, 'deferred': True, 'source': 'COMMIT29_CACHE_ONLY_PRESSURE',
+                    'symbol': symbol, 'timeframe': timeframe, 'market': market,
+                    'reason': 'HEAVY_OR_MEMORY_PRESSURE', 'rss_mb': _visual_rss,
+                }), 200
             if market == 'futures':
                 engine = _get_futures_system()
                 df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
@@ -31677,8 +31696,11 @@ def _release_heavy_analysis(owner):
     if rss is not None and rss >= _MEMORY_SOFT_LIMIT_MB:
         _shed_recreatable_memory(
             reason=f'{owner}:release',
-            aggressive=rss >= _MEMORY_HARD_LIMIT_MB,
+            aggressive=True if _LOW_MEMORY_MODE else rss >= _MEMORY_HARD_LIMIT_MB,
         )
+        rss = _process_rss_mb()
+        if _LOW_MEMORY_MODE and _background_heavy_owner(owner) and rss is not None and rss >= 250.0:
+            _free_runtime_note_background_backoff(owner, reason=f'POST_JOB_RSS_{rss:.1f}MB', seconds=300.0)
 
     with _HEAVY_ANALYSIS_STATE_LOCK:
         _HEAVY_ANALYSIS_OWNER = None
@@ -41573,9 +41595,23 @@ def _next_futures_incremental_combo():
     if not combos:
         return None
 
-    # 17.5.10 — selected historical priors are SHADOW-only until an
-    # independent forward/OOS cohort validates them. LIVE coverage keeps the
-    # natural governed-universe round-robin and is not reordered by old winners.
+    # COMMIT 29 — detection priority follows LIVE statistical authority,
+    # not an arbitrary symbol order. This does not create signals, skip Safety
+    # or add work: it merely evaluates already-validated cells first when a new
+    # closed candle is due, reducing latency under the one-heavy-slot budget.
+    try:
+        from champion_registry_commit19 import route_registry as _c29_route_registry
+        _priority_cells = set()
+        _tf_map = {'30M':'30m','1H':'1h','2H':'2h','4H':'4h','12H':'12h','1D':'1D'}
+        for _spec in (_c29_route_registry() or {}).values():
+            if str((_spec or {}).get('market') or '').upper() != 'FUTURES':
+                continue
+            _tfp = _tf_map.get(str((_spec or {}).get('timeframe') or '').upper(), str((_spec or {}).get('timeframe') or ''))
+            for _symp in (_spec or {}).get('symbols') or []:
+                _priority_cells.add((str(_symp), str(_tfp)))
+        combos = [c for c in combos if c in _priority_cells] + [c for c in combos if c not in _priority_cells]
+    except Exception:
+        _priority_cells = set()
 
     # COMMIT 24.5R — coverage proportional to market update rate.
     # A 30m cell becomes eligible four times as often as a slow 12h/1D
@@ -47776,9 +47812,13 @@ def verificar_y_ejecutar():
             # Ejecuta: evaluar pendientes + detectar oportunidades perdidas + recalcular stats
             # Q6-D: recover the most recent daily slot after sleep/restart.
             # DB primary key prevents duplicate jobs across process restarts.
-            if minuto % 15 == 0:
-                threading.Thread(target=_q6_run_daily_review,
-                                 daemon=True, name='q6-daily-review').start()
+            if minuto == 7:
+                _q6_rss = _process_rss_mb()
+                if _q6_rss is None or _q6_rss < 190.0:
+                    threading.Thread(target=_q6_run_daily_review,
+                                     daemon=True, name='q6-daily-review').start()
+                else:
+                    print(f"⏸️ [C29 Q6] review diferido por RSS {_q6_rss:.1f}MB")
             
             # Heartbeat cada 5 minutos
             if minuto % 5 == 0 and ahora.second < 10:
@@ -54082,12 +54122,16 @@ def _schedule_deferred_runtime_bootstrap():
     global _RUNTIME_BOOTSTRAP_STARTED
     if os.environ.get('DISABLE_SCHEDULER') and os.environ.get('DISABLE_WARMUP'):
         return
-    # Scientist is cheap and must remain observable even if snapshot restoration
-    # or another daemon later fails during the bulk bootstrap.
-    try:
-        _ensure_ai_learning_scientist_thread()
-    except Exception as _scientist_start_error:
-        _ai_learning_runtime_update(status='START_ERROR', last_error=str(_scientist_start_error)[:180])
+    # COMMIT 29 — on the 512 MB plan do not keep a permanent Scientist
+    # watchdog thread. The existing idempotent Q6 coordination can still run
+    # the same Scientist in bounded slots, preserving learning and token limits.
+    if not str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() in ('1','true','yes','on'):
+        try:
+            _ensure_ai_learning_scientist_thread()
+        except Exception as _scientist_start_error:
+            _ai_learning_runtime_update(status='START_ERROR', last_error=str(_scientist_start_error)[:180])
+    else:
+        _ai_learning_runtime_update(status='FREE_PLAN_NO_PERMANENT_WATCHDOG')
     with _RUNTIME_BOOTSTRAP_LOCK:
         if _RUNTIME_BOOTSTRAP_STARTED:
             return
@@ -56868,20 +56912,21 @@ def _start_background_threads():
             "⚠️ Error iniciando Guardian Telegram: "
             f"{e}"
         )    
-    # 5. Macro Context — noticias/calendario gratuitos + Telegram.
-    try:
-        t_macro = threading.Thread(
-            target=macro_context_alert_loop,
-            name='macro-context',
-            daemon=True
-        )
-        t_macro.start()
-        print(
-            "✅ Thread macro-context iniciado "
-            f"(cada {_MACRO_ALERT_LOOP_INTERVAL}s)"
-        )
-    except Exception as e:
-        print(f"⚠️ Error iniciando macro-context: {e}")
+    # 5. Macro Context. On Render Free it stays cache/on-demand and is
+    # refreshed by existing analysis paths; no permanent daemon is necessary.
+    if str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() in ('1','true','yes','on'):
+        print("🪶 [C29] macro-context sin daemon permanente en Free; contexto cache/on-demand")
+    else:
+        try:
+            t_macro = threading.Thread(
+                target=macro_context_alert_loop,
+                name='macro-context',
+                daemon=True
+            )
+            t_macro.start()
+            print("✅ Thread macro-context iniciado")
+        except Exception as e:
+            print(f"⚠️ Error iniciando macro-context: {e}")
 
     # RC8.4 — notifier Futures normal. Sólo publica setups que ya pasaron
     # el Publication Gate; no comparte preferencias con scalping.

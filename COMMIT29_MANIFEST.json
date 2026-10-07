@@ -1,0 +1,69 @@
+{
+  "release": "COMMIT29_SYSTEM_RECOVERY_V1",
+  "files": {
+    "AUDITORIA_COMMIT29_SYSTEM_RECOVERY.md": {
+      "bytes": 4523,
+      "sha256": "4273bb40975bd0fd594ba3475852fb905f02f009e50fbdf5fbbc6fe80bbfe1ef"
+    },
+    "BACKTEST_COMMIT29_REGRESSION.md": {
+      "bytes": 1654,
+      "sha256": "a52a7665a2272dd8b61394b1e2249cff0429666f1d383f03a386dafa1530c029"
+    },
+    "BACKTEST_COMMIT29_RESULT.json": {
+      "bytes": 1314,
+      "sha256": "8b29b5401378454c81e4168577bc0f7360bd574659da8ba62a287d3bd3ece31e"
+    },
+    "COMMIT29_QA_REPORT.md": {
+      "bytes": 1566,
+      "sha256": "81aff677733497727990e30fb8b6b53626dc308af483c4420be5635c48cd3988"
+    },
+    "COMMIT29_ROLLBACK.md": {
+      "bytes": 383,
+      "sha256": "72c378b8235430f066fb2c3a7f46bbc068706e6abd9bfb92c931cfa2a3da36f9"
+    },
+    "IMPLEMENTACION_COMMIT29.md": {
+      "bytes": 1878,
+      "sha256": "1410c9eb911ae6b5ab837e154f54112f23226894fb4a6a8f60d95195d1101c8e"
+    },
+    "Procfile": {
+      "bytes": 169,
+      "sha256": "6d95b03f7fc33bd3ad3042d89ea8b2a3478cc772c8d6bec6988185e1d506e2ed"
+    },
+    "app.py": {
+      "bytes": 2430141,
+      "sha256": "715795bb5c219a537cfe2233dbe1b13795e329e370f065292e104a57ca78a272"
+    },
+    "commit28_core.py": {
+      "bytes": 2030,
+      "sha256": "5568b900c052afd10e9930f3cfe8ab0746e4cd662208ff7d5e5320bf92221a02"
+    },
+    "commit29_core.py": {
+      "bytes": 4387,
+      "sha256": "1a4e895f4cdf000af0ff999b2594ba9057269c0cf0c2009e78fc9d288a51830b"
+    },
+    "commit29_main_entrypoint.py": {
+      "bytes": 2830,
+      "sha256": "91e3e5b1b6095fe97aa937893188a01501de0818a08664d12ab8b80f05e3d38f"
+    },
+    "contextual_quality_commit28.py": {
+      "bytes": 21261,
+      "sha256": "662b835eb6475227ac75c9fc0d02c6b87cdc5d6f6bf63c38e2253ac3038b1736"
+    },
+    "futures_system.py": {
+      "bytes": 273400,
+      "sha256": "15bda7305c58c4cdd44c310cfcd4eeeddf71c67e8c2b3e148c71408c67da0375"
+    },
+    "render.yaml": {
+      "bytes": 4588,
+      "sha256": "978f9b255929a8b2ff5924f02c7701bfa7f6d3dbbc1e940142d52a5ce64a44b5"
+    },
+    "test_commit29_system_recovery.py": {
+      "bytes": 2217,
+      "sha256": "46d4620e16bdd959178472cacd295aa8042a449f646c15d20726ff621dec551c"
+    },
+    "worker_orchestration.py": {
+      "bytes": 15315,
+      "sha256": "f1ad7328feee67e1445afb17abf71d4e71dd5a46c9044e3e2f503e477b73de23"
+    }
+  }
+}

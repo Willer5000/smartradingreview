@@ -1,10 +1,10 @@
-# COMMIT 27 — unified contextual signal core; one worker / two gthreads.
+# COMMIT 29 — consolidated system recovery; one worker / two gthreads.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit28_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 80 --max-requests-jitter 20
+    startCommand: gunicorn commit29_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -33,17 +33,17 @@ services:
       - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
         value: "10"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "220"
+        value: "205"
       - key: MEMORY_HARD_LIMIT_MB
-        value: "300"
+        value: "285"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "1"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
-        value: "8"
+        value: "4"
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
-        value: "20"
+        value: "8"
       - key: MEMORY_JOB_START_LIMIT_MB
-        value: "200"
+        value: "190"
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: FREE_PLAN_LOCKDOWN
@@ -56,8 +56,14 @@ services:
         value: "1"
       - key: COMMIT27_UNIFIED_AUTHORITY_ENABLED
         value: "1"
+      - key: COMMIT29_SYSTEM_RECOVERY_ENABLED
+        value: "1"
+      - key: MEMORY_IN_JOB_ABORT_MB
+        value: "315"
+      - key: LIQUIDATION_HEATMAP_MAX_RESIDENT
+        value: "8"
       - key: COMMIT22_WORKER_RESTART_POLICY
-        value: "TIMEOUT_120S_MAX_REQUESTS_80"
+        value: "TIMEOUT_120S_MAX_REQUESTS_60"
       - key: STALL_EXIT_SECONDS
         value: "105"
       - key: UI_PENDING_MAX
@@ -71,7 +77,7 @@ services:
       - key: Q_CLUSTER_STD_MIN
         value: "5"
       - key: REGIME_CLASSIFIER_ENABLED
-        value: "false"
+        value: "true"
       - key: COMMIT24_STALL_EXIT_SECONDS
         value: "105"
       - key: COMMIT24_PENDING_UI_TTL_SECONDS
@@ -109,9 +115,9 @@ services:
       - key: MULTIASSET_ROUTER_CANDLES
         value: "72"
       - key: MULTIASSET_DEEP_LIMIT
-        value: "2"
+        value: "1"
       - key: MULTIASSET_AUTO_DEEP_DAILY_MAX
-        value: "12"
+        value: "6"
       - key: MULTIASSET_AI_AUTOMATIC_ENABLED
         value: "0"
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS

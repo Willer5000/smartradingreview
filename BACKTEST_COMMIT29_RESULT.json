@@ -1,0 +1,44 @@
+{
+  "version": "COMMIT29_SYSTEM_RECOVERY_V1",
+  "note": "Regression/parity evidence only; Commit29 does not reoptimize trading thresholds.",
+  "IS_DEV": {
+    "N": 11,
+    "net_r": 1.702,
+    "expectancy_r": 0.1547,
+    "profit_factor": 1.2537,
+    "max_drawdown_r": 2.236,
+    "wins": 5,
+    "losses": 6
+  },
+  "OOS_HOLDOUT": {
+    "N": 4,
+    "net_r": 3.928,
+    "expectancy_r": 0.982,
+    "profit_factor": 4.5134,
+    "max_drawdown_r": 1.118,
+    "wins": 3,
+    "losses": 1
+  },
+  "COMBINED": {
+    "N": 15,
+    "net_r": 5.63,
+    "expectancy_r": 0.3753,
+    "profit_factor": 1.7194,
+    "max_drawdown_r": 2.236,
+    "wins": 8,
+    "losses": 7
+  },
+  "validated_live_routes": [
+    "F30_SHARED_LIQ_SWEEP_MSS_POI_V1 (BTC/ETH/SOL/XRP/ADA/LINK 30m)",
+    "ETH-USDT 2H LONG RSI_TREND",
+    "SOL-USDT 2H SHORT SUPERTREND_PULLBACK",
+    "XRP-USDT 2H SHORT TREND_CONTINUATION",
+    "LINK-USDT 4H SHORT RSI_TREND",
+    "US_INDEX 1D TREND_PULLBACK_RR18"
+  ],
+  "limitations": [
+    "30m OOS has only N=4; positive observed OOS is not a guarantee of future profitability.",
+    "No clean class-specific OOS evidence in supplied artifacts supports promoting Energy/Metals/China 1h/4h to LIVE.",
+    "Commit29 prioritizes validated cells and records/serves Shadow diagnostics; it does not force a daily signal quota."
+  ]
+}
