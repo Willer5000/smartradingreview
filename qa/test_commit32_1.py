@@ -105,9 +105,9 @@ def test_multi_keeps_slightly_higher_candidate_floor():
 
 
 def test_procfile_and_render_authority():
-    assert "commit32_1_main_entrypoint:app" in (ROOT / "Procfile").read_text()
+    assert ("commit32_1_main_entrypoint:app" in (ROOT / "Procfile").read_text() or "commit32_2_main_entrypoint:app" in (ROOT / "Procfile").read_text())
     render = (ROOT / "render.yaml").read_text()
-    assert "commit32_1_main_entrypoint:app" in render
+    assert ("commit32_1_main_entrypoint:app" in render or "commit32_2_main_entrypoint:app" in render)
     assert 'key: COMMIT32_1_RECOVERY_ENABLED' in render
     assert 'key: MEMORY_JOB_START_LIMIT_MB\n        value: "240"' in render
     assert 'key: MEMORY_HARD_LIMIT_MB\n        value: "350"' in render

@@ -1,10 +1,10 @@
-# COMMIT 32.1 — recovery authority: ABI + visuals + RAM + candidate recovery.
+# COMMIT 32.2 — quality signal recovery: runtime truth + ABI + stale policy cleanup.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit32_1_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
+    startCommand: gunicorn commit32_2_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -65,6 +65,8 @@ services:
       - key: COMMIT32_SPOT_MARKET_SIGNAL_AUTHORITY
         value: "1"
       - key: COMMIT32_1_RECOVERY_ENABLED
+        value: "1"
+      - key: COMMIT32_2_RECOVERY_ENABLED
         value: "1"
       - key: COMMIT32_1_JOB_START_MB
         value: "240"

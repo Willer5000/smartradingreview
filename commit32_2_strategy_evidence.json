@@ -1,0 +1,25 @@
+{
+  "version": "COMMIT32_2_STRATEGY_EVIDENCE_V1",
+  "generated_at": null,
+  "note": "No profitability claim is bundled without a reproducible historical dataset and executed IS/OOS report.",
+  "strategies": {
+    "CRT_LIQUIDITY_RANGE_RECLAIM_V1": {
+      "verdict": "PENDING_BACKTEST_DATA",
+      "markets": ["FUTURES"],
+      "timeframes": ["15m", "30m", "1h"],
+      "costs_included": true,
+      "chronological_split": true,
+      "rules_frozen_before_oos": true,
+      "live_consecutive_losses": 0
+    },
+    "TRIPLE_RSI_MOMENTUM_TIMING_V1": {
+      "verdict": "PENDING_BACKTEST_DATA",
+      "markets": ["FUTURES"],
+      "timeframes": ["15m", "30m", "1h"],
+      "costs_included": true,
+      "chronological_split": true,
+      "rules_frozen_before_oos": true,
+      "live_consecutive_losses": 0
+    }
+  }
+}

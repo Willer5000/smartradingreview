@@ -198,8 +198,8 @@ def test_ram_checkpoint_aborts_persistent_pressure():
 def test_entrypoint_is_commit32_or_recovery_successor():
     proc = (ROOT / "Procfile").read_text(encoding="utf-8")
     render = (ROOT / "render.yaml").read_text(encoding="utf-8")
-    assert ("commit32_main_entrypoint:app" in proc or "commit32_1_main_entrypoint:app" in proc)
-    assert ("commit32_main_entrypoint:app" in render or "commit32_1_main_entrypoint:app" in render)
+    assert ("commit32_main_entrypoint:app" in proc or "commit32_1_main_entrypoint:app" in proc or "commit32_2_main_entrypoint:app" in proc)
+    assert ("commit32_main_entrypoint:app" in render or "commit32_1_main_entrypoint:app" in render or "commit32_2_main_entrypoint:app" in render)
 
 
 if __name__ == "__main__":
