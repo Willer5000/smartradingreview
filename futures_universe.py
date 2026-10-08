@@ -1,30 +1,30 @@
-"""Commit 9.6 — governed multi-risk Futures universe.
+"""Commit 33.3 — governed multi-risk Futures universe, native tempo policy.
 
-This module is intentionally small and pure.  It centralises the production
-universe and the risk-class policy without increasing the number of DataFrames
-kept in memory.  app.py applies the contract to futures_system at runtime so
-older imports remain backwards compatible.
+This is the current production universe with the Commit32 execution-tempo
+research folded into the core configuration instead of installed by a runtime
+monkeypatch.  It changes reaction/expiry tempo only; it does NOT change
+Entry/SL/TP calculation, specialised Safety, RR, leverage authority, OOS or
+Guardian logic.
+
+Minimum operational timeframe remains 30m.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
-VERSION = "COMMIT9_6_MULTI_RISK_FUTURES_V1"
-
+VERSION = "COMMIT33_3_FUTURES_TEMPO_CORE_V1"
 RISK_CLASS_SYMBOLS: Dict[str, Tuple[str, ...]] = {
     "CORE1": ("BTC-USDT", "ETH-USDT", "SOL-USDT"),
     "CORE2": ("XRP-USDT", "ADA-USDT"),
     "MEDIUM": ("BNB-USDT", "LINK-USDT", "AVAX-USDT", "NEAR-USDT", "DOT-USDT"),
     "HIGH": ("SUI-USDT", "HYPE-USDT", "APT-USDT", "INJ-USDT", "SEI-USDT"),
 }
-
 RISK_CLASS_TIMEFRAMES: Dict[str, Tuple[str, ...]] = {
     "CORE1": ("30m", "1h", "2h", "4h", "12h", "1D"),
     "CORE2": ("30m", "1h", "2h", "4h", "12h"),
     "MEDIUM": ("30m", "1h", "2h", "4h"),
     "HIGH": ("30m", "1h", "2h"),
 }
-
 SYMBOL_META: Dict[str, Dict[str, Any]] = {
     "BTC-USDT": {"name": "BTC/USDT", "type": "crypto_major", "decimals": 2},
     "ETH-USDT": {"name": "ETH/USDT", "type": "crypto_major", "decimals": 2},
@@ -42,7 +42,6 @@ SYMBOL_META: Dict[str, Dict[str, Any]] = {
     "INJ-USDT": {"name": "INJ/USDT", "type": "crypto_high_beta", "decimals": 3},
     "SEI-USDT": {"name": "SEI/USDT", "type": "crypto_high_beta", "decimals": 5},
 }
-
 CONTRACT_SYMBOLS: Dict[str, str] = {
     "BTC-USDT": "XBTUSDTM",
     "ETH-USDT": "ETHUSDTM",
@@ -60,7 +59,6 @@ CONTRACT_SYMBOLS: Dict[str, str] = {
     "INJ-USDT": "INJUSDTM",
     "SEI-USDT": "SEIUSDTM",
 }
-
 TIMEFRAME_META = {
     "30m": {"name": "30 Minutos", "type": "intraday", "kucoin": "30min"},
     "1h": {"name": "1 Hora", "type": "intraday", "kucoin": "1hour"},
@@ -70,16 +68,35 @@ TIMEFRAME_META = {
     "1D": {"name": "1 Día", "type": "macro_swing", "kucoin": "1day"},
 }
 
-# The class changes execution tempo, never the minimum production Safety.
+# Risk class changes how quickly an already-valid setup must be executed.  It
+# never changes the minimum technical/Safety standard required to publish.
 EXIT_PROFILES: Dict[str, Dict[str, Any]] = {
-    "CORE1": {"name": "NORMAL", "risk_budget_multiplier": 1.00, "entry_zone_pct": 0.15, "max_entry_wait_bars": 5, "guardian_reduce_score": 65, "guardian_exit_score": 85, "allow_scale_in": True},
-    "CORE2": {"name": "CONTROLLED", "risk_budget_multiplier": 0.85, "entry_zone_pct": 0.13, "max_entry_wait_bars": 4, "guardian_reduce_score": 60, "guardian_exit_score": 82, "allow_scale_in": True},
-    "MEDIUM": {"name": "FAST", "risk_budget_multiplier": 0.65, "entry_zone_pct": 0.10, "max_entry_wait_bars": 3, "guardian_reduce_score": 52, "guardian_exit_score": 75, "allow_scale_in": False},
-    "HIGH": {"name": "VERY_FAST", "risk_budget_multiplier": 0.45, "entry_zone_pct": 0.08, "max_entry_wait_bars": 2, "guardian_reduce_score": 42, "guardian_exit_score": 68, "allow_scale_in": False},
+    "CORE1": {
+        "name": "QUICK_CORE", "risk_budget_multiplier": 1.00,
+        "entry_zone_pct": 0.12, "max_entry_wait_bars": 3,
+        "guardian_reduce_score": 65, "guardian_exit_score": 85,
+        "allow_scale_in": True,
+    },
+    "CORE2": {
+        "name": "QUICK_CORE_CONTROLLED", "risk_budget_multiplier": 0.85,
+        "entry_zone_pct": 0.11, "max_entry_wait_bars": 3,
+        "guardian_reduce_score": 60, "guardian_exit_score": 82,
+        "allow_scale_in": True,
+    },
+    "MEDIUM": {
+        "name": "FASTER", "risk_budget_multiplier": 0.65,
+        "entry_zone_pct": 0.08, "max_entry_wait_bars": 2,
+        "guardian_reduce_score": 52, "guardian_exit_score": 75,
+        "allow_scale_in": False,
+    },
+    "HIGH": {
+        "name": "ULTRA_FAST", "risk_budget_multiplier": 0.45,
+        "entry_zone_pct": 0.05, "max_entry_wait_bars": 1,
+        "guardian_reduce_score": 42, "guardian_exit_score": 68,
+        "allow_scale_in": False,
+    },
 }
 
-# Heavy Research representatives only.  This is a prior for the class; it is
-# never a local Champion for another symbol.
 RESEARCH_REPRESENTATIVE: Dict[str, str] = {
     "CORE1": "BTC-USDT",
     "CORE2": "XRP-USDT",
@@ -100,16 +117,11 @@ def risk_class_for(symbol: Any) -> str:
     return "UNKNOWN"
 
 
-
-
 def learning_bucket_for(symbol: Any) -> str:
-    """ReviewTrader aggregation bucket without weakening execution classes.
-
-    CORE1/CORE2 keep different production TF/risk policies, while backtest
-    diagnostics may aggregate them as CORE. MEDIUM/HIGH stay separate.
-    """
+    """Aggregation bucket; production classes stay distinct."""
     rc = risk_class_for(symbol)
     return "CORE" if rc in ("CORE1", "CORE2") else rc
+
 
 def allowed_timeframes(symbol: Any) -> Tuple[str, ...]:
     return RISK_CLASS_TIMEFRAMES.get(risk_class_for(symbol), tuple())
@@ -137,7 +149,11 @@ def operational_combinations() -> List[Tuple[str, str]]:
 
 
 def operational_action_cells() -> List[Tuple[str, str, str]]:
-    return [(symbol, tf, action) for symbol, tf in operational_combinations() for action in ("LONG", "SHORT")]
+    return [
+        (symbol, tf, action)
+        for symbol, tf in operational_combinations()
+        for action in ("LONG", "SHORT")
+    ]
 
 
 def universe_audit() -> Dict[str, Any]:
@@ -151,13 +167,24 @@ def universe_audit() -> Dict[str, Any]:
         "expected_symbols": 15,
         "expected_combinations": 63,
         "expected_action_cells": 126,
+        "minimum_timeframe": "30m",
         "ok": len(all_symbols()) == 15 and len(combos) == 63 and len(cells) == 126,
-        "by_class": {rc: {"symbols": len(symbols), "timeframes": list(RISK_CLASS_TIMEFRAMES[rc])} for rc, symbols in RISK_CLASS_SYMBOLS.items()},
+        "by_class": {
+            rc: {"symbols": len(symbols), "timeframes": list(RISK_CLASS_TIMEFRAMES[rc])}
+            for rc, symbols in RISK_CLASS_SYMBOLS.items()
+        },
+        "tempo": {
+            rc: {
+                "entry_zone_pct": profile["entry_zone_pct"],
+                "max_entry_wait_bars": profile["max_entry_wait_bars"],
+            }
+            for rc, profile in EXIT_PROFILES.items()
+        },
     }
 
 
 def configure_futures_module(module: Any) -> Any:
-    """Idempotently apply the V2 universe to the legacy futures_system module."""
+    """Idempotently apply the governed universe to futures_system."""
     if getattr(module, "_COMMIT96_UNIVERSE_VERSION", None) == VERSION:
         return module
     module.FUTURES_SYMBOLS = {k: dict(v) for k, v in SYMBOL_META.items()}
@@ -189,4 +216,4 @@ def annotate_result(result: Mapping[str, Any] | None, symbol: Any, timeframe: An
 
 _AUDIT = universe_audit()
 if not _AUDIT["ok"]:
-    raise RuntimeError(f"Commit 9.6 Futures universe invalid: {_AUDIT}")
+    raise RuntimeError(f"Commit 33.3 Futures universe invalid: {_AUDIT}")

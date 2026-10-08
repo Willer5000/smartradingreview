@@ -1,0 +1,16 @@
+{
+  "version": "COMMIT33_3_BACKTEST_30M_STATUS_V2",
+  "minimum_timeframe": "30m",
+  "real_market_backtest_executed": false,
+  "reason": "No deep 30m OHLCV history for the six new research families was attached, and the execution container has no outbound market-data network access. No profitability result is fabricated.",
+  "production_authority_granted": false,
+  "promotion_rule": "Chronological IS/OOS profitable with required sample/costs -> LIVE; 8 consecutive LIVE losses -> SHADOW.",
+  "strategies": [
+    "CRT_RANGE_RECLAIM",
+    "FAILED_AUCTION",
+    "OPENING_RANGE_VWAP",
+    "TRIPLE_RSI",
+    "EFFICIENCY_RATIO",
+    "VOLATILITY_COMPRESSION_RELEASE"
+  ]
+}

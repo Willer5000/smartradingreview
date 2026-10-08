@@ -1,10 +1,10 @@
-# COMMIT 32.2 — quality signal recovery: runtime truth + ABI + stale policy cleanup.
+# COMMIT 33.3 — native core authority, no WSGI monkeypatch chain.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit32_2_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
+    startCommand: gunicorn app:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 50 --max-requests-jitter 10
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -26,94 +26,48 @@ services:
         value: "1"
       - key: BLIS_NUM_THREADS
         value: "1"
+
+      # One heavy job; permanent daemon count is not a concurrency gate.
       - key: FREE_RUNTIME_MAX_THREADS
         value: "10"
       - key: FREE_RUNTIME_BACKGROUND_LOCK_WAIT_SECONDS
-        value: "1"
+        value: "0"
       - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
-        value: "10"
+        value: "12"
+
+      # Native app.py memory authority.  Commit21.1 no longer overwrites these.
+      - key: LOW_MEMORY_MODE
+        value: "1"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "280"
+        value: "270"
       - key: MEMORY_HARD_LIMIT_MB
-        value: "350"
+        value: "335"
+      - key: MEMORY_JOB_START_LIMIT_MB
+        value: "255"
+      - key: MEMORY_IN_JOB_ABORT_MB
+        value: "315"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "1"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
         value: "4"
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
         value: "8"
-      - key: MEMORY_JOB_START_LIMIT_MB
-        value: "240"
-      - key: LOW_MEMORY_MODE
-        value: "1"
-      - key: FREE_PLAN_LOCKDOWN
-        value: "1"
-      - key: COMMIT23_1_AUTHORITY_VERSION
-        value: "COMMIT23_1_AUTHORITY_INTEGRATION_FIX_V1"
-      - key: COMMIT23_1_REPROCESS_STALE_SNAPSHOTS
-        value: "1"
-      - key: COMMIT25_CONTEXTUAL_AUTHORITY_ENABLED
-        value: "1"
-      - key: COMMIT27_UNIFIED_AUTHORITY_ENABLED
-        value: "1"
+      - key: LIQUIDATION_HEATMAP_MAX_RESIDENT
+        value: "4"
+      - key: COMMIT33_3_VISUAL_HARD_RSS_MB
+        value: "430"
+
+      # Valid current context logic retained.  No Commit32 runtime overlays.
       - key: COMMIT30_PROPOSAL3_ENABLED
         value: "1"
       - key: COMMIT30_1_FAST_LANE_BRIDGE_ENABLED
         value: "1"
-      - key: COMMIT32_ROOT_CAUSE_RECOVERY_ENABLED
-        value: "1"
-      - key: COMMIT32_SPOT_MARKET_SIGNAL_AUTHORITY
-        value: "1"
-      - key: COMMIT32_1_RECOVERY_ENABLED
-        value: "1"
-      - key: COMMIT32_2_RECOVERY_ENABLED
-        value: "1"
-      - key: COMMIT32_1_JOB_START_MB
-        value: "240"
-      - key: COMMIT32_1_MEMORY_SOFT_MB
-        value: "280"
-      - key: COMMIT32_1_MEMORY_HARD_MB
-        value: "350"
-      - key: COMMIT32_1_RAM_SHED_MB
-        value: "285"
-      - key: COMMIT32_1_RAM_ABORT_MB
-        value: "335"
-      - key: COMMIT32_1_POST_JOB_TRIM_MB
-        value: "250"
-      - key: COMMIT32_1_VISUAL_HARD_RSS_MB
-        value: "360"
-      - key: COMMIT32_RAM_SHED_MB
-        value: "285"
-      - key: COMMIT32_RAM_ABORT_MB
-        value: "335"
-      - key: MEMORY_IN_JOB_ABORT_MB
-        value: "335"
-      - key: LIQUIDATION_HEATMAP_MAX_RESIDENT
-        value: "4"
-      - key: COMMIT22_WORKER_RESTART_POLICY
-        value: "TIMEOUT_120S_MAX_REQUESTS_60"
-      - key: STALL_EXIT_SECONDS
-        value: "105"
-      - key: UI_PENDING_MAX
-        value: "5"
       - key: Q_CLUSTER_ENABLED
         value: "false"
-      - key: Q_CLUSTER_MIN_AVG
-        value: "72"
-      - key: Q_CLUSTER_MIN_TWO
-        value: "70"
-      - key: Q_CLUSTER_STD_MIN
-        value: "5"
       - key: REGIME_CLASSIFIER_ENABLED
         value: "true"
-      - key: COMMIT24_STALL_EXIT_SECONDS
-        value: "105"
-      - key: COMMIT24_PENDING_UI_TTL_SECONDS
-        value: "90"
-      - key: PPE_ENABLED
-        value: "1"
-      - key: PPE_MAX_ALTERNATIVE_ROUTES
-        value: "2"
+
+      # Provider / budget controls retained.
       - key: MAIN_SUPABASE_DAILY_BUDGET_MB
         value: "12"
       - key: OPTIONS_MM_CONTEXT_ENABLED
@@ -136,6 +90,8 @@ services:
         value: "20"
       - key: AI_MANUAL_DAILY_LIMIT
         value: "12"
+
+      # Multi-Asset stays enabled, but never gains LIVE authority without route evidence.
       - key: MULTIASSET_ENABLED
         value: "1"
       - key: MULTIASSET_ROUTER_TTL_SECONDS
@@ -148,30 +104,36 @@ services:
         value: "6"
       - key: MULTIASSET_AI_AUTOMATIC_ENABLED
         value: "0"
+
+      # 30m is the minimum operational Futures timeframe.  Refresh cadence does
+      # not create extra trades; it only keeps snapshots current without hammering RAM.
       - key: FUTURES_INCREMENTAL_INTERVAL_SECONDS
-        value: "30"
+        value: "60"
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS
         value: "120"
       - key: FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
         value: "120"
+      - key: FUTURES_INCREMENTAL_START_DELAY_SECONDS
+        value: "180"
+      - key: RUNTIME_BOOTSTRAP_DELAY_SECONDS
+        value: "30"
+
       - key: LEARNING_MICROBATCH_ROWS
         value: "8"
       - key: LEARNING_MICROBATCH_BUDGET_SECONDS
         value: "6"
       - key: LEARNING_MICROBATCHES_PER_CYCLE
         value: "1"
-      - key: FUTURES_INCREMENTAL_START_DELAY_SECONDS
-        value: "180"
-      - key: RUNTIME_BOOTSTRAP_DELAY_SECONDS
-        value: "30"
       - key: ANALYTICS_SNAPSHOT_FRESH_SECONDS
         value: "1800"
+
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_KEY
         sync: false
       - key: SCHEDULED_AUTH_KEY
         sync: false
+
 databases:
   - name: trading-cache
     plan: free
