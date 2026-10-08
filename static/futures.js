@@ -3385,23 +3385,42 @@ window.openSaveSignalModal = function(sig, alreadyInPosition = false) {
     document.getElementById('ss-leverage').value = safeSaveLeverage;
     document.getElementById('ss-leverage-hint').textContent = `Sugerido por el sistema: ${safeSaveLeverage}x`;
     
-    // Fallback: si no hay entry/sl/tp en la señal, usar el precio actual del mercado como base
+    // 33.4.4 — el modal manual JAMÁS mezcla precios de otro símbolo/TF.
+    // El bug anterior aparecía al pulsar "Guardar en operación": para
+    // alreadyInPosition se priorizaba window.currentAnalysis.current_price,
+    // aunque el panel principal estuviera mostrando BTC y la hipótesis fuera SOL.
+    // Entry/SL/TP de la hipótesis son la autoridad; el precio live sólo es
+    // fallback cuando pertenece inequívocamente a la misma celda símbolo×TF.
+    const normalizeSymbol = value => String(value || '').toUpperCase().replace('/', '-');
+    const currentAnalysis = window.currentAnalysis || null;
+    const sameCurrentCell = Boolean(
+        currentAnalysis
+        && normalizeSymbol(currentAnalysis.symbol || window.currentSymbol) === normalizeSymbol(sig.symbol)
+        && String(currentAnalysis.timeframe || window.currentInterval || '').toLowerCase() === String(sig.timeframe || '').toLowerCase()
+    );
+    const sameCellLivePrice = sameCurrentCell
+        ? Number(currentAnalysis.live_price || currentAnalysis.current_price || 0)
+        : 0;
     const currentPrice = Number(
         sig.current_price
         || sig.live_price
         || window.lastPrices?.[sig.symbol]
-        || window.currentAnalysis?.current_price
+        || (sameCellLivePrice > 0 ? sameCellLivePrice : 0)
         || 0
     );
-    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(2) : '';
-    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(2) : '';  // 5% abajo
-    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(2) : '';  // 10% arriba
-    
-    document.getElementById('ss-entry').value = alreadyInPosition
-        ? (defaultEntry || sig.entry || sig.entry_price || '')
-        : (sig.entry || sig.entry_price || defaultEntry);
-    document.getElementById('ss-sl').value = sig.stop_loss || defaultSL;
-    document.getElementById('ss-tp').value = sig.take_profit || defaultTP;
+    const defaultEntry = currentPrice > 0 ? currentPrice.toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : '';
+    const defaultSL = currentPrice > 0 ? (currentPrice * 0.95).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : '';
+    const defaultTP = currentPrice > 0 ? (currentPrice * 1.10).toFixed(8).replace(/0+$/, '').replace(/\.$/, '') : '';
+
+    const canonicalEntry = Number(sig.entry || sig.entry_price || 0);
+    const canonicalSL = Number(sig.stop_loss || 0);
+    const canonicalTP = Number(sig.take_profit || 0);
+
+    document.getElementById('ss-entry').value = canonicalEntry > 0
+        ? canonicalEntry
+        : defaultEntry;
+    document.getElementById('ss-sl').value = canonicalSL > 0 ? canonicalSL : defaultSL;
+    document.getElementById('ss-tp').value = canonicalTP > 0 ? canonicalTP : defaultTP;
     document.getElementById('ss-notes').value = '';
     // v22.9.4: fecha/hora de ingreso — default = ahora en zona local del navegador
     document.getElementById('ss-entry-at').value = _nowLocalDatetimeInput();

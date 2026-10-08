@@ -19,7 +19,7 @@ import math
 from typing import Any, Dict, Optional
 
 
-POLICY_VERSION = "COMMIT33_4_3_STANDARD_TECHNICAL_MAX_LEVERAGE_V7"
+POLICY_VERSION = "COMMIT33_4_4_STANDARD_TECHNICAL_MAX_LEVERAGE_V8"
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -48,6 +48,7 @@ def select_risk_budget_leverage(
     high_safety_threshold: float = 90.0,
     quality_score: Optional[float] = None,
     calibrated_tp_probability_lower: Optional[float] = None,
+    specialised_safety_ready: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Select the highest technically admissible integer leverage.
 
@@ -105,7 +106,12 @@ def select_risk_budget_leverage(
     # Quality remains a proxy, never a probability of TP.
     quality = _finite(quality_score, safety)
     quality = min(100.0, max(0.0, quality))
-    publication_grade = safety >= 75.0 and quality >= 75.0
+    # 33.4.4 — specialised Safety READY is the non-compensatory authority.
+    # Its score is diagnostic/ranking, not a second leverage throttle. Once the
+    # profile is READY, leverage may use all technical headroom; monetary risk
+    # remains controlled by position sizing. Non-ready hypotheses keep the
+    # conservative quality reduction.
+    publication_grade = bool(specialised_safety_ready) or (safety >= 75.0 and quality >= 75.0)
     if publication_grade:
         quality_factor = 1.0
     elif safety >= 65.0 and quality >= 65.0:
@@ -172,5 +178,5 @@ def select_risk_budget_leverage(
         ),
         "selection_ceiling": int(maximum_integer),
         "selection_policy": "STANDARD_TECHNICAL_MAX_V6",
-        "selection_policy_generation": "33.4.3_V7_FULL_HEADROOM",
+        "selection_policy_generation": "33.4.4_V8_SAFETY_READY_FULL_HEADROOM",
     }

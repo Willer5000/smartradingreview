@@ -3587,6 +3587,7 @@ class FuturesAnalysis(TradingExpertSystem):
         risk_allocation_fraction=1.0,
         tp_quality_score=0.0,
         sl_avoidance_quality=0.0,
+        specialised_safety_ready=False,
     ):
         """Commit 13 / V6 core — target-aware technical leverage, size-decoupled.
 
@@ -3702,8 +3703,16 @@ class FuturesAnalysis(TradingExpertSystem):
                 min_liq_buffer_pct,
                 normalized_atr_pct * liq_atr_mult,
             )
+            # 33.4.4 — liquidation headroom must be measured from the
+            # ACTUAL structural stop plus a post-stop volatility buffer.
+            # The previous denominator used max(SL, 1.5*ATR) + ATR buffer,
+            # which double-counted volatility in crash/expansion regimes and
+            # could collapse otherwise valid 30m/1h setups to 3x/5x.
+            # ATR stress remains diagnostic and sizing-aware, but the leverage
+            # ceiling now asks the economically correct question: can the
+            # estimated liquidation level remain beyond SL + ATR buffer + MMR?
             liquidation_denominator_pct = (
-                atr_stress_move_pct
+                sl_pct
                 + liquidation_buffer_pct
                 + mmr_pct
                 + liq_fee_pct
@@ -3805,6 +3814,7 @@ class FuturesAnalysis(TradingExpertSystem):
                 high_safety_threshold=float(FUTURES_RISK_CONFIG['high_safety_threshold']),
                 quality_score=quality_score,
                 calibrated_tp_probability_lower=calibrated_tp_lower,
+                specialised_safety_ready=bool(specialised_safety_ready),
             )
             if not policy:
                 logger.info(
@@ -6950,6 +6960,7 @@ class FuturesAnalysis(TradingExpertSystem):
             risk_allocation_fraction=initial_risk_allocation_fraction,
             tp_quality_score=float(levels.get('tp_quality_score') or 0),
             sl_avoidance_quality=sl_avoidance_quality,
+            specialised_safety_ready=bool(specialised_safety.get('ready')),
         )
 
         optimal_leverage = int(
@@ -7373,6 +7384,7 @@ class FuturesAnalysis(TradingExpertSystem):
             ),
             'economic_gate_margin_is_standard': True,
             'leverage_independent_of_user_margin': True,
+            'liquidation_cap_uses_structural_stop_plus_atr_buffer': True,
             'estimated_loss_sl_usdt': round(
                 loss_sl_usdt,
                 4

@@ -37996,7 +37996,7 @@ _FUTURES_FAST_RESTORE_STATE = {
     'last_attempt': 0.0,
 }
 
-_FUTURES_CACHE_SCHEMA_VERSION = 7
+_FUTURES_CACHE_SCHEMA_VERSION = 8
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '30m': 30 * 60,
@@ -38046,7 +38046,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_3_PUBLICATION_AUTHORITY_V3'
+_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_4_PUBLICATION_AUTHORITY_V4'
 
 
 def _compact_futures_quality_context(result):
@@ -46013,6 +46013,7 @@ def _attempt_confirmed_outbox_event(key):
                and confidence>=60
                and (market not in ('futures','multiasset') or publication=='EXECUTABLE_SIGNAL')
                and _confirmed_signal_preferences_allow(market,timeframe)
+               and _confirmed_signal_telegram_economic_allow(market, signal)
                and _confirmed_signal_recent_enough(signal,timeframe))
     if not valid:
         with _confirmed_signal_outbox_lock:
@@ -46261,6 +46262,34 @@ def _confirmed_signal_rr(action, entry, stop_loss, take_profit):
         return None
 
 
+# 33.4.4 — Telegram is a delivery surface, not a publication gate.
+# Low-TF Futures signals remain official/executable in frontend/lifecycle, but
+# Telegram only receives economically meaningful leverage >=10x on 30m/1h/2h.
+# 4h+ Futures and all Multi-Activo keep the system-suggested leverage without
+# this delivery filter. Guardian remains independent and is never suppressed.
+_FUTURES_TELEGRAM_MIN_LEVERAGE = {
+    '30m': 10,
+    '1h': 10,
+    '2h': 10,
+}
+
+def _confirmed_signal_telegram_economic_allow(market, signal):
+    market = str(market or '').strip().lower()
+    if market != 'futures':
+        return True
+    signal = signal if isinstance(signal, dict) else {}
+    timeframe = str(signal.get('timeframe') or '').strip()
+    minimum = _FUTURES_TELEGRAM_MIN_LEVERAGE.get(timeframe)
+    if minimum is None:
+        return True
+    levels = signal.get('levels') or {}
+    try:
+        leverage = int(float(levels.get('leverage', signal.get('leverage')) or 0))
+    except Exception:
+        leverage = 0
+    return leverage >= int(minimum)
+
+
 def _confirmed_delivery_valid_17_5_11(market, signal):
     """Fail-closed delivery contract for a confirmed actionable signal.
 
@@ -46341,6 +46370,8 @@ def _confirmed_delivery_valid_17_5_11(market, signal):
             return False
 
     timeframe = str(signal.get('timeframe') or '')
+    if not _confirmed_signal_telegram_economic_allow(market, signal):
+        return False
     return bool(_confirmed_signal_recent_enough(signal, timeframe))
 
 
@@ -46603,6 +46634,17 @@ def _send_confirmed_signal_telegram(market, signal):
     elif action not in ('COMPRA_SPOT', 'VENTA_SPOT', 'LONG', 'SHORT'):
         return False
     if confidence < 60 or not _confirmed_signal_preferences_allow(market, timeframe):
+        return False
+    if not _confirmed_signal_telegram_economic_allow(market, signal):
+        try:
+            _lev = int(float(levels.get('leverage', signal.get('leverage')) or 0))
+        except Exception:
+            _lev = 0
+        print(
+            f"⏭️ [TELEGRAM ECONOMIC FILTER] FUTURES {symbol} {timeframe} "
+            f"{_lev}x < {_FUTURES_TELEGRAM_MIN_LEVERAGE.get(timeframe, 0)}x; frontend only.",
+            flush=True,
+        )
         return False
     if not _confirmed_signal_recent_enough(signal, timeframe):
         close_ts = _confirmed_signal_close_timestamp(signal, timeframe)
@@ -60639,11 +60681,11 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 
 
 # ============================================================================
-# COMMIT 33.4.3 — CANONICAL CORE BOOTSTRAP
+# COMMIT 33.4.4 — QUICK EXECUTION ECONOMICS + DELIVERY
 # ============================================================================
-def _bootstrap_core_33_4_3():
+def _bootstrap_core_33_4_4():
     """Validate native modules without installing runtime overlays/monkeypatches."""
-    state = {'version':'33.4.3','entrypoint':'app:app','runtime_overlays':False}
+    state = {'version':'33.4.4','entrypoint':'app:app','runtime_overlays':False}
     try:
         _configured_futures_module()
         import market_context, pipeline_integrity, safety_profiles, publication_quality
@@ -60657,9 +60699,9 @@ def _bootstrap_core_33_4_3():
         state['core_error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
     return state
 
-_COMMIT_33_4_3_BOOTSTRAP = _bootstrap_core_33_4_3()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_3_EXECUTION_ECONOMICS_DETAIL_CORE_V1'
-print(f"✅ [33.4.3] núcleo canónico activo: {_COMMIT_33_4_3_BOOTSTRAP}", flush=True)
+_COMMIT_33_4_4_BOOTSTRAP = _bootstrap_core_33_4_4()
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_4_QUICK_EXECUTION_ECONOMICS_TELEGRAM_V1'
+print(f"✅ [33.4.4] núcleo canónico activo: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
