@@ -27,9 +27,9 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Iterable, List, Tuple
 
-VERSION = "33.4_PIPELINE_INTEGRITY_V4"
-PIPELINE_GENERATION = "33.4"
-RELEASED_AT_UTC = "2026-09-29T18:00:00+00:00"
+VERSION = "33.4.1_PIPELINE_INTEGRITY_V5"
+PIPELINE_GENERATION = "33.4.1"
+RELEASED_AT_UTC = "2026-10-08T12:00:00+00:00"
 
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
 _NEGATIVE_RESEARCH_STATES = {
@@ -747,7 +747,7 @@ def reconcile_operational_candidate(
     operational: Mapping[str, Any], *, layers: Mapping[str, Any], symbol: str,
     timeframe: str, system_type: str
 ) -> Dict[str, Any]:
-    """Single canonical candidate router for Commit 33.4.
+    """Single canonical candidate router for Commit 33.4.1.
 
     Candidate formation is deliberately separated from publication authority.
     The router does not require an OOS/live route before a technically valid
@@ -854,6 +854,41 @@ def reconcile_operational_candidate(
         op["core_setup_family"] = (selected_winner or {}).get("setup")
         op["core_setup_quality"] = round(setup_quality, 2) if selected_winner else None
         op["core_setup_support"] = setup_support if selected_winner else []
+
+        # 33.4.1 — candidate quality is evaluated ONCE here. Publication must
+        # not re-apply a second, stricter score to the same directional evidence.
+        # Downstream quality comes from primary Entry/SL/TP + specialised Safety.
+        if candidate_source == "THESIS_CORE":
+            _contract_floor = thesis_floor
+            _contract_support = list(dict.fromkeys(supports))
+            _contract_support_floor = 4 if market == "FUTURES" else 3
+            _contract_setup = "THESIS_CORE"
+        elif candidate_source == "CORE_SETUP":
+            _contract_floor = setup_floor
+            _contract_support = list(dict.fromkeys(setup_support))
+            _contract_support_floor = 3
+            _contract_setup = str((selected_winner or {}).get("setup") or "CORE_SETUP")
+        else:
+            _contract_floor = min(thesis_floor, setup_floor)
+            _contract_support = list(dict.fromkeys(supports + setup_support))
+            _contract_support_floor = 4 if market == "FUTURES" else 3
+            _contract_setup = str((selected_winner or {}).get("setup") or "THESIS_CORE")
+        op["candidate_contract"] = {
+            "version": VERSION,
+            "passed": True,
+            "action": candidate_action,
+            "source": candidate_source,
+            "quality": round(candidate_quality, 2),
+            "quality_floor": round(float(_contract_floor), 2),
+            "support": _contract_support,
+            "support_count": len(_contract_support),
+            "support_floor": int(_contract_support_floor),
+            "setup_family": _contract_setup,
+            "ambiguous": bool(diag.get("ambiguous")),
+            "quality_is_rechecked_at_publication": False,
+            "safety_is_downstream": True,
+            "primary_geometry_is_downstream": True,
+        }
         op["official_cell"] = _official_cell(market, symbol, timeframe, candidate_action, fallback=False)
         op["mtf_conflict_observed"] = mtf_conflict
         op["never_bypass_safety"] = True
@@ -880,6 +915,12 @@ def reconcile_operational_candidate(
         op["candidate_action"] = "NO_OPERAR"
         op["candidate_source"] = candidate_source
         op["candidate_quality"] = 0.0
+        op["candidate_contract"] = {
+            "version": VERSION, "passed": False, "action": "NO_OPERAR",
+            "source": candidate_source, "quality": 0.0,
+            "quality_is_rechecked_at_publication": False,
+            "safety_is_downstream": True, "primary_geometry_is_downstream": True,
+        }
 
     op["candidate_router_contract"] = {
         "version": VERSION,

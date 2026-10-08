@@ -16893,7 +16893,7 @@ class TradingExpertSystem:
             
             # ============ SELECCIONAR ENTRY ÓPTIMO (retroceso/rebote) ============
             setup_family = str(
-                ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                ((structure.get('_execution_setup') or {}).get('setup_family'))
                 or ''
             ).upper()
             (
@@ -17161,28 +17161,9 @@ class TradingExpertSystem:
                             except Exception:
                                 return False
 
-                        try:
-                            from operational_intelligence import execution_setup_guard as _setup_guard_1759
-                            _guard = _setup_guard_1759(
-                                action=decision,
-                                levels={
-                                    'entry': _e, 'stop_loss': _s, 'take_profit': _t,
-                                    'risk_reward': _rr,
-                                    'entry_quality_score': _qualities[1],
-                                    'entry_score': _qualities[1],
-                                    'entry_sweep_confirmed': bool(entry_quality.get('sweep')),
-                                    'entry_mss_bos_confirmed': bool(entry_quality.get('mss')),
-                                    'entry_displacement_confirmed': bool(entry_quality.get('displacement')),
-                                    'entry_source': str(_entry_role.get('source') or entry_source or ''),
-                                },
-                                setup_family=_guard_family,
-                                market=('FUTURES' if is_futures else 'SPOT'),
-                                timeframe=timeframe,
-                            ) or {}
-                            if _guard.get('applied'):
-                                return False
-                        except Exception:
-                            return False
+                        # 33.4.1: do not run a second setup gate inside geometry
+                        # recovery. Committee quality + timing are the geometry
+                        # contract; specialised Safety owns the final risk veto.
                         return True
 
                     _result = recover_execution_geometry_from_structure(
@@ -17818,36 +17799,10 @@ class TradingExpertSystem:
                             if refined_passed is not True:
                                 return False
 
-                            # 17.5.5: the advanced search must know the SAME
-                            # execution setup guard that will run downstream.
-                            # This does not lower the guard; it lets the search
-                            # skip a 58/100 Entry and consider a runner-up that
-                            # already satisfies the existing 60/62 thresholds.
-                            try:
-                                from operational_intelligence import execution_setup_guard as _execution_setup_guard
-                                entry_role = proposal.get('entry_committee') or {}
-                                candidate_guard = _execution_setup_guard(
-                                    action=decision,
-                                    levels={
-                                        'entry': re, 'stop_loss': rs, 'take_profit': rt,
-                                        'risk_reward': rr_candidate,
-                                        'entry_quality_score': float(proposal.get('entry_quality') or 0),
-                                        'entry_score': float(proposal.get('entry_quality') or 0),
-                                        'entry_sweep_confirmed': bool(entry_quality.get('sweep')),
-                                        'entry_mss_bos_confirmed': bool(entry_quality.get('mss')),
-                                        'entry_displacement_confirmed': bool(entry_quality.get('displacement')),
-                                        'entry_source': str(entry_role.get('source') or entry_source or ''),
-                                    },
-                                    setup_family=guard_setup_family,
-                                    market='FUTURES',
-                                    timeframe=timeframe,
-                                ) or {}
-                                if candidate_guard.get('applied'):
-                                    return False
-                            except Exception:
-                                # A diagnostic/guard failure cannot authorize a
-                                # refined geometry that downstream may veto.
-                                return False
+                            # 33.4.1: the refined geometry is not re-vetoed by
+                            # the legacy setup guard. Entry Committee quality and
+                            # the timing gate above are independent evidence; final
+                            # Safety remains downstream and non-compensatory.
                         return True
 
                     committee_result = coordinate_execution_committees(
@@ -18519,7 +18474,7 @@ class TradingExpertSystem:
             decimals
         )
     
-    def _guaranteed_manual_geometry_175113(
+    def _build_manual_analysis_geometry(
         self,
         action,
         trend,
@@ -18531,7 +18486,7 @@ class TradingExpertSystem:
         liquidation=None,
         existing_levels=None,
     ):
-        """Commit 17.5.11R.3 — complete geometry for every governed thesis.
+        """Manual analysis geometry — complete non-LIVE geometry for a governed thesis.
 
         Contract:
         - NEVER creates LONG/SHORT direction; ``action`` must already be governed.
@@ -18643,7 +18598,7 @@ class TradingExpertSystem:
                 momentum=momentum,
                 volatility=volatility,
                 setup_family=str(
-                    ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                    ((structure.get('_execution_setup') or {}).get('setup_family'))
                     or ((structure.get('_adaptive_strategy_lab') or {}).get('setup_family'))
                     or ''
                 ),
@@ -21220,77 +21175,37 @@ class TradingExpertSystem:
                 razones_consenso = ['Error en sistema de traders']
                 registro_votacion = {}
             # ==========================================================
-            # RC8.2 — CONTINGENCY PLAYBOOK
             # ==========================================================
-            # A validated Research Champion remains the preferred specialist.
-            # While the exact market×symbol×TF×action cell is still unfilled,
-            # or Research/Supabase is temporarily unavailable, this deterministic
-            # playbook keeps the desk coherent WITHOUT fabricating validated alpha.
-            # It may preserve or downgrade the committee action, never create a
-            # direction that the committee did not already select and never bypass
-            # Safety / negative OOS / Alpha Decay.
-            contingency_playbook = {
-                'version': 'RC8_2_CONTINGENCY_PLAYBOOK_V1',
-                'active': False,
-                'reason': 'NOT_EVALUATED',
+            # 33.4.1 — CANONICAL EXECUTION POLICY (METADATA ONLY)
+            # ==========================================================
+            # Operational Intelligence + Pipeline Integrity already own the
+            # directional candidate.  There is no second contingency engine
+            # allowed to downgrade/replace that action before Entry/SL/TP.
+            _op_exec = operational_intelligence if isinstance(operational_intelligence, dict) else {}
+            _diag_exec = _op_exec.get('particular_setup_diagnostic') if isinstance(_op_exec.get('particular_setup_diagnostic'), dict) else {}
+            _winner_exec = _diag_exec.get('winner') if isinstance(_diag_exec.get('winner'), dict) else {}
+            _strategy_exec = _op_exec.get('default_strategy') if isinstance(_op_exec.get('default_strategy'), dict) else {}
+            _execution_setup_family = str(
+                _op_exec.get('core_setup_family')
+                or _winner_exec.get('setup')
+                or _strategy_exec.get('family')
+                or ('THESIS_CORE' if _op_exec.get('candidate_ready') else '')
+            ).upper()
+            execution_policy = {
+                'version': 'CORE_EXECUTION_POLICY_33_4_1_V1',
+                'active': bool(_op_exec.get('candidate_ready')),
+                'action': str(_op_exec.get('candidate_action') or 'NO_OPERAR').upper(),
+                'candidate_source': _op_exec.get('candidate_source'),
+                'candidate_quality': _op_exec.get('candidate_quality'),
+                'candidate_contract': dict(_op_exec.get('candidate_contract') or {}),
+                'setup_family': _execution_setup_family,
+                'strategy_family': _strategy_exec.get('family'),
+                'authority': 'CANONICAL_CANDIDATE_METADATA_ONLY',
+                'can_change_direction': False,
+                'can_cap_confidence': False,
+                'can_bypass_safety': False,
             }
-            try:
-                research_prior = dict(
-                    (operational_intelligence or {}).get('selected_research_prior')
-                    or (research_candidates or {}).get(str(accion_consenso or '').upper())
-                    or {
-                        'state': 'UNAVAILABLE',
-                        'support_score': 0.0,
-                        'penalty_score': 0.0,
-                    }
-                )
 
-                from contingency_strategy_engine import build_contingency_playbook
-                contingency_playbook = build_contingency_playbook(
-                    layers=capas,
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    system_type=analysis_system_type,
-                    committee_action=accion_consenso,
-                    committee_confidence=confianza_consenso,
-                    vote_record=registro_votacion,
-                    research_prior=research_prior,
-                )
-
-                if contingency_playbook.get('active'):
-                    # RC9: la arquitectura interna sigue oculta. Para el usuario sólo
-                    # se añaden observaciones concretas de mercado ya calculadas.
-                    for _public_item in (contingency_playbook.get('public_evidence') or []):
-                        if _public_item and _public_item not in razones_consenso:
-                            razones_consenso.append(_public_item)
-                    # RC8.3 FINAL — el playbook es metadato operativo/auditable.
-                    # NO se añade su código/nombre a estrategias_consenso ni a las
-                    # justificaciones públicas. La recomendación debe explicar la
-                    # señal con los indicadores y especialistas que realmente la
-                    # sostienen (tendencia, momentum, volumen, estructura, etc.).
-                    effective_action = str(contingency_playbook.get('effective_action') or accion_consenso).upper()
-                    if effective_action != str(accion_consenso or '').upper():
-                        from reason_presenter import public_reason
-                        _downgrade_public = public_reason(contingency_playbook.get('downgrade_reason'))
-                        if _downgrade_public and not (contingency_playbook.get('public_evidence') or []):
-                            razones_consenso.append(_downgrade_public)
-                        accion_consenso = effective_action
-                    # No validated alpha => confidence cannot look like a proven Champion.
-                    try:
-                        cap = float(((contingency_playbook.get('risk') or {}).get('confidence_cap')) or 100.0)
-                        confianza_consenso = min(float(confianza_consenso or 0.0), cap)
-                    except Exception:
-                        pass
-
-            except Exception as contingency_error:
-                contingency_playbook = {
-                    'version': 'RC8_2_CONTINGENCY_PLAYBOOK_V1',
-                    'active': False,
-                    'reason': 'CONTINGENCY_ENGINE_ERROR',
-                    'error': str(contingency_error)[:180],
-                }
-
-            # ==========================================================
             # Q7 — ADAPTIVE INTRADAY STRATEGY LAB
             # ==========================================================
             #
@@ -21490,7 +21405,13 @@ class TradingExpertSystem:
             # Hidden per-analysis keys avoid shared mutable state between parallel
             # Futures analyses. They are removed immediately after levels.
             if isinstance(structure, dict):
-                structure['_contingency_playbook'] = contingency_playbook
+                structure['_execution_setup'] = {
+                    'version': execution_policy.get('version'),
+                    'setup_family': execution_policy.get('setup_family'),
+                    'strategy_family': execution_policy.get('strategy_family'),
+                    'candidate_source': execution_policy.get('candidate_source'),
+                    'candidate_quality': execution_policy.get('candidate_quality'),
+                }
 
             # RC9.7.11 — resolver tamaño y apalancamiento como un único problema
             # de riesgo. La fracción NO cambia Entry/SL/TP; sólo informa cuánto
@@ -21516,15 +21437,6 @@ class TradingExpertSystem:
                             futures_risk_allocation_fraction * 1.2,
                         )
 
-                    if contingency_playbook.get('active'):
-                        contingency_size_cap = float(
-                            ((contingency_playbook.get('risk') or {}).get('size_cap'))
-                            or 1.0
-                        )
-                        futures_risk_allocation_fraction = min(
-                            futures_risk_allocation_fraction,
-                            contingency_size_cap,
-                        )
 
                     # El presupuesto por clase (CORE/MEDIUM/HIGH) también es
                     # conocido antes del cálculo. Sólo puede reducir exposición.
@@ -21610,20 +21522,6 @@ class TradingExpertSystem:
                                 levels['suggested_size'] * 1.2,
                             )
 
-                    if contingency_playbook.get('active'):
-                        try:
-                            contingency_size_cap = float(
-                                ((contingency_playbook.get('risk') or {}).get('size_cap'))
-                                or 1.0
-                            )
-                            levels['suggested_size'] = min(
-                                float(levels.get('suggested_size', 1.0) or 1.0),
-                                contingency_size_cap,
-                            )
-                            levels['contingency_size_cap'] = contingency_size_cap
-                            levels['contingency_authority'] = contingency_playbook.get('authority')
-                        except Exception:
-                            pass
                     
                     print(f"✅ Niveles calculados: Entry={levels['entry']}, SL={levels['stop_loss']}, TP={levels['take_profit']}")
                     
@@ -21685,50 +21583,26 @@ class TradingExpertSystem:
                             except Exception:
                                 _manual_levels = levels
 
-                            # Commit 21.1: a PRECAUCION/ESPERAR thesis may be
-                            # re-routed through the frozen Strategy Bank. If the
-                            # real execution pipeline itself returns PREMIUM,
-                            # preserve that result instead of overwriting it with
-                            # the manual fallback lane. This does not create a
-                            # direction: _manual_action came from the already
-                            # computed operational thesis / vote record.
-                            _manual_gate = dict((_manual_levels or {}).get('futures_publication_gate') or {})
-                            _manual_route_promoted = bool(
-                                isinstance(_manual_levels, dict)
-                                and _manual_levels.get('premium_route_promoted')
-                                and _manual_gate.get('eligible')
-                                and str(_manual_gate.get('tier') or '').upper() == 'PREMIUM'
+                            # 33.4.1: manual visibility is strictly downstream of
+                            # a non-directional final action. It can never promote
+                            # itself back to LIVE; only the canonical candidate
+                            # path may reach official publication.
+                            levels = self._build_manual_analysis_geometry(
+                                _manual_action, trend, momentum, volatility,
+                                structure, symbol, timeframe,
+                                liquidation=liquidation_data,
+                                existing_levels=_manual_levels,
                             )
-                            if _manual_route_promoted:
-                                levels = dict(_manual_levels)
-                                accion_consenso = _manual_action
-                                niveles_originales = levels.get('premium_route_promoted_from') or 'PRECAUCION'
-                                levels['manual_route_recovered_to_premium'] = True
-                                levels['manual_route_recovered_from'] = str(niveles_originales)
-                                levels['manual_observation_action'] = _manual_action
-                                levels['manual_observation_geometry'] = False
-                                levels['pipeline_generation'] = 'COMMIT21.1_PREMIUM_ROUTE_RECOVERY'
-                                print(
-                                    f"✅ [21.1] Thesis recovery → PREMIUM | "
-                                    f"{symbol} {timeframe} {_manual_action} | "
-                                    f"route={levels.get('strategy_route_family') or levels.get('setup_family')}"
-                                )
-                            else:
-                                levels = self._guaranteed_manual_geometry_175113(
-                                    _manual_action, trend, momentum, volatility,
-                                    structure, symbol, timeframe,
-                                    liquidation=liquidation_data,
-                                    existing_levels=_manual_levels,
-                                )
-                                levels.update({
-                                    'pipeline_generation': '17.5.11R.3',
-                                    'is_rejected': True,
-                                    'is_executable': False,
-                                    'publication_status': 'ANALYSIS_ONLY',
-                                    'manual_observation_geometry': True,
-                                    'manual_observation_action': _manual_action,
-                                    'manual_observation_reason': 'TESIS_DIRECCIONAL_NO_PUBLICADA',
-                                })
+                            levels.update({
+                                'pipeline_generation': '33.4.1_MANUAL_ANALYSIS_ONLY',
+                                'is_rejected': True,
+                                'is_executable': False,
+                                'publication_status': 'ANALYSIS_ONLY',
+                                'manual_observation_geometry': True,
+                                'manual_observation_action': _manual_action,
+                                'manual_observation_reason': 'NO_CANONICAL_LIVE_CANDIDATE',
+                                'suggested_size': 0,
+                            })
                     except Exception as _manual_geometry_error:
                         levels['manual_observation_geometry'] = False
                         levels['manual_observation_error'] = type(_manual_geometry_error).__name__
@@ -21783,7 +21657,7 @@ class TradingExpertSystem:
                 structure.pop('_adaptive_strategy_lab', None)
                 structure.pop('_adaptive_market_regime', None)
                 structure.pop('_futures_risk_allocation_fraction', None)
-                structure.pop('_contingency_playbook', None)
+                structure.pop('_execution_setup', None)
 
             # ==========================================================
             # COMMIT 36X
@@ -21915,114 +21789,50 @@ class TradingExpertSystem:
                 return bool(_guard.get('reasons'))
 
             # ==========================================================
-            # RC9.2 — SETUP-AWARE EXECUTION GUARD
             # ==========================================================
-            operational_execution = {'applied': False, 'action': accion_consenso}
+            # 33.4.1 — SETUP TIMING DIAGNOSTIC (NON-AUTHORITATIVE)
+            # ==========================================================
+            # Direction was already formed by the canonical candidate router.
+            # Geometry is already built by Entry/SL/TP committees.  A legacy
+            # setup/timing check may annotate the result, but cannot downgrade
+            # LONG/SHORT, invalidate geometry or trigger manual fallback.
+            operational_execution = {
+                'applied': False, 'action': accion_consenso,
+                'diagnostic_only': True, 'publication_hard_block': False,
+            }
             if str(accion_consenso or '').upper() in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
                 try:
                     from operational_intelligence import execution_setup_guard
                     _setup_family_for_guard = (
-                        (contingency_playbook or {}).get('setup_family')
+                        execution_policy.get('setup_family')
                         or ((operational_intelligence or {}).get('default_strategy') or {}).get('family')
                     )
-                    operational_execution = execution_setup_guard(
+                    _diag_guard = execution_setup_guard(
                         action=accion_consenso, levels=levels,
                         setup_family=_setup_family_for_guard,
                         market=('FUTURES' if analysis_system_type == 'futures' else 'SPOT'),
                         timeframe=timeframe,
                     )
+                    if isinstance(_diag_guard, dict):
+                        operational_execution.update(_diag_guard)
+                    operational_execution['diagnostic_only'] = True
+                    operational_execution['publication_hard_block'] = False
+                    operational_execution['canonical_action_preserved'] = True
+                    for _r in operational_execution.get('reasons') or []:
+                        if _r and _r not in razones_consenso:
+                            razones_consenso.append(str(_r))
                     if operational_execution.get('applied'):
-                        _original_operational_action = str(accion_consenso)
-                        _guard_action = str(operational_execution.get('action') or 'ESPERAR').upper()
-                        _soft_futures_guard = bool(
-                            analysis_system_type == 'futures'
-                            and _futures_setup_guard_is_soft(operational_execution)
-                        )
-                        if _soft_futures_guard:
-                            # COMMIT 24.5R: calidad de zona / retest / familia son
-                            # evidencia de timing, NO autoridad de dirección. La
-                            # tesis permanece LONG/SHORT para que el Q-engine pueda
-                            # evaluar la geometría primaria real. Los hard guards
-                            # económicos (RR/SL/ATR/Safety) siguen cerrando la puerta
-                            # en _app244_native_quality_authority().
-                            accion_consenso = _original_operational_action
-                            operational_execution['diagnostic_only'] = True
-                            operational_execution['soft_setup_warning'] = True
-                            operational_execution['publication_hard_block'] = False
-                            for _r in operational_execution.get('reasons') or []:
-                                if _r and _r not in razones_consenso:
-                                    razones_consenso.append(str(_r))
-                            levels['operational_setup_warning'] = True
-                            levels['operational_setup_warning_reasons'] = [
-                                str(_r) for _r in (operational_execution.get('reasons') or []) if str(_r).strip()
-                            ][:6]
-                            levels['operational_setup_guard_mode'] = 'SOFT_DIAGNOSTIC_ONLY'
-                            print(
-                                f"🧠 [24.5R SETUP-SOFT] {_original_operational_action} se conserva; "
-                                f"razones={'; '.join(str(_r) for _r in (operational_execution.get('reasons') or [])[:3])}"
-                            )
-                        else:
-                            # Legacy/hard behavior remains unchanged for Spot y
-                            # para una geometría realmente inválida en Futures.
-                            accion_consenso = _guard_action
-                            confianza_consenso = min(
-                                float(confianza_consenso or 0),
-                                68.0 if analysis_system_type == 'futures' else 72.0
-                            )
-                            for _r in operational_execution.get('reasons') or []:
-                                if _r and _r not in razones_consenso:
-                                    razones_consenso.append(str(_r))
-                            levels['is_executable'] = False
-                            levels['publication_status'] = 'ANALYSIS_ONLY'
-                            levels['suggested_size'] = 0
-                            levels['rejected_reason'] = '; '.join(operational_execution.get('reasons') or [])[:320]
-                            print(f"🧠 [RC9.2 EXECUTION] {_original_operational_action} → {accion_consenso}")
+                        levels['operational_setup_warning'] = True
+                        levels['operational_setup_warning_reasons'] = [
+                            str(_r) for _r in (operational_execution.get('reasons') or []) if str(_r).strip()
+                        ][:6]
+                        levels['operational_setup_guard_mode'] = 'DIAGNOSTIC_ONLY_33_4_1'
                 except Exception as _execution_guard_error:
-                    operational_execution = {'applied': False, 'action': accion_consenso, 'error': str(_execution_guard_error)[:160]}
-
-            # ==========================================================
-            # COMMIT 17.5.11R.3 — GUARANTEED GEOMETRY FOR DIAGNOSTIC THESIS
-            # ==========================================================
-            # Some setups start directional but are downgraded to ESPERAR by a
-            # later execution/publication guard.  R.2 only built manual levels
-            # when the action was already non-directional at the first level
-            # calculation.  Complete the geometry here as a final invariant:
-            # every governed Futures/Multi LONG/SHORT thesis exposed in
-            # "Por qué no aparecen otras señales" carries Entry/SL/TP.
-            if analysis_system_type == 'futures':
-                try:
-                    _manual_action_r3 = ''
-                    _op_r3 = operational_intelligence if isinstance(operational_intelligence, dict) else {}
-                    _thesis_r3 = _op_r3.get('thesis') or {}
-                    for _raw_r3 in (
-                        accion_consenso,
-                        _op_r3.get('candidate_action'),
-                        _thesis_r3.get('direction'),
-                        (registro_votacion or {}).get('accion_ganadora') if isinstance(registro_votacion, dict) else None,
-                    ):
-                        _candidate_r3 = str(_raw_r3 or '').upper()
-                        if _candidate_r3 in ('BULLISH', 'BUY', 'COMPRA_SPOT'):
-                            _candidate_r3 = 'LONG'
-                        elif _candidate_r3 in ('BEARISH', 'SELL', 'VENTA_SPOT'):
-                            _candidate_r3 = 'SHORT'
-                        if _candidate_r3 in ('LONG', 'SHORT'):
-                            _manual_action_r3 = _candidate_r3
-                            break
-                    if _manual_action_r3:
-                        levels = self._guaranteed_manual_geometry_175113(
-                            _manual_action_r3, trend, momentum, volatility,
-                            structure, symbol, timeframe,
-                            liquidation=liquidation_data,
-                            existing_levels=levels,
-                        )
-                        # This metadata only opens the user's manual follow-up
-                        # lane. Official execution/publication remains unchanged.
-                        if str(accion_consenso or '').upper() not in ('LONG', 'SHORT') or levels.get('is_executable') is False:
-                            levels['manual_observation_geometry'] = True
-                            levels['manual_observation_action'] = _manual_action_r3
-                            levels['publication_status'] = str(levels.get('publication_status') or 'ANALYSIS_ONLY')
-                except Exception as _r3_geometry_error:
-                    print(f"⚠️ [17.5.11R.3] geometría manual: {_r3_geometry_error}")
+                    operational_execution = {
+                        'applied': False, 'action': accion_consenso,
+                        'diagnostic_only': True, 'publication_hard_block': False,
+                        'error': str(_execution_guard_error)[:160],
+                    }
 
             # ============ CALCULAR CONVICCIÓN ============
             print(f"📈 Calculando convicción...")
@@ -22523,7 +22333,7 @@ class TradingExpertSystem:
                 'market_regime': self._make_serializable(market_regime),   # legacy/raw layer
                 'operational_intelligence': self._make_serializable(operational_intelligence),
                 'operational_execution': self._make_serializable(operational_execution),
-                'contingency_playbook': self._make_serializable(contingency_playbook),
+                'execution_policy': self._make_serializable(execution_policy),
                 'strategy_lab': self._make_serializable(strategy_lab),
                 'visual_evidence': self._make_serializable(visual_evidence),
                 'zones': self._make_serializable({
@@ -30215,8 +30025,8 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit33_4():
-    """Deployment truth for the canonical Commit 33.4 core."""
+def api_runtime_version_commit33_4_1():
+    """Deployment truth for the canonical Commit 33.4.1 core."""
     import hashlib
     def _sha(path):
         try:
@@ -30233,7 +30043,7 @@ def api_runtime_version_commit33_4():
     except Exception as exc:
         _safety = {'error': type(exc).__name__}
     return jsonify({
-        'version': 'COMMIT33_4_CANONICAL_CORE_V1',
+        'version': 'COMMIT33_4_1_CANONICAL_FLOW_V1',
         'entrypoint': 'app:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
@@ -35790,9 +35600,10 @@ _MULTI_PENDING_RESOURCE_DEFERRALS = 0
 # process-local snapshot on ephemeral disk; no Supabase/network egress is used.
 _MULTI_LOCAL_SNAPSHOT_PATH = os.environ.get(
     'MULTIASSET_LOCAL_SNAPSHOT_PATH',
-    '/tmp/smartradingreview_multi_cache_19_2_1.json'
+    '/tmp/smartradingreview_multi_cache_33_4_1.json'
 )
 _MULTI_LOCAL_SNAPSHOT_LOADED = False
+_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.1'
 
 def _multiasset_restore_local_snapshot_once():
     global _MULTI_LOCAL_SNAPSHOT_LOADED
@@ -35806,6 +35617,8 @@ def _multiasset_restore_local_snapshot_once():
             return 0
         with open(_MULTI_LOCAL_SNAPSHOT_PATH, 'r', encoding='utf-8') as fh:
             payload=json.load(fh) or {}
+        if str(payload.get('version') or '') != _MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION:
+            return 0
         rows=list(payload.get('rows') or [])[:24]
         restored=0
         now=time.time()
@@ -35842,7 +35655,7 @@ def _multiasset_save_local_snapshot():
             rows.append({'symbol':symbol,'timeframe':tf,'stored_at':stored_at,'result':result})
         tmp=_MULTI_LOCAL_SNAPSHOT_PATH+'.tmp'
         with open(tmp,'w',encoding='utf-8') as fh:
-            json.dump({'version':'19.2.1','rows':rows},fh,ensure_ascii=False,separators=(',',':'),default=str)
+            json.dump({'version':_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION,'rows':rows},fh,ensure_ascii=False,separators=(',',':'),default=str)
         if os.path.getsize(tmp) <= 2*1024*1024:
             os.replace(tmp,_MULTI_LOCAL_SNAPSHOT_PATH)
         else:
@@ -36539,7 +36352,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
             # closure as Futures, while publication_quality selects a
             # market/asset-class-specific quality lens. No crypto rule is copied
             # into Multi and unsupported fast routes remain Shadow.
-            result=_app244_native_quality_authority(result, symbol, timeframe)
+            result=_core_publication_authority(result, symbol, timeframe)
             _runtime_levels_175104 = result.get('levels') or {}
             if (
                 isinstance(_runtime_levels_175104, dict)
@@ -37263,19 +37076,19 @@ def api_multiasset_display_33_4():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'33.4'
+                'retry_after_ms':5000,'response_contract_version':'33.4.1'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'33.4'
+            'response_contract_version':'33.4.1'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'33.4'
+            'error':str(exc)[:180],'response_contract_version':'33.4.1'
         }),200
 
 
@@ -37291,7 +37104,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4.1'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Commit 18.1.1: the browser owns the separate lightweight display GET.
@@ -37305,7 +37118,7 @@ def api_multiasset_analyze():
             partial.update(compact)
             partial['symbol']=symbol; partial['timeframe']=timeframe
             partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4.1'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -38067,7 +37880,7 @@ _FUTURES_FAST_RESTORE_STATE = {
     'last_attempt': 0.0,
 }
 
-_FUTURES_CACHE_SCHEMA_VERSION = 4
+_FUTURES_CACHE_SCHEMA_VERSION = 5
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '30m': 30 * 60,
@@ -38117,7 +37930,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_COMMIT245_NATIVE_Q_VERSION = 'COMMIT30_1_PUBLICATION_AUDIT_V1'
+_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_1_PUBLICATION_AUTHORITY_V1'
 
 
 def _compact_futures_quality_context(result):
@@ -38210,6 +38023,7 @@ def _compact_futures_runtime_result(result):
         'risk_class', 'exit_profile', 'risk_budget_multiplier', 'entry_zone_pct',
         'max_entry_wait_bars', 'research_representative', 'operational_timeframe_allowed',
         'publication_eligible', 'is_executable', 'asset_class', 'display_name',
+        'pipeline_generation',
     )
     for key in simple_keys:
         if key in result:
@@ -38332,6 +38146,16 @@ def _compact_futures_runtime_result(result):
             'context': operational.get('context'),
             'candidate_action': operational.get('candidate_action'),
             'candidate_ready': operational.get('candidate_ready'),
+            'candidate_source': operational.get('candidate_source'),
+            'candidate_quality': operational.get('candidate_quality'),
+            'candidate_contract': dict(operational.get('candidate_contract') or {}),
+            'core_setup_candidate': operational.get('core_setup_candidate'),
+            'core_setup_family': operational.get('core_setup_family'),
+            'core_setup_quality': operational.get('core_setup_quality'),
+            'core_setup_support': list(operational.get('core_setup_support') or [])[:12],
+            'particular_setup_diagnostic': dict(operational.get('particular_setup_diagnostic') or {}),
+            'pipeline_generation': operational.get('pipeline_generation'),
+            'pipeline_integrity_version': operational.get('pipeline_integrity_version'),
             'coverage_route_state': operational.get('coverage_route_state'),
             # COMMIT 30.1: preserve the exact failed/live Champion router output
             # in compact snapshots. Without this, a reused closed candle loses
@@ -39138,7 +38962,7 @@ def _run_futures_ui_analysis_sync(symbol, timeframe, market='futures', pre_acqui
             result = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
             # Commit 33.4 parity: interactive Multi analysis is classified by the
             # same unified final authority as background/closed-candle analysis.
-            result = _app244_native_quality_authority(result, symbol, timeframe)
+            result = _core_publication_authority(result, symbol, timeframe)
             levels = result.get('levels') or {}
             if levels.get('execution_runtime_failed') or levels.get('execution_runtime_error'):
                 raise RuntimeError(str(levels.get('execution_runtime_error') or 'EXECUTION_RUNTIME_FAILED'))
@@ -39358,7 +39182,23 @@ def _load_futures_cache_from_disk():
             return False
         schema_version = int(payload.get('schema_version', 0) or 0)
         if schema_version != _FUTURES_CACHE_SCHEMA_VERSION:
-            print(f'📂 [FUT] Snapshot Supabase con contrato v{schema_version}; ignorado')
+            # 33.4.1: old analysis authority is invalid after a core contract
+            # change, but Saved/Guardian lifecycle must survive deployment.
+            old_data = _deserialize_futures_cache(payload.get('data')) or {}
+            lifecycle_only = dict(old_data.get('lifecycle') or {})
+            if lifecycle_only:
+                with _futures_analysis_cache['lock']:
+                    _futures_analysis_cache['data'] = {
+                        'analysis': {}, 'errors': [], 'lifecycle': lifecycle_only,
+                    }
+                    _futures_analysis_cache['ts'] = 0.0
+                print(
+                    f'♻️ [FUT 33.4.1] contrato v{schema_version} invalidado: '
+                    f'análisis descartado, lifecycle preservado={len(lifecycle_only)}',
+                    flush=True,
+                )
+                return True
+            print(f'📂 [FUT] Snapshot Supabase con contrato v{schema_version}; análisis ignorado')
             return False
         ts = float(payload.get('ts', 0) or 0)
         age = time.time() - ts if ts else 999999
@@ -40849,7 +40689,7 @@ def _app244_direction(value):
     return ''
 
 
-def _app244_quality_audit(
+def _core_quality_audit(
     result,
     symbol,
     timeframe,
@@ -40878,7 +40718,7 @@ def _app244_quality_audit(
         if str(k).startswith('Q')
     }
     audit = {
-        'version': _COMMIT245_NATIVE_Q_VERSION,
+        'version': _NATIVE_PUBLICATION_AUTHORITY_VERSION,
         'status': str(status or 'NOT_EVALUATED'),
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
@@ -40904,7 +40744,7 @@ def _app244_quality_audit(
         funnel = {}
     levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
     funnel.update({
-        'version': 'COMMIT28_SIGNAL_FUNNEL_V1',
+        'version': 'CORE_SIGNAL_FUNNEL_33_4_1_V1',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': str((result.get('decision') or {}).get('action') or levels.get('manual_observation_action') or ''),
@@ -40927,7 +40767,7 @@ def _app244_quality_audit(
     return result
 
 
-def _app244_native_quality_authority(result, symbol, timeframe):
+def _core_publication_authority(result, symbol, timeframe):
     """Commit 27 final publication authority for Futures AND Multi-Asset.
 
     One pipeline owns executability:
@@ -40951,7 +40791,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
 
     # Preserve a truthful funnel even when no signal is possible.
     result['signal_engineering_funnel'] = {
-        'version': 'COMMIT28_SIGNAL_FUNNEL_V1',
+        'version': 'CORE_SIGNAL_FUNNEL_33_4_1_V1',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': action,
@@ -40964,10 +40804,10 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     }
 
     if action not in ('LONG', 'SHORT'):
-        return _app244_quality_audit(
+        return _core_quality_audit(
             result, symbol, timeframe, status='NOT_DIRECTIONAL',
             reason_codes=['DIRECTION_UNDEFINED'], authority={
-                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'CORE_PUBLICATION_QUALITY_33_4_1_V2',
                 'eligible': False,
                 'reason_codes': ['DIRECTION_UNDEFINED'],
             },
@@ -41027,14 +40867,14 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             result, symbol=str(symbol), timeframe=str(timeframe), quality=quality,
         )
     except Exception as exc:
-        return _app244_quality_audit(
+        return _core_quality_audit(
             result, symbol, timeframe, status='REJECTED', quality=quality,
             parallel=parallel,
-            reason_codes=[f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
+            reason_codes=[f'CORE_PUBLICATION_AUTHORITY_ERROR:{type(exc).__name__}'],
             authority={
-                'version': 'COMMIT28_CONTEXTUAL_QUALITY_CORE_V1',
+                'version': 'CORE_PUBLICATION_QUALITY_33_4_1_V2',
                 'eligible': False,
-                'reason_codes': [f'COMMIT27_AUTHORITY_ERROR:{type(exc).__name__}'],
+                'reason_codes': [f'CORE_PUBLICATION_AUTHORITY_ERROR:{type(exc).__name__}'],
             },
         )
 
@@ -41045,12 +40885,12 @@ def _app244_native_quality_authority(result, symbol, timeframe):
 
     levels['commit27_contextual_quality'] = dict(authority)
     levels['app_native_quality_authority'] = eligible
-    levels['app_native_quality_authority_version'] = _COMMIT245_NATIVE_Q_VERSION
+    levels['app_native_quality_authority_version'] = _NATIVE_PUBLICATION_AUTHORITY_VERSION
     levels['quality_q_scores'] = dict((authority.get('quality_domains') or {}).get('q_scores') or {})
     levels['quality_composite'] = (authority.get('quality_domains') or {}).get('composite')
     levels['quality_filter_authority'] = str((authority.get('movement_profile') or {}).get('name') or '')
     levels['quality_filter_confirmed'] = eligible
-    levels['quality_authority_mode'] = 'COMMIT31_MULTI_SAFETY_AUTHORITY'
+    levels['quality_authority_mode'] = 'CORE_SPECIALISED_SAFETY_33_4_1'
     levels['quality_parallel_role'] = 'LEGACY_DIAGNOSTIC_ONLY'
     levels['q10_contract_enforced_by_hard_guards'] = False
     levels['legacy_q1_q10_publication_authority'] = False
@@ -41070,7 +40910,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
             'is_rejected': False,
             'is_executable': True,
             'publication_gate_reached': True,
-            'publication_gate_source': 'COMMIT31_MULTI_SAFETY_AUTHORITY',
+            'publication_gate_source': 'CORE_SPECIALISED_SAFETY_33_4_1',
         })
         # Keep the old reason for audit, but never expose it as a current block.
         levels.pop('rejected_reason', None)
@@ -41088,7 +40928,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         levels['is_executable'] = False
         levels['is_rejected'] = True
         levels['suggested_size'] = 0
-        levels['rejected_reason'] = '; '.join(reason_codes[:8])[:1000] or 'COMMIT28_NOT_AUTHORISED'
+        levels['rejected_reason'] = '; '.join(reason_codes[:8])[:1000] or 'CORE_PUBLICATION_NOT_AUTHORISED'
         result['publication_status'] = 'ANALYSIS_ONLY'
         result['publication_eligible'] = False
         result['is_executable'] = False
@@ -41100,7 +40940,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
         status = 'SHADOW' if result.get('commit27_shadow_candidate') else 'REJECTED'
 
     result['levels'] = levels
-    return _app244_quality_audit(
+    return _core_quality_audit(
         result, symbol, timeframe, status=status, reason_codes=reason_codes,
         quality=quality, parallel=parallel, authority=authority,
     )
@@ -41265,7 +41105,9 @@ def _analyze_futures_all_parallel(combos_override=None):
                 isinstance(existing_q_context, dict)
                 and all(isinstance(existing_q_context.get(k), dict) for k in ('trend', 'momentum', 'volatility', 'structure'))
                 and isinstance(existing_q_audit, dict)
-                and str(existing_q_audit.get('version') or '') == _COMMIT245_NATIVE_Q_VERSION
+                and str(existing_q_audit.get('version') or '') == _NATIVE_PUBLICATION_AUTHORITY_VERSION
+                and str(existing.get('pipeline_generation') or '') == '33.4.1'
+                and str(((existing.get('quality_authority') or {}).get('version') or '')).startswith('CORE_PUBLICATION_QUALITY_33_4_1')
             )
 
             if same_closed_candle and reusable_quality_snapshot:
@@ -41428,10 +41270,10 @@ def _analyze_futures_all_parallel(combos_override=None):
             native_audit = r.get('app_native_quality_audit') or {}
             audit_is_current = (
                 isinstance(native_audit, dict)
-                and str(native_audit.get('version') or '') == _COMMIT245_NATIVE_Q_VERSION
+                and str(native_audit.get('version') or '') == _NATIVE_PUBLICATION_AUTHORITY_VERSION
             )
             if not audit_is_current:
-                r = _app244_native_quality_authority(
+                r = _core_publication_authority(
                     r, symbol, timeframe
                 )
 
@@ -49678,7 +49520,7 @@ def _ai_compact_technical_context(
         'market_context',
         'analysis_context',
         'context',
-        'contingency_playbook'
+        'execution_policy'
     ):
         value = result.get(
             key
@@ -60681,9 +60523,9 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 # ============================================================================
 # COMMIT 33.4 — CANONICAL CORE BOOTSTRAP
 # ============================================================================
-def _bootstrap_core_33_4():
+def _bootstrap_core_33_4_1():
     """Validate native modules without installing runtime overlays/monkeypatches."""
-    state = {'version':'33.4','entrypoint':'app:app','runtime_overlays':False}
+    state = {'version':'33.4.1','entrypoint':'app:app','runtime_overlays':False}
     try:
         _configured_futures_module()
         import market_context, pipeline_integrity, safety_profiles, publication_quality
@@ -60697,9 +60539,9 @@ def _bootstrap_core_33_4():
         state['core_error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
     return state
 
-_COMMIT_33_4_BOOTSTRAP = _bootstrap_core_33_4()
+_COMMIT_33_4_1_BOOTSTRAP = _bootstrap_core_33_4_1()
 _APP_PY_RUNTIME_VERSION = 'COMMIT33_4_CANONICAL_CORE_V1'
-print(f"✅ [33.4] núcleo canónico activo: {_COMMIT_33_4_BOOTSTRAP}", flush=True)
+print(f"✅ [33.4.1] núcleo canónico activo: {_COMMIT_33_4_1_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

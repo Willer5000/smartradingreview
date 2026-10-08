@@ -4917,7 +4917,7 @@ class FuturesAnalysis(TradingExpertSystem):
         try:
             from execution_geometry_committee import build_profile
             setup_family = str(
-                ((structure.get('_contingency_playbook') or {}).get('setup_family'))
+                ((structure.get('_execution_setup') or {}).get('setup_family'))
                 or ''
             ).upper()
             regime_info = self.detect_market_regime(
@@ -5962,11 +5962,11 @@ class FuturesAnalysis(TradingExpertSystem):
                             'volatility_regime': strategy.get('volatility_regime'),
                             'asset_class': meta.get('asset_class'), 'creates_direction': False,
                         }
-                        _playbook = dict(structure.get('_contingency_playbook') or {})
-                        _playbook['active'] = bool(_playbook.get('active', True))
-                        _playbook['setup_family'] = engine_family
-                        _playbook['multiasset_pre_execution_route'] = dict(_multi_preexec_route)
-                        structure['_contingency_playbook'] = _playbook
+                        _execution_setup = dict(structure.get('_execution_setup') or {})
+                        _execution_setup['setup_family'] = engine_family
+                        _execution_setup['multiasset_pre_execution_route'] = dict(_multi_preexec_route)
+                        _execution_setup['source'] = 'MULTIASSET_CLASS_PLAYBOOK'
+                        structure['_execution_setup'] = _execution_setup
         except Exception as _multi_preexec_error:
             _multi_preexec_route = {'error': type(_multi_preexec_error).__name__, 'creates_direction': False}
 
@@ -6945,24 +6945,8 @@ class FuturesAnalysis(TradingExpertSystem):
             else 0
         )
 
-        # V6 elimina los techos arbitrarios por timeframe/contingency como hard
-        # caps. El playbook de contingencia sigue auditado y puede bloquear por
-        # Safety/publicación, pero no reduce 12x técnicamente admisible a 3x/10x
-        # sólo por pertenecer al banco default.
-        contingency_playbook = (
-            structure.get('_contingency_playbook', {})
-            if isinstance(structure, dict) else {}
-        ) or {}
-        if contingency_playbook.get('active'):
-            levels['contingency_mode'] = True
-            try:
-                levels['contingency_leverage_reference_cap'] = max(
-                    1,
-                    int(((contingency_playbook.get('risk') or {}).get('leverage_cap')) or 10),
-                )
-            except Exception:
-                levels['contingency_leverage_reference_cap'] = 10
-            levels['contingency_leverage_cap_is_hard'] = False
+        # 33.4.1: leverage has one owner: the economic risk model above.
+        # No contingency/default-playbook cap is allowed to create a second authority.
 
         # Tamaño estándar recomendado DESPUÉS de seleccionar leverage. Así el
         # apalancamiento es comparable entre usuarios y el riesgo monetario se

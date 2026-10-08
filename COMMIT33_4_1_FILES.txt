@@ -1,0 +1,20 @@
+Commit 33.4.1 — archivos funcionalmente modificados/nuevos respecto al ZIP 33.4 recibido
+
+MODIFICADOS
+- app.py
+- futures_system.py
+- market_context.py
+- operational_intelligence.py
+- pipeline_integrity.py
+- publication_quality.py
+- safety_profiles.py
+- test_commit33_4_core.py
+
+NUEVOS
+- technical_evidence.py
+- test_commit33_4_1_core.py
+- README_COMMIT33_4_1.md
+- QA_COMMIT33_4_1_RESULT.md
+- COMMIT33_4_1_FILES.txt
+
+No se añade main_entrypoint, installer, monkeypatch, overlay ni runtime patch.

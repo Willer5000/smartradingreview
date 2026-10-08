@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "CORE_SAFETY_PROFILES_33_4_V1"
+VERSION = "CORE_SAFETY_PROFILES_33_4_1_V2"
 
 PROFILES = {
     "DIRECTIONAL_IMPULSE": {
@@ -111,11 +111,11 @@ def _market_bucket(symbol: str, market_type: str) -> str:
 
 
 def _setup_blob(levels: Mapping[str, Any], structure: Mapping[str, Any]) -> str:
-    playbook = structure.get("_contingency_playbook") if isinstance(structure.get("_contingency_playbook"), Mapping) else {}
+    execution_setup = structure.get("_execution_setup") if isinstance(structure.get("_execution_setup"), Mapping) else {}
     vals = [
         levels.get("setup_family"), levels.get("strategy_family"), levels.get("live_quant_setup_family"),
         levels.get("_execution_setup_family_commit28"), levels.get("strategy_route_family"),
-        playbook.get("setup_family"), playbook.get("strategy_family"),
+        execution_setup.get("setup_family"), execution_setup.get("strategy_family"),
     ]
     return " ".join(_u(v) for v in vals if v)
 

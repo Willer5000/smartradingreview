@@ -680,7 +680,7 @@ def prepare_operational_intelligence(
     # from being decided with one representation of an indicator and explained
     # with another.  Missing values remain missing; nothing is synthesized.
     try:
-        from contingency_strategy_engine import _indicator_groups
+        from technical_evidence import indicator_groups as _indicator_groups
         indicator_groups = _indicator_groups(dict(layers))
         indicator_groups["multi_timeframe"] = dict(mtf_context or {})
     except Exception as exc:

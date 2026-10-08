@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "CORE_PUBLICATION_QUALITY_33_4_V1"
+VERSION = "CORE_PUBLICATION_QUALITY_33_4_1_V2"
 
 PREMIUM_SAFETY_MIN = 75.0
 OPERATIONAL_SAFETY_MIN = 65.0
@@ -138,12 +138,12 @@ def _optional_metric(*values: Any) -> float | None:
 
 
 def _core_technical_route(result: Mapping[str, Any], action: str, market: str) -> Dict[str, Any]:
-    """Strict technical live authority when no historical Champion exists.
+    """Use the canonical candidate contract without scoring direction twice.
 
-    This is not a score bypass. It is a separate route class created at the
-    core pipeline layer and requires a non-ambiguous setup/thesis with multiple
-    independent evidence roles. Entry/SL/TP, specialised Safety and hard-risk
-    checks still run afterwards.
+    Pipeline Integrity owns directional candidate maturity. Publication owns
+    executable geometry, specialised Safety, economics and hard-risk checks.
+    Re-scoring the same thesis here was a hidden double gate that reduced
+    frequency without adding independent evidence.
     """
     op = result.get("operational_intelligence") if isinstance(result.get("operational_intelligence"), Mapping) else {}
     if not op or not bool(op.get("candidate_ready")):
@@ -155,41 +155,44 @@ def _core_technical_route(result: Mapping[str, Any], action: str, market: str) -
     if source not in {"CORE_SETUP", "THESIS+CORE_SETUP", "THESIS_CORE"}:
         return {"eligible": False, "reason": "NON_CORE_CANDIDATE_SOURCE"}
 
-    diag = op.get("particular_setup_diagnostic") if isinstance(op.get("particular_setup_diagnostic"), Mapping) else {}
-    if bool(diag.get("ambiguous")):
+    contract = op.get("candidate_contract") if isinstance(op.get("candidate_contract"), Mapping) else {}
+    if not contract or not bool(contract.get("passed")):
+        return {"eligible": False, "reason": "CORE_CANDIDATE_CONTRACT_NOT_READY"}
+    if _direction(contract.get("action")) != action or _u(contract.get("source")) != source:
+        return {"eligible": False, "reason": "CORE_CANDIDATE_CONTRACT_MISMATCH"}
+    if bool(contract.get("ambiguous")):
         return {"eligible": False, "reason": "AMBIGUOUS_CORE_SETUP"}
-    winner = diag.get("winner") if isinstance(diag.get("winner"), Mapping) else {}
-    quality = max(_f(op.get("candidate_quality")), _f(op.get("core_setup_quality")), _f(winner.get("quality")))
-    thesis = op.get("thesis") if isinstance(op.get("thesis"), Mapping) else {}
-    support = list(dict.fromkeys(
-        list(op.get("core_setup_support") or [])
-        + list(winner.get("core_hits") or [])
-        + list(winner.get("support_hits") or [])
-        + list(thesis.get("independent_support_families") or [])
-    ))
-    required_quality = 87.0 if market == "MULTIASSET" else 84.0
-    required_support = 5 if market == "MULTIASSET" else 4
-    setup = str(op.get("core_setup_family") or winner.get("setup") or "THESIS_CORE")
+
+    quality = _f(contract.get("quality"), _f(op.get("candidate_quality")))
+    quality_floor = _f(contract.get("quality_floor"), 0.0)
+    support = list(dict.fromkeys(list(contract.get("support") or [])))
+    support_count = int(contract.get("support_count") or len(support))
+    support_floor = int(contract.get("support_floor") or 0)
+    setup = str(contract.get("setup_family") or op.get("core_setup_family") or "THESIS_CORE")
     allowed = {
         "DIRECTIONAL_IMPULSE_CONTINUATION", "SWEEP_REVERSAL",
         "TREND_PULLBACK", "BREAKOUT_RETEST",
         "COMPRESSION_EXPANSION", "RANGE_MEAN_REVERSION", "THESIS_CORE",
     }
-    eligible = bool(quality >= required_quality and len(support) >= required_support and setup in allowed)
+    contract_consistent = bool(
+        quality >= quality_floor
+        and support_count >= support_floor
+        and setup in allowed
+    )
     return {
-        "eligible": eligible,
+        "eligible": contract_consistent,
         "route_id": f"CORE_TECHNICAL::{setup}",
         "source_type": "CORE_TECHNICAL_LIVE",
         "quality": round(quality, 2),
-        "support_count": len(support),
+        "support_count": support_count,
         "support": support,
-        "required_quality": required_quality,
-        "required_support": required_support,
+        "required_quality": quality_floor,
+        "required_support": support_floor,
         "setup": setup,
-        "reason": "CORE_TECHNICAL_CONTRACT_READY" if eligible else "CORE_TECHNICAL_CONTRACT_NOT_READY",
+        "reason": "CORE_CANDIDATE_CONTRACT_ACCEPTED" if contract_consistent else "CORE_CANDIDATE_CONTRACT_INCONSISTENT",
         "historical_oos_validated": False,
+        "direction_quality_scored_once": True,
     }
-
 
 def _geometry(levels: Mapping[str, Any], action: str) -> Tuple[bool, float, float, float, float]:
     entry = _f(levels.get("entry"))
@@ -386,7 +389,7 @@ def evaluate_publication(
     timeframe: str,
     quality: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
-    """Return Commit-27 final authority for Futures/Multi closed-candle output."""
+    """Return the canonical 33.4.1 publication authority for closed-candle output."""
     result = dict(result or {})
     levels = dict(result.get("levels") or {})
     decision = dict(result.get("decision") or {})
