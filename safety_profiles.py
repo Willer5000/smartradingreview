@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "CORE_SAFETY_PROFILES_33_4_2_V3"
+VERSION = "CORE_SAFETY_PROFILES_33_4_3_V3"
 
 PROFILES = {
     "DIRECTIONAL_IMPULSE": {

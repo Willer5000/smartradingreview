@@ -1,4 +1,4 @@
-"""33.4.2 — Particular Setup Router + pipeline integrity.
+"""33.4.3 — Particular Setup Router + pipeline integrity.
 
 Compatibility note
 ------------------
@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 import math
 from typing import Any, Dict, Mapping, Iterable, List, Tuple
 
-VERSION = "33.4.2_PIPELINE_INTEGRITY_V6"
-PIPELINE_GENERATION = "33.4.2"
+VERSION = "33.4.3_PIPELINE_INTEGRITY_V6"
+PIPELINE_GENERATION = "33.4.3"
 RELEASED_AT_UTC = "2026-10-08T12:00:00+00:00"
 
 _DIRECTIONAL = {"LONG", "SHORT", "COMPRA_SPOT", "VENTA_SPOT"}
@@ -747,7 +747,7 @@ def reconcile_operational_candidate(
     operational: Mapping[str, Any], *, layers: Mapping[str, Any], symbol: str,
     timeframe: str, system_type: str
 ) -> Dict[str, Any]:
-    """Single canonical candidate router for Commit 33.4.2.
+    """Single canonical candidate router for Commit 33.4.3.
 
     Candidate formation is deliberately separated from publication authority.
     The router does not require an OOS/live route before a technically valid
@@ -855,7 +855,7 @@ def reconcile_operational_candidate(
         op["core_setup_quality"] = round(setup_quality, 2) if selected_winner else None
         op["core_setup_support"] = setup_support if selected_winner else []
 
-        # 33.4.2 — candidate quality is evaluated ONCE here. Publication must
+        # 33.4.3 — candidate quality is evaluated ONCE here. Publication must
         # not re-apply a second, stricter score to the same directional evidence.
         # Downstream quality comes from primary Entry/SL/TP + specialised Safety.
         if candidate_source == "THESIS_CORE":

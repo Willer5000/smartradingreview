@@ -3853,6 +3853,8 @@ class FuturesAnalysis(TradingExpertSystem):
                 'adaptive_leverage_growth': bool(adaptive_authority),
                 'leverage_policy_version': policy.get('version'),
                 'leverage_policy_mode': policy.get('selection_policy'),
+                'leverage_policy_generation': policy.get('selection_policy_generation'),
+                'publication_grade_full_headroom': bool(policy.get('publication_grade_full_headroom')),
                 'target_loss_budget_pct_margin': policy.get('target_loss_budget_pct_margin'),
                 'risk_allocation_fraction': round(recommended_fraction, 4),
                 'initial_risk_allocation_fraction': round(initial_risk_fraction, 4),
@@ -7285,6 +7287,7 @@ class FuturesAnalysis(TradingExpertSystem):
             ),
             
             'leverage_policy': 'STANDARD_TECHNICAL_MAX (contract/liquidation/SL/ATR)',
+            'leverage_policy_generation': '33.4.3_V7_FULL_HEADROOM_SIZE_SEPARATED_RISK',
             'leverage_policy_version': leverage_evaluation.get(
                 'leverage_policy_version'
             ),

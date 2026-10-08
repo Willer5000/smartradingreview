@@ -21574,7 +21574,7 @@ class TradingExpertSystem:
                                 existing_levels=_manual_levels,
                             )
                             levels.update({
-                                'pipeline_generation': '33.4.2_MANUAL_ANALYSIS_ONLY',
+                                'pipeline_generation': '33.4.3_MANUAL_ANALYSIS_ONLY',
                                 'is_rejected': True,
                                 'is_executable': False,
                                 'publication_status': 'ANALYSIS_ONLY',
@@ -30014,7 +30014,7 @@ def health():
 
 @app.route('/api/runtime/version')
 def api_runtime_version_commit33_4_2():
-    """Deployment truth for the canonical Commit 33.4.2 core."""
+    """Deployment truth for the canonical Commit 33.4.3 core."""
     import hashlib
     def _sha(path):
         try:
@@ -30031,7 +30031,7 @@ def api_runtime_version_commit33_4_2():
     except Exception as exc:
         _safety = {'error': type(exc).__name__}
     return jsonify({
-        'version': 'COMMIT33_4_2_EXECUTION_AND_DISPLAY_CORE_V1',
+        'version': 'COMMIT33_4_3_EXECUTION_ECONOMICS_DETAIL_CORE_V1',
         'entrypoint': 'app:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
@@ -35047,93 +35047,32 @@ def api_saved_signals_kpis():
 
 @app.route('/api/saved_signals/<signal_id>/chart_data', methods=['GET'])
 def api_saved_signals_chart_data(signal_id):
-    """
-    Retorna datos de velas para renderizar el gráfico TradingView-style de la
-    señal guardada. Incluye: velas OHLC + entry + SL + TP + action + current_price.
-    
-    El frontend usa Plotly para dibujar:
-    - Velas japonesas (dark theme)
-    - Zona VERDE semitransparente: del entry hacia TP (dirección favorable)
-    - Zona ROJA semitransparente: del entry hacia SL (dirección desfavorable)
+    """Return saved-trade detail + best-effort market candles.
+
+    Commit 33.4.3 separates the durable trade record from chart transport:
+    failure to download candles must NEVER hide the signal's technical sheet,
+    review, learning, Entry/SL/TP or PnL.  Multi-Asset signals are routed to
+    the Multi-Asset engine/contract mapping instead of the crypto Futures map.
     """
     try:
-
-        from saved_signals import (
-            get_saved_signal
-        )
+        from saved_signals import get_saved_signal
 
         user = _authenticated_user()
-
         if not user:
-
             return jsonify({
-                'success':
-                    False,
-
-                'authenticated':
-                    False,
-
-                'error':
-                    'Debes iniciar sesión.'
+                'success': False,
+                'authenticated': False,
+                'error': 'Debes iniciar sesión.'
             }), 401
 
-        sig = get_saved_signal(
-            signal_id
-        )
+        sig = get_saved_signal(signal_id)
+        if not sig or sig.get('user_name') != user:
+            return jsonify({'success': False, 'error': 'No encontrada'}), 404
 
-        if (
-            not sig
-            or sig.get(
-                'user_name'
-            ) != user
-        ):
+        symbol = str(sig.get('symbol') or '').upper().replace('/', '-')
+        tf = str(sig.get('timeframe') or '')
 
-            return jsonify({
-                'success':
-                    False,
-
-                'error':
-                    'No encontrada'
-            }), 404
-
-        symbol = sig.get('symbol')
-        tf = sig.get('timeframe')
-        
-        # HOTFIX 14.1 — Saved Signals es exclusivamente FUTURES.
-        # El detalle gráfico debe usar el mismo contrato perpetuo que el
-        # lifecycle; antes consultaba `expert_system` (Spot), por lo que el
-        # usuario podía ver una vela/precio que tocaba Entry mientras el
-        # monitor Futures estaba evaluando otro mercado.
-        futures_market = _get_futures_system()
-        if futures_market is None:
-            return jsonify({
-                'success': False,
-                'error': 'FuturesSystem no disponible'
-            }), 200
-
-        df = futures_market.get_kucoin_data(symbol, tf)
-        if df is None or len(df) < 5:
-            return jsonify({
-                'success': False,
-                'error': 'Sin datos de velas Futures perpetuos'
-            }), 200
-        
-        # Últimas 100 velas
-        df = df.tail(100).copy().reset_index(drop=True)
-        
-        # Convertir a lista JSON-serializable
-        candles = {
-            'time': [str(t) for t in df['time'].astype(str).tolist()],
-            'open': [float(v) for v in df['open'].tolist()],
-            'high': [float(v) for v in df['high'].tolist()],
-            'low': [float(v) for v in df['low'].tolist()],
-            'close': [float(v) for v in df['close'].tolist()],
-        }
-        current_price = float(df['close'].iloc[-1])
-
-        # RC9.7.14 — post-trade review on demand. This is deliberately read-only
-        # and runs only when the user opens one saved signal. It does not start
-        # a market analysis and it never exposes another user's identity/trades.
+        # Durable review/learning is independent of the market-data request.
         learning_bundle = {
             'configuration': {},
             'forensics': {},
@@ -35144,20 +35083,91 @@ def api_saved_signals_chart_data(signal_id):
             from user_execution_learning import get_trade_learning_bundle
             learning_bundle = get_trade_learning_bundle(sig)
         except Exception as learning_error:
-            print(f"⚠️ RC9.7.14 trade review: {learning_error}")
+            print(f"⚠️ 33.4.3 trade review: {learning_error}")
 
-        # Free-runtime hygiene: the JSON lists are detached from pandas now.
+        candles = {'time': [], 'open': [], 'high': [], 'low': [], 'close': []}
+        current_price = None
+        chart_warning = None
+        market_data_source = None
+        chart_market = 'futures'
+
         try:
-            del df
+            # Multi saved signals use logical symbols (CL-USDT, NATGAS-USDT...).
+            # The generic Futures engine does not own those transport mappings.
+            from multiasset_system import MULTIASSET_SYMBOLS, multiasset_system
+            is_multiasset = (
+                symbol in set(MULTIASSET_SYMBOLS)
+                or str(sig.get('market') or sig.get('system_type') or '').lower()
+                   in {'multiasset', 'multi-activo', 'multi_asset'}
+            )
         except Exception:
-            pass
+            is_multiasset = False
+            multiasset_system = None
+
+        market_engine = None
+        if is_multiasset and multiasset_system is not None:
+            market_engine = multiasset_system
+            chart_market = 'multiasset'
+            market_data_source = 'KUCOIN_MULTI_ASSET_PERPETUAL_REST'
+        else:
+            market_engine = _get_futures_system()
+            chart_market = 'futures'
+            market_data_source = 'KUCOIN_FUTURES_PERPETUAL_REST'
+
+        if market_engine is None:
+            chart_warning = 'Motor de mercado no disponible temporalmente.'
+        else:
+            try:
+                df = market_engine.get_kucoin_data(symbol, tf)
+            except Exception as market_error:
+                df = None
+                chart_warning = f'Datos de velas no disponibles temporalmente ({type(market_error).__name__}).'
+
+            if df is None or len(df) < 5:
+                if not chart_warning:
+                    chart_warning = (
+                        'Sin datos de velas Multi-Activo para este contrato/timeframe.'
+                        if is_multiasset
+                        else 'Sin datos de velas Futures perpetuos para este par/timeframe.'
+                    )
+            else:
+                df = df.tail(100).copy().reset_index(drop=True)
+                candles = {
+                    'time': [str(t) for t in df['time'].astype(str).tolist()],
+                    'open': [float(v) for v in df['open'].tolist()],
+                    'high': [float(v) for v in df['high'].tolist()],
+                    'low': [float(v) for v in df['low'].tolist()],
+                    'close': [float(v) for v in df['close'].tolist()],
+                }
+                current_price = float(df['close'].iloc[-1])
+                try:
+                    del df
+                except Exception:
+                    pass
+
+        # A missing chart is not a missing trade.  This keeps the detail modal
+        # useful even through a provider outage or retired synthetic contract.
+        if current_price is None:
+            for key in ('current_price', 'exit_price', 'entry'):
+                try:
+                    candidate = float(sig.get(key) or 0)
+                    if candidate > 0:
+                        current_price = candidate
+                        break
+                except Exception:
+                    continue
+        if current_price is None:
+            current_price = 0.0
 
         return jsonify({
             'success': True,
             'signal': sig,
             'candles': candles,
             'current_price': current_price,
-            'market_data_source': 'KUCOIN_FUTURES_PERPETUAL_REST',
+            'chart_available': bool(candles.get('time')),
+            'chart_warning': chart_warning,
+            'chart_market': chart_market,
+            'market_data_source': market_data_source,
             'signal_configuration': learning_bundle.get('configuration') or {},
             'trade_forensics': learning_bundle.get('forensics') or {},
             'global_execution_learning': learning_bundle.get('global_profile') or {},
@@ -35595,7 +35605,7 @@ _MULTI_LOCAL_SNAPSHOT_PATH = os.environ.get(
     '/tmp/smartradingreview_multi_cache_33_4_1.json'
 )
 _MULTI_LOCAL_SNAPSHOT_LOADED = False
-_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.2'
+_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.3'
 
 def _multiasset_restore_local_snapshot_once():
     global _MULTI_LOCAL_SNAPSHOT_LOADED
@@ -36987,7 +36997,7 @@ def _multiasset_light_chart_snapshot_33_4_2(symbol, timeframe):
             'ui_partial_chart_only':True,
             'ui_partial_layers':'OHLCV_PLUS_DISPLAY_STRUCTURE',
             'runtime_memory_profile':'MULTI_DISPLAY_MINIMAL',
-            'pipeline_generation':'33.4.2',
+            'pipeline_generation':'33.4.3',
             'system_type':'multiasset',
             'analysis_mode':'DISPLAY_LIGHT_REAL_OHLCV',
             'structure':_multiasset_light_structure_33_4_2(work),
@@ -37160,7 +37170,7 @@ def api_multiasset_opportunities():
 
 @app.route('/api/multiasset/display', methods=['GET'])
 def api_multiasset_display_33_4_2():
-    """33.4.2 canonical lightweight selected-cell display lane.
+    """33.4.3 canonical lightweight selected-cell display lane.
 
     One symbol + one timeframe only. It reuses the 60-second/4-cell LRU light
     snapshot and NEVER starts the heavy committee/Research/AI pipeline. The
@@ -37182,19 +37192,19 @@ def api_multiasset_display_33_4_2():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'33.4.2'
+                'retry_after_ms':5000,'response_contract_version':'33.4.3'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'33.4.2'
+            'response_contract_version':'33.4.3'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'33.4.2'
+            'error':str(exc)[:180],'response_contract_version':'33.4.3'
         }),200
 
 
@@ -37210,7 +37220,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4.2'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4.3'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Commit 18.1.1: the browser owns the separate lightweight display GET.
@@ -37224,7 +37234,7 @@ def api_multiasset_analyze():
             partial.update(compact)
             partial['symbol']=symbol; partial['timeframe']=timeframe
             partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4.2'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4.3'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -37986,7 +37996,7 @@ _FUTURES_FAST_RESTORE_STATE = {
     'last_attempt': 0.0,
 }
 
-_FUTURES_CACHE_SCHEMA_VERSION = 6
+_FUTURES_CACHE_SCHEMA_VERSION = 7
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '30m': 30 * 60,
@@ -38036,7 +38046,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_2_PUBLICATION_AUTHORITY_V2'
+_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_3_PUBLICATION_AUTHORITY_V3'
 
 
 def _compact_futures_quality_context(result):
@@ -39299,7 +39309,7 @@ def _load_futures_cache_from_disk():
                     }
                     _futures_analysis_cache['ts'] = 0.0
                 print(
-                    f'♻️ [FUT 33.4.2] contrato v{schema_version} invalidado: '
+                    f'♻️ [FUT 33.4.3] contrato v{schema_version} invalidado: '
                     f'análisis descartado, lifecycle preservado={len(lifecycle_only)}',
                     flush=True,
                 )
@@ -41212,7 +41222,7 @@ def _analyze_futures_all_parallel(combos_override=None):
                 and all(isinstance(existing_q_context.get(k), dict) for k in ('trend', 'momentum', 'volatility', 'structure'))
                 and isinstance(existing_q_audit, dict)
                 and str(existing_q_audit.get('version') or '') == _NATIVE_PUBLICATION_AUTHORITY_VERSION
-                and str(existing.get('pipeline_generation') or '') == '33.4.2'
+                and str(existing.get('pipeline_generation') or '') == '33.4.3'
                 and str(((existing.get('quality_authority') or {}).get('version') or '')).startswith('CORE_PUBLICATION_QUALITY_33_4_1')
             )
 
@@ -60629,11 +60639,11 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 
 
 # ============================================================================
-# COMMIT 33.4.2 — CANONICAL CORE BOOTSTRAP
+# COMMIT 33.4.3 — CANONICAL CORE BOOTSTRAP
 # ============================================================================
-def _bootstrap_core_33_4_2():
+def _bootstrap_core_33_4_3():
     """Validate native modules without installing runtime overlays/monkeypatches."""
-    state = {'version':'33.4.2','entrypoint':'app:app','runtime_overlays':False}
+    state = {'version':'33.4.3','entrypoint':'app:app','runtime_overlays':False}
     try:
         _configured_futures_module()
         import market_context, pipeline_integrity, safety_profiles, publication_quality
@@ -60647,9 +60657,9 @@ def _bootstrap_core_33_4_2():
         state['core_error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
     return state
 
-_COMMIT_33_4_2_BOOTSTRAP = _bootstrap_core_33_4_2()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_2_EXECUTION_AND_DISPLAY_CORE_V1'
-print(f"✅ [33.4.2] núcleo canónico activo: {_COMMIT_33_4_2_BOOTSTRAP}", flush=True)
+_COMMIT_33_4_3_BOOTSTRAP = _bootstrap_core_33_4_3()
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_3_EXECUTION_ECONOMICS_DETAIL_CORE_V1'
+print(f"✅ [33.4.3] núcleo canónico activo: {_COMMIT_33_4_3_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

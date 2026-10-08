@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, Mapping, Tuple
 
-VERSION = "CORE_PUBLICATION_QUALITY_33_4_2_V3"
+VERSION = "CORE_PUBLICATION_QUALITY_33_4_3_V3"
 
 PREMIUM_SAFETY_MIN = 75.0
 OPERATIONAL_SAFETY_MIN = 65.0
@@ -389,7 +389,7 @@ def evaluate_publication(
     timeframe: str,
     quality: Mapping[str, Any] | None,
 ) -> Dict[str, Any]:
-    """Return the canonical 33.4.2 publication authority for closed-candle output."""
+    """Return the canonical 33.4.3 publication authority for closed-candle output."""
     result = dict(result or {})
     levels = dict(result.get("levels") or {})
     decision = dict(result.get("decision") or {})

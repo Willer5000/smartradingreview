@@ -19,7 +19,7 @@ import math
 from typing import Any, Dict, Optional
 
 
-POLICY_VERSION = "RC9_7_14_STANDARD_TECHNICAL_MAX_LEVERAGE_V6"
+POLICY_VERSION = "COMMIT33_4_3_STANDARD_TECHNICAL_MAX_LEVERAGE_V7"
 
 
 def _finite(value: Any, default: float = 0.0) -> float:
@@ -94,12 +94,24 @@ def select_risk_budget_leverage(
     if technical_hard_cap < 1.0:
         return None
 
-    # Quality is NOT TP probability. It controls how much of the technically
-    # available leverage headroom is used. At 100/100 it approaches the hard
-    # technical ceiling; mediocre quality uses materially less.
+    # Commit 33.4.3 — leverage and position size have separate jobs.
+    #
+    # Once a setup is publication-grade (Safety + execution quality >= 75),
+    # leverage uses the FULL technically admissible headroom.  Monetary risk
+    # is then controlled with recommended position size, not by arbitrarily
+    # forcing a fast, high-quality setup down to 3x/5x.
+    #
+    # Below publication-grade quality we still reduce leverage conservatively.
+    # Quality remains a proxy, never a probability of TP.
     quality = _finite(quality_score, safety)
     quality = min(100.0, max(0.0, quality))
-    quality_factor = 0.35 + 0.65 * ((quality / 100.0) ** 1.20)
+    publication_grade = safety >= 75.0 and quality >= 75.0
+    if publication_grade:
+        quality_factor = 1.0
+    elif safety >= 65.0 and quality >= 65.0:
+        quality_factor = 0.80
+    else:
+        quality_factor = 0.55
 
     calibrated_p = _finite(calibrated_tp_probability_lower, -1.0)
     probability_authority = 0.0 <= calibrated_p <= 1.0
@@ -153,10 +165,12 @@ def select_risk_budget_leverage(
         "quality_score": round(quality, 2),
         "quality_factor": round(quality_factor, 4),
         "quality_is_probability": False,
+        "publication_grade_full_headroom": bool(publication_grade),
         "calibrated_probability_authority": bool(probability_authority),
         "calibrated_tp_probability_lower": (
             round(calibrated_p, 4) if probability_authority else None
         ),
         "selection_ceiling": int(maximum_integer),
         "selection_policy": "STANDARD_TECHNICAL_MAX_V6",
+        "selection_policy_generation": "33.4.3_V7_FULL_HEADROOM",
     }
