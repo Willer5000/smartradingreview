@@ -1,10 +1,10 @@
-# COMMIT 32 FINAL — root-cause recovery authority.
+# COMMIT 32.1 — recovery authority: ABI + visuals + RAM + candidate recovery.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn commit32_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
+    startCommand: gunicorn commit32_1_main_entrypoint:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 60 --max-requests-jitter 15
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -33,9 +33,9 @@ services:
       - key: FREE_RUNTIME_INTERACTIVE_LOCK_WAIT_SECONDS
         value: "10"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "205"
+        value: "280"
       - key: MEMORY_HARD_LIMIT_MB
-        value: "285"
+        value: "350"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "1"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
@@ -43,7 +43,7 @@ services:
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
         value: "8"
       - key: MEMORY_JOB_START_LIMIT_MB
-        value: "190"
+        value: "240"
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: FREE_PLAN_LOCKDOWN
@@ -64,12 +64,28 @@ services:
         value: "1"
       - key: COMMIT32_SPOT_MARKET_SIGNAL_AUTHORITY
         value: "1"
+      - key: COMMIT32_1_RECOVERY_ENABLED
+        value: "1"
+      - key: COMMIT32_1_JOB_START_MB
+        value: "240"
+      - key: COMMIT32_1_MEMORY_SOFT_MB
+        value: "280"
+      - key: COMMIT32_1_MEMORY_HARD_MB
+        value: "350"
+      - key: COMMIT32_1_RAM_SHED_MB
+        value: "285"
+      - key: COMMIT32_1_RAM_ABORT_MB
+        value: "335"
+      - key: COMMIT32_1_POST_JOB_TRIM_MB
+        value: "250"
+      - key: COMMIT32_1_VISUAL_HARD_RSS_MB
+        value: "360"
       - key: COMMIT32_RAM_SHED_MB
-        value: "245"
+        value: "285"
       - key: COMMIT32_RAM_ABORT_MB
-        value: "285"
+        value: "335"
       - key: MEMORY_IN_JOB_ABORT_MB
-        value: "285"
+        value: "335"
       - key: LIQUIDATION_HEATMAP_MAX_RESIDENT
         value: "4"
       - key: COMMIT22_WORKER_RESTART_POLICY
