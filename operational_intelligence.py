@@ -505,7 +505,7 @@ def build_independent_thesis(*, layers: Mapping[str, Any], mtf_context: Mapping[
     elif trend_dir == "BEARISH": trend_score = -0.55
     impulse = {}
     try:
-        from commit30_core import detect_directional_impulse
+        from market_context import detect_directional_impulse
         impulse = detect_directional_impulse(trend, momentum, volume, structure)
     except Exception:
         impulse = {}

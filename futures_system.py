@@ -5927,31 +5927,48 @@ class FuturesAnalysis(TradingExpertSystem):
         # Strategy Bank family before Entry/SL/TP.  Now that the ABI is native,
         # preserve that behavior explicitly so fixing the TypeError does not
         # regress Multi execution routing.  No I/O and no direction creation.
-        _commit28_preexec_route = {}
+        _multi_preexec_route = {}
         try:
-            if isinstance(structure, dict):
-                from execution_abi_175104 import _multiasset_pre_execution_route
-                _commit28_preexec_route = _multiasset_pre_execution_route(
-                    self,
-                    decision=str(decision or '').upper(),
-                    trend=dict(trend or {}),
-                    momentum=dict(momentum or {}),
-                    volatility=dict(volatility or {}),
-                    structure=structure,
-                    symbol=str(symbol or ''),
-                    timeframe=str(timeframe or ''),
-                ) or {}
-                if _commit28_preexec_route.get('engine_family'):
-                    _playbook = dict(structure.get('_contingency_playbook') or {})
-                    _playbook['active'] = bool(_playbook.get('active', True))
-                    _playbook['setup_family'] = _commit28_preexec_route['engine_family']
-                    _playbook['multiasset_pre_execution_route_commit28'] = dict(_commit28_preexec_route)
-                    structure['_contingency_playbook'] = _playbook
-        except Exception as _commit28_preexec_error:
-            _commit28_preexec_route = {
-                'error': type(_commit28_preexec_error).__name__,
-                'creates_direction': False,
-            }
+            if isinstance(structure, dict) and str(self._market_label()).upper().startswith('MULTI'):
+                import multiasset_system as ma
+                meta = dict((ma.MULTIASSET_SYMBOLS or {}).get(str(symbol or '').upper().replace('/','-')) or {})
+                if meta and str(decision or '').upper() in {'LONG','SHORT'}:
+                    pseudo = {
+                        'trend': dict(trend or {}),
+                        'momentum': dict(momentum or {}),
+                        'structure': dict(structure or {}),
+                        'levels': {'atr_pct': float((volatility or {}).get('atr_pct') or 0.0)},
+                        'atr_pct': float((volatility or {}).get('atr_pct') or 0.0),
+                    }
+                    strategy = ma._strategy_context(meta, str(timeframe or ''), pseudo) or {}
+                    route = ma._route_strategy_family(pseudo, strategy, {}) or {}
+                    selected = str(route.get('selected_family') or '').upper()
+                    mapping = {
+                        'SWEEP_MSS_POI':'SWEEP_REVERSAL',
+                        'VWAP_SESSION_PULLBACK':'TREND_PULLBACK',
+                        'MEAN_REVERSION_SELECTIVE':'MEAN_REVERSION',
+                        'VOLATILITY_RETEST':'BREAKOUT_RETEST',
+                        'POST_EVENT_CONFIRMATION':'BREAKOUT_RETEST',
+                        'POST_MACRO_CONFIRMATION':'TREND_PULLBACK',
+                        'MACRO_TREND_CONFIRMATION':'TREND_PULLBACK',
+                        'RATES_USD_CONFIRMATION':'TREND_PULLBACK',
+                        'ASIA_SESSION_RETEST':'BREAKOUT_RETEST',
+                    }
+                    engine_family = mapping.get(selected, selected)
+                    if engine_family:
+                        _multi_preexec_route = {
+                            'selected_family': selected, 'engine_family': engine_family,
+                            'regime': strategy.get('regime'),
+                            'volatility_regime': strategy.get('volatility_regime'),
+                            'asset_class': meta.get('asset_class'), 'creates_direction': False,
+                        }
+                        _playbook = dict(structure.get('_contingency_playbook') or {})
+                        _playbook['active'] = bool(_playbook.get('active', True))
+                        _playbook['setup_family'] = engine_family
+                        _playbook['multiasset_pre_execution_route'] = dict(_multi_preexec_route)
+                        structure['_contingency_playbook'] = _playbook
+        except Exception as _multi_preexec_error:
+            _multi_preexec_route = {'error': type(_multi_preexec_error).__name__, 'creates_direction': False}
 
         # ==============================================================
         # Q1 / MOTOR PADRE
@@ -6324,7 +6341,7 @@ class FuturesAnalysis(TradingExpertSystem):
         # duro y autoridad estadística siguen siendo no compensatorios.
         specialised_safety = {}
         try:
-            from safety_profiles_commit31 import evaluate_safety
+            from safety_profiles import evaluate_safety
             try:
                 from multiasset_system import MULTIASSET_SYMBOLS as _c31_multi_symbols
                 _c31_market_type = (

@@ -10331,7 +10331,7 @@ class TradingExpertSystem:
         state is context only; publication still needs a validated route + Safety.
         """
         try:
-            from commit30_core import classify_market_regime
+            from market_context import classify_market_regime
             return classify_market_regime(
                 trend, volatility, momentum=momentum, volume=(volume or {}), structure=structure,
             )
@@ -11187,10 +11187,10 @@ class TradingExpertSystem:
 
             # COMMIT 29 — datos faltantes se abstienen. ADX=0 por ausencia no
             # equivale a un mercado lateral observado.
-            from commit29_core import context_available as _c29_context_available
-            btc_available = _c29_context_available(btc_analysis)
-            paxg_available = _c29_context_available(paxg_analysis)
-            ratio_available = _c29_context_available(paxg_btc_analysis)
+            from market_context import context_available as _context_available
+            btc_available = _context_available(btc_analysis)
+            paxg_available = _context_available(paxg_analysis)
+            ratio_available = _context_available(paxg_btc_analysis)
             context_missing = [
                 name for name, ok in (('BTC', btc_available), ('PAXG', paxg_available), ('RATIO', ratio_available))
                 if not ok
@@ -17615,21 +17615,21 @@ class TradingExpertSystem:
                         'reason': str(_recovery.get('reason') or 'NO_RECOVERY_GEOMETRY'),
                     })
 
+            execution_market_type = 'futures' if is_futures else 'spot'
+            if is_futures:
+                try:
+                    from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols
+                    if str(symbol or '').upper().replace('/','-') in set(_multiasset_symbols or {}):
+                        execution_market_type = 'multiasset'
+                except Exception:
+                    pass
+
             if baseline_geometry_valid:
                 try:
                     from execution_specialist_committees import (
                         build_execution_context,
                         coordinate_execution_committees,
                     )
-
-                    execution_market_type = 'futures' if is_futures else 'spot'
-                    if is_futures:
-                        try:
-                            from multiasset_system import MULTIASSET_SYMBOLS as _multiasset_symbols
-                            if str(symbol or '').upper() in set(_multiasset_symbols or {}):
-                                execution_market_type = 'multiasset'
-                        except Exception:
-                            pass
 
                     # 17.5.4: observations live in capas, not in Structure.
                     # Reuse loaded context; no fetch, new vote or signal gate.
@@ -21188,7 +21188,7 @@ class TradingExpertSystem:
             # irreversible pre-candidate veto.  No Safety/Entry/SL/TP/RR threshold
             # is changed here.
             try:
-                from pipeline_integrity_175101 import reconcile_operational_candidate
+                from pipeline_integrity import reconcile_operational_candidate
                 operational_intelligence = reconcile_operational_candidate(
                     operational_intelligence,
                     layers=capas,
@@ -21566,7 +21566,7 @@ class TradingExpertSystem:
                 try:
                     # Commit 17.5.10.4 — one execution ABI for Spot/Futures/Multi.
                     # Futures legacy compatibility is installed once at the class
-                    # boundary by execution_abi_175104.py. No shared market flag
+                    # boundary by native execution boundary. No shared market flag
                     # and no per-call signature branch are used here.
                     levels = self.calculate_entry_levels(
                         accion_consenso,
@@ -22659,7 +22659,7 @@ class TradingExpertSystem:
             # generation so forward learning / alpha-decay can never be confused
             # with an older Entry/SL/TP generation.
             try:
-                from pipeline_integrity_175101 import stamp_pipeline_generation
+                from pipeline_integrity import stamp_pipeline_generation
                 resultado_final = stamp_pipeline_generation(resultado_final)
             except Exception as _generation_stamp_error:
                 resultado_final['pipeline_generation_error'] = type(_generation_stamp_error).__name__
@@ -26906,7 +26906,7 @@ class TraderTecnico(TraderBase):
             # ADX puede rezagarse durante la primera vela de desplazamiento.
             # Este voto es evidencia del especialista; NO tiene autoridad de publicación.
             try:
-                from commit30_core import detect_directional_impulse
+                from market_context import detect_directional_impulse
                 _c30_impulse = detect_directional_impulse(
                     trend, momentum, capas.get('volume', {}) or {}, capas.get('structure', {}) or {}
                 )
@@ -28931,7 +28931,7 @@ class TraderMultiframe(TraderBase):
             print(f"   Actual: {current_direction} | Superior: {higher_direction}")
 
             try:
-                from commit30_core import detect_directional_impulse
+                from market_context import detect_directional_impulse
                 _c30_mtf_impulse = detect_directional_impulse(
                     trend, momentum, capas.get('volume', {}) or {}, capas.get('structure', {}) or {}
                 )
@@ -29437,9 +29437,9 @@ class Moderador:
                     estrategias = []
                 if razones is None:
                     razones = []
-                from commit28_core import normalize_specialist_action as _c28_normalize_specialist_action
+                from market_context import normalize_specialist_action as _normalize_specialist_action
                 _c28_action, _legacy_action_before_abstain, _c28_is_abstention = (
-                    _c28_normalize_specialist_action(accion, confianza)
+                    _normalize_specialist_action(accion, confianza)
                 )
                 accion_original = 'ABSTAIN' if _c28_is_abstention else _c28_action
                 accion = self._normalize_action_for_market(_c28_action, system_type)
@@ -30215,8 +30215,8 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit31():
-    """Deployment truth without secrets; verifies Commit31 Multi-Safety live."""
+def api_runtime_version_commit33_4():
+    """Deployment truth for the canonical Commit 33.4 core."""
     import hashlib
     def _sha(path):
         try:
@@ -30228,21 +30228,24 @@ def api_runtime_version_commit31():
         except Exception:
             return None
     try:
-        from safety_profiles_commit31 import audit as _c31_safety_audit
-        _safety = _c31_safety_audit()
+        from safety_profiles import audit as _safety_audit
+        _safety = _safety_audit()
     except Exception as exc:
         _safety = {'error': type(exc).__name__}
     return jsonify({
-        'version': 'COMMIT31_MULTI_SAFETY_AUTHORITY_V1',
-        'entrypoint': 'commit31_main_entrypoint:app',
+        'version': 'COMMIT33_4_CANONICAL_CORE_V1',
+        'entrypoint': 'app:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
         'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
-        'safety_profiles_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'safety_profiles_commit31.py')),
+        'safety_profiles_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'safety_profiles.py')),
         'memory': _memory_runtime_state(),
         'safety_architecture': _safety,
         'contracts': {
             'legacy_safety_75_publication_gate': False,
+            'runtime_overlay_chain': False,
+            'canonical_core_pipeline': True,
+            'core_technical_route_supported': True,
             'q1_q10_publication_authority': False,
             'single_specialised_safety_per_signal': True,
             'safety_score_is_hard_gate': False,
@@ -35735,13 +35738,8 @@ def api_run_scheduled():
 _FUTURES_UNIVERSE_CONFIG_LOCK = threading.Lock()
 
 def _configured_futures_module():
-    """Apply universe config + Commit 17.5.10.4 execution ABI adapter."""
+    """Return the native Futures core with the configured universe."""
     import futures_system as futures_module
-    try:
-        from execution_abi_175104 import install_futures_execution_abi_175104
-        install_futures_execution_abi_175104(futures_module)
-    except Exception as exc:
-        print(f"⚠️ Commit 17.5.10.4 execution ABI no pudo instalarse: {exc}")
     try:
         from futures_universe import configure_futures_module
         with _FUTURES_UNIVERSE_CONFIG_LOCK:
@@ -35856,11 +35854,7 @@ def _multiasset_save_local_snapshot():
 
 def _get_multiasset_system():
     try:
-        # MultiAssetAnalysis inherits FuturesAnalysis. Install the ABI adapter
-        # before importing/using the subclass so both markets share one contract.
-        import futures_system as futures_module
-        from execution_abi_175104 import install_futures_execution_abi_175104
-        install_futures_execution_abi_175104(futures_module)
+        # MultiAssetAnalysis inherits the native Futures execution contract.
         from multiasset_system import multiasset_system
         return multiasset_system
     except Exception as exc:
@@ -36542,7 +36536,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
             result.setdefault('symbol',symbol); result.setdefault('timeframe',timeframe)
             result=_apply_17_5_8_preliminary_learning_prior(result,'multiasset')
             # COMMIT 27: Multi-Asset now passes through the SAME final authority
-            # closure as Futures, while contextual_quality_commit28 selects a
+            # closure as Futures, while publication_quality selects a
             # market/asset-class-specific quality lens. No crypto rule is copied
             # into Multi and unsupported fast routes remain Shadow.
             result=_app244_native_quality_authority(result, symbol, timeframe)
@@ -36990,7 +36984,7 @@ def _multi_technical_sentiment_175113(df, timeframe):
 # the center chart blank or showing stale BTC identity.
 _MULTI_UI_LIGHT_CACHE = {'lock': threading.RLock(), 'items': {}}
 
-def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
+def _multiasset_light_chart_snapshot_33_4(symbol, timeframe):
     """Commit 18.1.1 memory-safe selected-cell display lane.
 
     IMPORTANT: this endpoint is presentation only. It fetches/caches REAL OHLCV
@@ -37016,10 +37010,15 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
         }
 
     df=None
-    source='MULTI_HEAVY_OHLCV_CACHE_OR_REST'
+    source='MULTI_DISPLAY_RAW_CACHE'
     primary_error=None
+
+    # Commit 33.4: the display lane must finish inside the browser timeout.
+    # It first reuses the native raw OHLCV cache, then the cheap 72-candle
+    # router fetch (4s timeout). It never launches the 15s heavy analysis fetch.
     try:
-        df=engine.get_kucoin_data(symbol,timeframe)
+        from futures_system import _get_cached_futures_data
+        df=_get_cached_futures_data(str(symbol),str(timeframe))
     except Exception as exc:
         primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
         df=None
@@ -37032,7 +37031,7 @@ def _multiasset_light_chart_snapshot_175112(symbol, timeframe):
                 df=router_df.copy()
                 if 'time' not in df.columns and 'timestamp' in df.columns:
                     df=df.rename(columns={'timestamp':'time'})
-                source='MULTI_ROUTER_CLOSED_OHLCV_FALLBACK'
+                source='MULTI_ROUTER_CLOSED_OHLCV'
         except Exception as exc:
             if not primary_error:
                 primary_error=f'{type(exc).__name__}:{str(exc)[:120]}'
@@ -37241,8 +37240,8 @@ def api_multiasset_opportunities():
         }),200
 
 @app.route('/api/multiasset/display', methods=['GET'])
-def api_multiasset_display_18():
-    """Commit 18 lightweight selected-cell display lane.
+def api_multiasset_display_33_4():
+    """Commit 33.4 canonical lightweight selected-cell display lane.
 
     One symbol + one timeframe only. It reuses the 60-second/4-cell LRU light
     snapshot and NEVER starts the heavy committee/Research/AI pipeline. The
@@ -37255,7 +37254,7 @@ def api_multiasset_display_18():
         from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
         if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
-        data=_multiasset_light_chart_snapshot_175112(symbol,timeframe) or {}
+        data=_multiasset_light_chart_snapshot_33_4(symbol,timeframe) or {}
         # Identity is authoritative even when the provider is temporarily
         # unavailable; stale analysis from another cell must never be reused.
         data=dict(data)
@@ -37264,19 +37263,19 @@ def api_multiasset_display_18():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'18.1.1'
+                'retry_after_ms':5000,'response_contract_version':'33.4'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'18.1.1'
+            'response_contract_version':'33.4'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'18.1.1'
+            'error':str(exc)[:180],'response_contract_version':'33.4'
         }),200
 
 
@@ -37292,7 +37291,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'18.1.1'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Commit 18.1.1: the browser owns the separate lightweight display GET.
@@ -37306,7 +37305,7 @@ def api_multiasset_analyze():
             partial.update(compact)
             partial['symbol']=symbol; partial['timeframe']=timeframe
             partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'18.1.1'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -37486,7 +37485,7 @@ def api_futures_market_maker_context():
 
 
 @app.route('/api/diagnostics/pipeline-integrity', methods=['GET'])
-def api_pipeline_integrity_175101():
+def api_pipeline_integrity_33_4():
     """Cache-only operational truth: coverage, resources and persistence."""
     user=_require_auth()
     if not isinstance(user,str):
@@ -37502,7 +37501,7 @@ def api_pipeline_integrity_175101():
             net=get_futures_network_stats() or {}
         except Exception:
             net={}
-        from pipeline_integrity_175101 import VERSION as _pi_version, PIPELINE_GENERATION as _pi_generation
+        from pipeline_integrity import VERSION as _pi_version, PIPELINE_GENERATION as _pi_generation
         _supabase_target_ref = None
         try:
             from urllib.parse import urlparse
@@ -39091,13 +39090,6 @@ def _enqueue_ui_analysis(symbol, timeframe, market='futures', blocked_by=None):
         while len(_PENDING_UI_ANALYSIS_QUEUE) >= _UI_PENDING_MAX:
             dropped = _PENDING_UI_ANALYSIS_QUEUE.pop(0)
         _PENDING_UI_ANALYSIS_QUEUE.append(row)
-    try:
-        import commit24_repair_runtime as _c24_runtime
-        recorder = getattr(_c24_runtime, "_record_queue_enqueue", None)
-        if callable(recorder):
-            recorder(bool(dropped))
-    except Exception:
-        pass
     if dropped:
         print(
             f"⚠️ [COMMIT24.3] cola UI llena: se descarta {dropped.get('symbol')} "
@@ -39144,7 +39136,7 @@ def _run_futures_ui_analysis_sync(symbol, timeframe, market='futures', pre_acqui
             result.setdefault('symbol', symbol)
             result.setdefault('timeframe', timeframe)
             result = _apply_17_5_8_preliminary_learning_prior(result, 'multiasset')
-            # COMMIT 27 parity: interactive Multi analysis is classified by the
+            # Commit 33.4 parity: interactive Multi analysis is classified by the
             # same unified final authority as background/closed-candle analysis.
             result = _app244_native_quality_authority(result, symbol, timeframe)
             levels = result.get('levels') or {}
@@ -39229,15 +39221,6 @@ def _drain_ui_analysis_queue(max_items=None):
 def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
     """# 24.3: schedule UI analysis without any thread waiting on heavy lock."""
     market = str(market or 'futures').lower()
-    try:
-        import sys
-        _commit24_3 = sys.modules.get('commit24_repair_runtime')
-        if _commit24_3 is not None and callable(getattr(_commit24_3, '_maybe_stall_exit', None)):
-            # # 24.3: user interaction is an existing heartbeat for the bounded
-            # stall policy; no watchdog thread is created.
-            _commit24_3._maybe_stall_exit(sys.modules[__name__])
-    except Exception:
-        pass
     key = _futures_ui_key(symbol, timeframe)
     owner = f"multi-ui:{symbol}:{timeframe}" if market == 'multiasset' else f"{market}-ui:{symbol}:{timeframe}"
     _mark_futures_interactive_priority()
@@ -40244,7 +40227,7 @@ def _apply_profitability_router(result, symbol, timeframe):
             pass
         route = _profitability_router.evaluate_profitability_route(result, 'futures')
         route = dict(route or {})
-        from pipeline_integrity_175101 import profitability_hard_block_authority
+        from pipeline_integrity import profitability_hard_block_authority
         authority = profitability_hard_block_authority(route)
         route['generation_authority'] = authority
         route['block_new_signal_effective'] = bool(route.get('block_new_signal') and authority.get('allowed'))
@@ -41022,7 +41005,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
     market_type = 'multiasset' if _c27_is_multi else 'futures'
 
     try:
-        import quality_9q_engine_21 as _qengine27
+        import quality_diagnostics as _qengine27
         quality = _qengine27.evaluate(
             q_levels, trend, momentum, volatility, structure,
             str(timeframe), str(symbol), action, market_type=market_type,
@@ -41039,7 +41022,7 @@ def _app244_native_quality_authority(result, symbol, timeframe):
 
     parallel = quality.get('parallel_quality_filters') or {}
     try:
-        from contextual_quality_commit28 import evaluate_publication
+        from publication_quality import evaluate_publication
         authority = evaluate_publication(
             result, symbol=str(symbol), timeframe=str(timeframe), quality=quality,
         )
@@ -41309,8 +41292,8 @@ def _analyze_futures_all_parallel(combos_override=None):
                 _commit28_btc_context = None
                 _commit28_btc_context_source = 'NONE'
                 if str(symbol).upper() != 'BTC-USDT':
-                    from commit28_core import select_cached_btc_context as _c28_select_btc
-                    _commit28_btc_context, _commit28_btc_context_source = _c28_select_btc(
+                    from market_context import select_cached_btc_context as _select_btc_context
+                    _commit28_btc_context, _commit28_btc_context_source = _select_btc_context(
                         results, previous_analysis, timeframe
                     )
                 r = futures.analyze_futures_market(
@@ -41716,7 +41699,7 @@ def _commit30_enqueue_impulse_priority(result, symbol, timeframe):
     if str(timeframe) != '1h' or not isinstance(result, dict):
         return None
     try:
-        from commit30_core import detect_directional_impulse
+        from market_context import detect_directional_impulse
         impulse = detect_directional_impulse(
             result.get('trend') or {}, result.get('momentum') or {},
             result.get('volume') or {}, result.get('structure') or {},
@@ -60696,40 +60679,27 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 
 
 # ============================================================================
-# COMMIT 17.5.11 — DIRECT CORE BOOTSTRAP (no wsgi/runtime overlay chain)
+# COMMIT 33.4 — CANONICAL CORE BOOTSTRAP
 # ============================================================================
-def _install_commit_17_5_11_core():
-    state={'version':'17.5.11'}
+def _bootstrap_core_33_4():
+    """Validate native modules without installing runtime overlays/monkeypatches."""
+    state = {'version':'33.4','entrypoint':'app:app','runtime_overlays':False}
     try:
         _configured_futures_module()
-        from strategy_quality_extension_175105 import install_strategy_quality_extension_175105
-        state.update(install_strategy_quality_extension_175105() or {})
+        import market_context, pipeline_integrity, safety_profiles, publication_quality
+        state.update({
+            'market_context': market_context.VERSION,
+            'pipeline_integrity': pipeline_integrity.VERSION,
+            'safety_profiles': safety_profiles.VERSION,
+            'publication_quality': publication_quality.VERSION,
+        })
     except Exception as exc:
-        state['strategy_extension_error']=f'{type(exc).__name__}: {str(exc)[:180]}'
+        state['core_error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
     return state
 
-_COMMIT_17_5_11_BOOTSTRAP=_install_commit_17_5_11_core()
-_APP_PY_RUNTIME_VERSION = 'COMMIT24_4_APP_PY_NATIVE_Q_AUTHORITY_FAIR_RUNTIME_V1'
-print('✅ [17.5.11] núcleo directo activo · overlays WSGI no requeridos', flush=True)
-
-
-# ============================================================================
-# COMMIT 21.1 — GUARDED AUTO-INSTALL
-# The retained module name premium_path_expansion_20 is used for backward compatibility.
-# ============================================================================
-# Render dashboards sometimes override Procfile/render.yaml with `gunicorn app:app`.
-# Keep Commit 20.2 active in that configuration too. The overlay is idempotent.
-_COMMIT20_2_AUTOINSTALL = {}
-try:
-    from premium_path_expansion_20 import install as _install_commit20_2
-    _COMMIT20_2_AUTOINSTALL = _install_commit20_2(app) or {}
-    print(f"✅ [COMMIT21.1] overlay activo: {_COMMIT20_2_AUTOINSTALL}", flush=True)
-except Exception as _commit20_2_exc:
-    _COMMIT20_2_AUTOINSTALL = {
-        'version': 'COMMIT21_1_PREMIUM_PATH_EXPANSION_RUNTIME_FIX_V1',
-        'error': f'{type(_commit20_2_exc).__name__}: {str(_commit20_2_exc)[:240]}',
-    }
-    print(f"⚠️ [COMMIT21.1] overlay no instalado: {_COMMIT20_2_AUTOINSTALL['error']}", flush=True)
+_COMMIT_33_4_BOOTSTRAP = _bootstrap_core_33_4()
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_CANONICAL_CORE_V1'
+print(f"✅ [33.4] núcleo canónico activo: {_COMMIT_33_4_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
