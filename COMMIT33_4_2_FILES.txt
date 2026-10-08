@@ -1,0 +1,25 @@
+Commit 33.4.2 — archivos modificados respecto de 33.4.1
+
+CORE
+- app.py
+- futures_system.py
+- review_trader.py
+- q6_integrity.py
+- market_context.py
+- pipeline_integrity.py
+- publication_quality.py
+- safety_profiles.py
+- technical_evidence.py
+
+FRONTEND
+- templates/index.html
+- static/multiasset_display_core.js (nuevo; presentación-only)
+
+TESTS
+- test_commit33_4_core.py
+- test_commit33_4_2_core.py (reemplaza contrato obsoleto test_commit33_4_1_core.py)
+
+DOCS
+- README_COMMIT33_4_2.md
+- QA_COMMIT33_4_2_RESULT.md
+- COMMIT33_4_2_FILES.txt

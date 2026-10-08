@@ -1,4 +1,4 @@
-"""SmartTradingReview core market context utilities — Commit 33.4.1.
+"""SmartTradingReview core market context utilities — Commit 33.4.2.
 
 Single, neutral implementation for specialist abstention semantics, cached BTC
 context reuse, regime classification and early directional impulse detection.
@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping, Tuple
 
-VERSION = "CORE_MARKET_CONTEXT_33_4_1_V2"
+VERSION = "CORE_MARKET_CONTEXT_33_4_2_V3"
 
 
 def _f(v: Any, default: float = 0.0) -> float:

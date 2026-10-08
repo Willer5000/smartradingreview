@@ -33,12 +33,12 @@ def test_operational_intelligence_no_longer_imports_contingency_engine():
     assert 'technical_evidence' in text
 
 
-def test_cache_contract_is_invalidated_for_3341():
+def test_cache_contract_is_invalidated_for_3342():
     text=(ROOT/'app.py').read_text(encoding='utf-8')
-    assert '_FUTURES_CACHE_SCHEMA_VERSION = 5' in text
-    assert "COMMIT33_4_1_PUBLICATION_AUTHORITY_V1" in text
-    assert "existing.get('pipeline_generation') or '') == '33.4.1'" in text
-    assert 'CORE_PUBLICATION_QUALITY_33_4_1' in text
+    assert '_FUTURES_CACHE_SCHEMA_VERSION = 6' in text
+    assert "COMMIT33_4_2_PUBLICATION_AUTHORITY_V2" in text
+    assert "existing.get('pipeline_generation') or '') == '33.4.2'" in text
+    assert 'CORE_PUBLICATION_QUALITY_33_4_2' in text
 
 
 def test_compact_snapshot_preserves_canonical_candidate_contract():
@@ -75,7 +75,7 @@ def test_directional_quality_is_not_scored_twice_at_publication():
 
 def test_multi_local_snapshot_requires_current_schema():
     text=(ROOT/'app.py').read_text(encoding='utf-8')
-    assert "_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.1'" in text
+    assert "_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.2'" in text
     assert "payload.get('version')" in text
 
 
@@ -87,13 +87,13 @@ def test_execution_setup_replaces_contingency_setup_in_active_execution():
     assert "structure['_contingency_playbook'] = contingency_playbook" not in app_text
 
 
-def test_versions_are_3341():
+def test_versions_are_3342():
     import market_context, safety_profiles, technical_evidence
-    assert pipeline_integrity.PIPELINE_GENERATION=='33.4.1'
-    assert '33_4_1' in publication_quality.VERSION
-    assert '33_4_1' in safety_profiles.VERSION
-    assert '33_4_1' in market_context.VERSION
-    assert '33_4_1' in technical_evidence.VERSION
+    assert pipeline_integrity.PIPELINE_GENERATION=='33.4.2'
+    assert '33_4_2' in publication_quality.VERSION
+    assert '33_4_2' in safety_profiles.VERSION
+    assert '33_4_2' in market_context.VERSION
+    assert '33_4_2' in technical_evidence.VERSION
 
 
 def test_setup_guard_is_diagnostic_only_not_a_second_publication_gate():
@@ -117,10 +117,10 @@ def test_manual_analysis_geometry_cannot_promote_a_signal():
     assert "'is_executable': False" in block
 
 
-def test_runtime_identity_is_single_3341_core():
+def test_runtime_identity_is_single_3342_core():
     text=(ROOT/'app.py').read_text(encoding='utf-8')
-    assert 'COMMIT33_4_1_CANONICAL_FLOW_V1' in text
-    assert '✅ [33.4.1] núcleo canónico activo' in text
+    assert 'COMMIT33_4_2_EXECUTION_AND_DISPLAY_CORE_V1' in text
+    assert '✅ [33.4.2] núcleo canónico activo' in text
     proc=(ROOT/'Procfile').read_text(encoding='utf-8')
     render=(ROOT/'render.yaml').read_text(encoding='utf-8')
     assert 'app:app' in proc
@@ -147,7 +147,82 @@ def test_active_quality_labels_no_longer_claim_old_commit_authority():
     text=(ROOT/'app.py').read_text(encoding='utf-8')
     start=text.index('def _core_publication_authority')
     block=text[start:start+10000]
-    assert 'CORE_SIGNAL_FUNNEL_33_4_1_V1' in block
-    assert 'CORE_SPECIALISED_SAFETY_33_4_1' in block
+    assert 'CORE_SIGNAL_FUNNEL_33_4_2_V2' in block
+    assert 'CORE_SPECIALISED_SAFETY_33_4_2' in block
     assert 'COMMIT28_SIGNAL_FUNNEL_V1' not in block
     assert 'COMMIT31_MULTI_SAFETY_AUTHORITY' not in block
+
+
+def test_deleted_preexec_symbol_is_gone_from_native_execution_core():
+    text=(ROOT/'futures_system.py').read_text(encoding='utf-8')
+    assert '_commit28_preexec_route' not in text
+    assert "_multi_preexec_route = {}" in text
+    assert "levels['_execution_setup_family']" in text
+    assert "levels['_multiasset_pre_execution_route']" in text
+
+
+def test_review_trader_uuid_dependency_is_native():
+    text=(ROOT/'review_trader.py').read_text(encoding='utf-8')
+    assert 'import uuid' in text
+    assert 'uuid.uuid5' in text
+
+
+def test_entry_reaction_only_hard_blocks_explicit_hard_failure():
+    text=(ROOT/'futures_system.py').read_text(encoding='utf-8')
+    start=text.index("levels['entry_reaction_rc4']")
+    block=text[start:start+3500]
+    assert "entry_reaction.get('hard_block', False)" in block
+    assert "levels['entry_reaction_advisory']" in block
+    assert "elif not entry_reaction.get('passed', False):" in block
+
+
+def test_rr_is_validated_after_structural_repair():
+    text=(ROOT/'app.py').read_text(encoding='utf-8')
+    start=text.index('CANONICAL CORE 33.4.2 — FINAL GEOMETRY OWNS R/R')
+    block=text[start:start+22000]
+    recovery=block.index('_attempt_structural_recovery_17_5_9')
+    rr_recompute=block.index('reward=abs(tp_price-entry)')
+    final_rr=block.index("execution_refinement['final_rr']")
+    hard_rr=block.index('if rr < minimum_viable_rr:')
+    assert recovery < rr_recompute < hard_rr < final_rr
+
+
+def test_multiasset_has_independent_small_display_bundle_and_structure():
+    app=(ROOT/'app.py').read_text(encoding='utf-8')
+    tpl=(ROOT/'templates/index.html').read_text(encoding='utf-8')
+    js=(ROOT/'static/multiasset_display_core.js').read_text(encoding='utf-8')
+    assert 'def _multiasset_light_structure_33_4_2' in app
+    assert "'structure':_multiasset_light_structure_33_4_2(work)" in app
+    assert 'multiasset_display_core.js' in tpl
+    assert tpl.index('multiasset_display_core.js') < tpl.index("filename='script.js'")
+    assert '/api/multiasset/display' in js
+    assert "plot('rsi-chart'" in js
+    assert "plot('macd-chart'" in js
+    assert "plot('adx-chart'" in js
+    assert "plot('fvg-ob-chart'" in js
+    assert "plot('volume-profile-chart'" in js
+    assert "fetch('/api/multiasset/analyze" not in js
+    assert '/api/multiasset/analyze' not in js
+
+
+def test_current_runtime_invalidates_broken_3341_futures_snapshots():
+    text=(ROOT/'app.py').read_text(encoding='utf-8')
+    assert '_FUTURES_CACHE_SCHEMA_VERSION = 6' in text
+    assert 'COMMIT33_4_2_PUBLICATION_AUTHORITY_V2' in text
+    assert "existing.get('pipeline_generation') or '') == '33.4.2'" in text
+
+
+def test_memory_cleanup_runs_after_every_incremental_and_multi_heavy_job():
+    text=(ROOT/'app.py').read_text(encoding='utf-8')
+    # Resource control is part of correctness on the single-worker Render runtime:
+    # background jobs must return heap before the UI can claim the next slot.
+    assert "_trim_process_heap()" in text
+    assert "multi-background" in text
+    assert "_mark_system_interactive_priority(seconds=75)" in text
+
+
+def test_q6_duplicate_rest_claim_is_normal_coordination_not_warning_path():
+    text=(ROOT/'q6_integrity.py').read_text(encoding='utf-8')
+    assert "rest_duplicate = (" in text
+    assert "'http 409' in rest_msg" in text
+    assert "q6_job_runs slot already claimed job=%s slot=%s" in text

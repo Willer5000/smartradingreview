@@ -17161,7 +17161,7 @@ class TradingExpertSystem:
                             except Exception:
                                 return False
 
-                        # 33.4.1: do not run a second setup gate inside geometry
+                        # 33.4.2: do not run a second setup gate inside geometry
                         # recovery. Committee quality + timing are the geometry
                         # contract; specialised Safety owns the final risk veto.
                         return True
@@ -17799,7 +17799,7 @@ class TradingExpertSystem:
                             if refined_passed is not True:
                                 return False
 
-                            # 33.4.1: the refined geometry is not re-vetoed by
+                            # 33.4.2: the refined geometry is not re-vetoed by
                             # the legacy setup guard. Entry Committee quality and
                             # the timing gate above are independent evidence; final
                             # Safety remains downstream and non-compensatory.
@@ -17908,34 +17908,15 @@ class TradingExpertSystem:
             rr = reward / risk if risk > 0 else 0
 
             # ==========================================================
-            # COMMIT 13 — RR / ESTADO DE EJECUCIÓN CONTEXTUAL
+            # CANONICAL CORE 33.4.2 — FINAL GEOMETRY OWNS R/R
             # ==========================================================
-            # The thresholds are unchanged. Commit 17.5.2 only allows a
-            # committee refinement when it stays in the SAME Safety R/R bucket
-            # as the already-valid 17.5.1 baseline.
+            # R/R is evaluated exactly once, AFTER any structural SL repair.
+            # The previous order could leave a stale rejection attached to a
+            # repaired Entry/SL/TP package (or fail to reject a newly-worse RR).
+            pre_recovery_rr = float(rr)
             non_executable_reason = None
 
-            if rr < minimum_viable_rr:
-                non_executable_reason = (
-                    f"R/R desfavorable "
-                    f"{rr:.2f} < {minimum_viable_rr:.2f}"
-                )
-                print(
-                    f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}"
-                )
-
-            elif rr > maximum_technical_rr:
-                non_executable_reason = (
-                    f"R/R fuera del horizonte técnico "
-                    f"{rr:.2f} > {maximum_technical_rr:.2f}"
-                )
-                print(
-                    f"   ⚠️ ANALYSIS_ONLY: "
-                    f"R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}"
-                )
-
-            # Commit 19.2.1 — reaction recovery is governed by the quality of
+            # Structural SL repair is an execution-risk operation, not alpha.
             # the repaired geometry, not by an unrelated historical whitelist.
             # Exact audited Champions keep their parity contract; native LIVE
             # Quant Synthesis and Multi-Asset may repair an SL collision only if
@@ -17946,41 +17927,24 @@ class TradingExpertSystem:
                 _reaction_recovery = _attempt_structural_recovery_17_5_9('SL_REACTION_CONFLICT', entry)
                 _obs_recovery = execution_observations if isinstance(execution_observations, dict) else {}
                 _op_recovery = dict((_obs_recovery or {}).get('operational_intelligence') or {})
-                _champion_recovery = dict(_op_recovery.get('commit19_champion') or {})
-                _synth_recovery = dict(_op_recovery.get('live_quant_synthesis') or {})
-                _is_exact_live_champion = bool(
-                    _champion_recovery.get('matched')
-                    and _champion_recovery.get('eligible_for_execution_routing')
-                    and str(_champion_recovery.get('authority') or '').upper() == 'LIVE_CHAMPION_COMMIT19'
-                )
-                _native_live_recovery = bool(
-                    execution_market_type == 'multiasset'
-                    or (
-                        _synth_recovery.get('authority') == 'LIVE_QUANT_SYNTHESIS_COMMIT19_1'
-                        and _synth_recovery.get('eligible_for_execution_routing')
-                    )
-                )
+                _candidate_contract_recovery = dict(_op_recovery.get('candidate_contract') or {})
                 _recovery_authorized = False
                 if isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
-                    if _is_exact_live_champion:
-                        # Preserve the audited Champion contract: the legacy
-                        # validated-liquidity marker remains required for a
-                        # geometry mutation in an exact Champion cell.
-                        _entry_committee_17511r = _reaction_recovery.get('entry_committee') or {}
-                        _entry_scores_17511r = _entry_committee_17511r.get('scores') or {}
-                        try:
-                            _recovery_authorized = float(_entry_scores_17511r.get('validated_liquidity_route') or 0.0) >= 60.0
-                        except Exception:
-                            _recovery_authorized = False
-                    elif _native_live_recovery:
-                        try:
-                            _gq=float(_reaction_recovery.get('geometry_quality') or 0)
-                            _eq=float(_reaction_recovery.get('entry_quality') or 0)
-                            _sq=float(_reaction_recovery.get('sl_quality') or 0)
-                            _tq=float(_reaction_recovery.get('tp_quality') or 0)
-                            _recovery_authorized=bool(_gq>=68.0 and _eq>=65.0 and _sq>=60.0 and _tq>=60.0)
-                        except Exception:
-                            _recovery_authorized=False
+                    try:
+                        _gq=float(_reaction_recovery.get('geometry_quality') or 0)
+                        _eq=float(_reaction_recovery.get('entry_quality') or 0)
+                        _sq=float(_reaction_recovery.get('sl_quality') or 0)
+                        _tq=float(_reaction_recovery.get('tp_quality') or 0)
+                        # Same strict floors as the former native-live repair,
+                        # but no historical whitelist: an already-governed core
+                        # thesis may improve protection without creating alpha.
+                        _contract_ok = bool(_candidate_contract_recovery.get('passed'))
+                        _recovery_authorized=bool(
+                            _contract_ok
+                            and _gq>=68.0 and _eq>=65.0 and _sq>=60.0 and _tq>=60.0
+                        )
+                    except Exception:
+                        _recovery_authorized=False
 
                 if _recovery_authorized:
                     entry=float(_reaction_recovery['entry']); sl_price=float(_reaction_recovery['stop_loss']); tp_price=float(_reaction_recovery['take_profit'])
@@ -18011,9 +17975,7 @@ class TradingExpertSystem:
                         execution_refinement['tp_quality']=round(tp_score,2)
                         execution_refinement['geometry_quality']=round(float(_reaction_recovery.get('geometry_quality') or 0),2)
                     reward=abs(tp_price-entry); risk=abs(entry-sl_price); rr=reward/risk if risk>0 else 0
-                    execution_refinement['reaction_recovery_authority']=(
-                        'CHAMPION_PARITY' if _is_exact_live_champion else 'LIVE_NATIVE_QUALITY_CONTRACT'
-                    )
+                    execution_refinement['reaction_recovery_authority']='CORE_CANDIDATE_EXECUTION_REPAIR'
                 elif isinstance(_reaction_recovery, dict) and _reaction_recovery.get('success'):
                     execution_refinement['reaction_recovery_shadow'] = {
                         'status': 'QUALITY_OR_PARITY_AUTHORITY_NOT_MET',
@@ -18035,6 +17997,24 @@ class TradingExpertSystem:
                 )
                 print(f"   ⚠️ ANALYSIS_ONLY: {non_executable_reason}")
 
+            # 33.4.2: RR belongs to the FINAL geometry only.  Do not carry a
+            # rejection calculated against superseded Entry/SL/TP.
+            reward=abs(tp_price-entry)
+            risk=abs(entry-sl_price)
+            rr=reward/risk if risk>0 else 0
+            if non_executable_reason is None:
+                if rr < minimum_viable_rr:
+                    non_executable_reason=(
+                        f"R/R desfavorable {rr:.2f} < {minimum_viable_rr:.2f}"
+                    )
+                    print(f"   ⚠️ ANALYSIS_ONLY: R/R {rr:.2f} < piso técnico {minimum_viable_rr:.2f}")
+                elif rr > maximum_technical_rr:
+                    non_executable_reason=(
+                        f"R/R fuera del horizonte técnico {rr:.2f} > {maximum_technical_rr:.2f}"
+                    )
+                    print(f"   ⚠️ ANALYSIS_ONLY: R/R {rr:.2f} > techo técnico {maximum_technical_rr:.2f}")
+            execution_refinement['pre_recovery_rr']=round(float(pre_recovery_rr),4)
+            execution_refinement['final_rr']=round(float(rr),4)
 
             # ============ AJUSTAR APALANCAMIENTO POR VOLATILIDAD ============
             if atr_pct > 0.05:  # > 5%
@@ -21176,7 +21156,7 @@ class TradingExpertSystem:
                 registro_votacion = {}
             # ==========================================================
             # ==========================================================
-            # 33.4.1 — CANONICAL EXECUTION POLICY (METADATA ONLY)
+            # 33.4.2 — CANONICAL EXECUTION POLICY (METADATA ONLY)
             # ==========================================================
             # Operational Intelligence + Pipeline Integrity already own the
             # directional candidate.  There is no second contingency engine
@@ -21583,7 +21563,7 @@ class TradingExpertSystem:
                             except Exception:
                                 _manual_levels = levels
 
-                            # 33.4.1: manual visibility is strictly downstream of
+                            # 33.4.2: manual visibility is strictly downstream of
                             # a non-directional final action. It can never promote
                             # itself back to LIVE; only the canonical candidate
                             # path may reach official publication.
@@ -21594,7 +21574,7 @@ class TradingExpertSystem:
                                 existing_levels=_manual_levels,
                             )
                             levels.update({
-                                'pipeline_generation': '33.4.1_MANUAL_ANALYSIS_ONLY',
+                                'pipeline_generation': '33.4.2_MANUAL_ANALYSIS_ONLY',
                                 'is_rejected': True,
                                 'is_executable': False,
                                 'publication_status': 'ANALYSIS_ONLY',
@@ -21790,7 +21770,7 @@ class TradingExpertSystem:
 
             # ==========================================================
             # ==========================================================
-            # 33.4.1 — SETUP TIMING DIAGNOSTIC (NON-AUTHORITATIVE)
+            # 33.4.2 — SETUP TIMING DIAGNOSTIC (NON-AUTHORITATIVE)
             # ==========================================================
             # Direction was already formed by the canonical candidate router.
             # Geometry is already built by Entry/SL/TP committees.  A legacy
@@ -29975,6 +29955,10 @@ _FUTURES_DISPLAY_LANE_SCRIPT = '<script>\n(function () {\n    \'use strict\';\n 
 @app.route('/futures')
 def futures_page():
     """Página de Futuros con display lane independiente del heavy slot."""
+    try:
+        _mark_system_interactive_priority(seconds=45)
+    except Exception:
+        pass
     html = render_template('index.html', is_futures=True, is_multiasset=False)
     marker = '</body>'
     if marker in html:
@@ -29983,7 +29967,11 @@ def futures_page():
 
 @app.route('/multiasset')
 def multiasset_page():
-    """Commit 12: derivados Multi-Activo con motor Futures compartido."""
+    """Multi-Activo: interfaz prioritaria; gráficos no dependen del heavy slot."""
+    try:
+        _mark_system_interactive_priority(seconds=75)
+    except Exception:
+        pass
     return render_template('index.html', is_futures=True, is_multiasset=True)
 
 
@@ -30025,8 +30013,8 @@ def health():
 # Ubicación: Reemplazar rutas  y /api/telegram/test
 
 @app.route('/api/runtime/version')
-def api_runtime_version_commit33_4_1():
-    """Deployment truth for the canonical Commit 33.4.1 core."""
+def api_runtime_version_commit33_4_2():
+    """Deployment truth for the canonical Commit 33.4.2 core."""
     import hashlib
     def _sha(path):
         try:
@@ -30043,12 +30031,13 @@ def api_runtime_version_commit33_4_1():
     except Exception as exc:
         _safety = {'error': type(exc).__name__}
     return jsonify({
-        'version': 'COMMIT33_4_1_CANONICAL_FLOW_V1',
+        'version': 'COMMIT33_4_2_EXECUTION_AND_DISPLAY_CORE_V1',
         'entrypoint': 'app:app',
         'render_git_commit': os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('RENDER_GIT_COMMIT_SHA'),
         'app_sha256_16': _sha(__file__),
         'futures_system_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'futures_system.py')),
         'safety_profiles_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'safety_profiles.py')),
+        'multiasset_display_core_sha256_16': _sha(os.path.join(os.path.dirname(__file__), 'static', 'multiasset_display_core.js')),
         'memory': _memory_runtime_state(),
         'safety_architecture': _safety,
         'contracts': {
@@ -30060,8 +30049,11 @@ def api_runtime_version_commit33_4_1():
             'single_specialised_safety_per_signal': True,
             'safety_score_is_hard_gate': False,
             'hard_risk_non_compensatory': True,
-            'validated_route_still_required': True,
+            'validated_route_still_required': False,
             'fallback_can_publish': False,
+            'entry_reaction_score_is_hard_gate': False,
+            'structural_sl_repair_core_authority': True,
+            'multiasset_light_structure_display': True,
             'directional_impulse_context': True,
             'impulse_bridges_to_validated_30m': True,
             'f30_frozen_volume_min': 1.0,
@@ -35603,7 +35595,7 @@ _MULTI_LOCAL_SNAPSHOT_PATH = os.environ.get(
     '/tmp/smartradingreview_multi_cache_33_4_1.json'
 )
 _MULTI_LOCAL_SNAPSHOT_LOADED = False
-_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.1'
+_MULTI_LOCAL_SNAPSHOT_SCHEMA_VERSION = '33.4.2'
 
 def _multiasset_restore_local_snapshot_once():
     global _MULTI_LOCAL_SNAPSHOT_LOADED
@@ -36380,6 +36372,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
         return {'success':False,'symbol':symbol,'timeframe':timeframe,'error':str(exc)[:180]}
     finally:
         _release_heavy_analysis(owner)
+        _trim_process_heap()
 
 def _multiasset_compact_telegram(result):
     # Reutiliza el canal CONFIRMED durable de 10.2: texto + deep-link, sin imagen/PDF.
@@ -36797,16 +36790,125 @@ def _multi_technical_sentiment_175113(df, timeframe):
 # the center chart blank or showing stale BTC identity.
 _MULTI_UI_LIGHT_CACHE = {'lock': threading.RLock(), 'items': {}}
 
-def _multiasset_light_chart_snapshot_33_4(symbol, timeframe):
+def _multiasset_light_structure_33_4_2(work):
+    """Build presentation-only institutional structure from the same real OHLCV.
+
+    This is deliberately local/pure and never creates trading authority.
+    It exists so the Multi-Asset chart workspace does not need to wait for the
+    heavy 9-specialist analysis just to render FVG/OB/sweep context.
+    """
+    try:
+        if work is None or len(work) < 8:
+            return {}
+        x = work.reset_index(drop=True)
+        high = [float(v) for v in x['high'].tolist()]
+        low = [float(v) for v in x['low'].tolist()]
+        opn = [float(v) for v in x['open'].tolist()]
+        close = [float(v) for v in x['close'].tolist()]
+        n = len(x)
+
+        tr = []
+        for i in range(n):
+            prev = close[i-1] if i else close[i]
+            tr.append(max(high[i]-low[i], abs(high[i]-prev), abs(low[i]-prev)))
+        atr = sum(tr[-14:]) / max(1, min(14, len(tr)))
+        atr = max(float(atr), abs(close[-1]) * 1e-6)
+
+        fvgs = []
+        for i in range(2, n):
+            if low[i] > high[i-2]:
+                bottom, top = high[i-2], low[i]
+                later_lows = low[i+1:] if i+1 < n else []
+                filled = bool(later_lows and min(later_lows) <= bottom)
+                fvgs.append({'type':'bullish','gap_bottom':bottom,'gap_top':top,'index':i,'filled':filled})
+            elif high[i] < low[i-2]:
+                bottom, top = high[i], low[i-2]
+                later_highs = high[i+1:] if i+1 < n else []
+                filled = bool(later_highs and max(later_highs) >= top)
+                fvgs.append({'type':'bearish','gap_bottom':bottom,'gap_top':top,'index':i,'filled':filled})
+        fvgs = fvgs[-18:]
+
+        piv_hi, piv_lo = [], []
+        for i in range(2, n-2):
+            if high[i] >= max(high[i-2:i] + high[i+1:i+3]):
+                piv_hi.append({'price':high[i],'index':i,'strength':3})
+            if low[i] <= min(low[i-2:i] + low[i+1:i+3]):
+                piv_lo.append({'price':low[i],'index':i,'strength':3})
+        piv_hi, piv_lo = piv_hi[-12:], piv_lo[-12:]
+
+        obs = []
+        for i in range(2, n):
+            body = abs(close[i]-opn[i])
+            prev_body = abs(close[i-1]-opn[i-1])
+            if close[i] > high[i-1] and body >= 0.55*atr and close[i-1] < opn[i-1] and prev_body > 0:
+                obs.append({
+                    'type':'bullish','price_range':[low[i-1], max(opn[i-1], close[i-1])],
+                    'index':i-1,'strength':'strong' if body >= atr else 'medium',
+                    'mitigated':False,'invalidated':False,
+                })
+            elif close[i] < low[i-1] and body >= 0.55*atr and close[i-1] > opn[i-1] and prev_body > 0:
+                obs.append({
+                    'type':'bearish','price_range':[min(opn[i-1], close[i-1]), high[i-1]],
+                    'index':i-1,'strength':'strong' if body >= atr else 'medium',
+                    'mitigated':False,'invalidated':False,
+                })
+        obs = obs[-12:]
+
+        sweeps, hunts = [], []
+        lookback = 6
+        for i in range(lookback, n):
+            prev_hi = max(high[i-lookback:i])
+            prev_lo = min(low[i-lookback:i])
+            if low[i] < prev_lo and close[i] > prev_lo:
+                row={'type':'bullish','sweep_level':prev_lo,'level':prev_lo,'index':i}
+                sweeps.append(row)
+                if (close[i]-low[i]) >= 0.45*atr:
+                    hunts.append(dict(row))
+            if high[i] > prev_hi and close[i] < prev_hi:
+                row={'type':'bearish','sweep_level':prev_hi,'level':prev_hi,'index':i}
+                sweeps.append(row)
+                if (high[i]-close[i]) >= 0.45*atr:
+                    hunts.append(dict(row))
+        sweeps, hunts = sweeps[-12:], hunts[-8:]
+
+        ema20 = float(x['close'].ewm(span=20, adjust=False).mean().iloc[-1])
+        ema50 = float(x['close'].ewm(span=50, adjust=False).mean().iloc[-1])
+        tp = (x['high'] + x['low'] + x['close']) / 3.0
+        vol_sum = float(x['volume'].sum())
+        vwap = float((tp * x['volume']).sum() / vol_sum) if vol_sum > 0 else float(close[-1])
+
+        supports = [float(r['price']) for r in piv_lo[-4:]]
+        resistances = [float(r['price']) for r in piv_hi[-4:]]
+        return {
+            'source':'LIGHT_REAL_OHLCV_STRUCTURE_33_4_2',
+            'fair_value_gaps':fvgs,
+            'order_blocks':obs,
+            'liquidity_sweeps':sweeps,
+            'stop_hunts':hunts,
+            'pivot_highs':piv_hi,
+            'pivot_lows':piv_lo,
+            'supports':supports,
+            'resistances':resistances,
+            'indicators':{'ema20':ema20,'ema50':ema50,'vwap':vwap},
+            'current_price':float(close[-1]),
+            'atr':float(atr),
+            'display_only':True,
+            'trading_authority':False,
+        }
+    except Exception as exc:
+        return {'source':'LIGHT_REAL_OHLCV_STRUCTURE_33_4_2','display_only':True,'trading_authority':False,'error':type(exc).__name__}
+
+
+def _multiasset_light_chart_snapshot_33_4_2(symbol, timeframe):
     """Commit 18.1.1 memory-safe selected-cell display lane.
 
     IMPORTANT: this endpoint is presentation only. It fetches/caches REAL OHLCV
-    for one selected Multi cell and returns the candles plus a tiny technical
-    sentiment proxy. It deliberately does NOT run Trend/Momentum/Structure/
-    LiquidationHeatmap server-side because the browser can render the standard
-    charts from OHLCV and the governed heavy analysis will later supply the rich
-    layers. This prevents the display GET and the heavy POST from allocating two
-    analysis working sets concurrently on a 512 MB Render instance.
+    for one selected Multi cell and returns candles plus a tiny presentation-only
+    structure layer derived from the SAME OHLCV. It deliberately does NOT run
+    the heavy Trend/Momentum/9-specialist/LiquidationHeatmap pipeline: the browser
+    renders the standard indicators immediately and the governed heavy analysis
+    can later supply richer trading layers. This prevents the display GET and the
+    heavy POST from allocating two analysis working sets concurrently on Render.
     """
     key=(str(symbol),str(timeframe)); now=time.time(); ttl=45.0
     with _MULTI_UI_LIGHT_CACHE['lock']:
@@ -36883,8 +36985,12 @@ def _multiasset_light_chart_snapshot_33_4(symbol, timeframe):
             'display_available':True,'display_source':source,
             'display_candles':int(len(work)),
             'ui_partial_chart_only':True,
-            'ui_partial_layers':'OHLCV_BROWSER_RENDER_ONLY',
+            'ui_partial_layers':'OHLCV_PLUS_DISPLAY_STRUCTURE',
             'runtime_memory_profile':'MULTI_DISPLAY_MINIMAL',
+            'pipeline_generation':'33.4.2',
+            'system_type':'multiasset',
+            'analysis_mode':'DISPLAY_LIGHT_REAL_OHLCV',
+            'structure':_multiasset_light_structure_33_4_2(work),
         }
         try:
             data['sentiment']=_multi_technical_sentiment_175113(work,timeframe)
@@ -37053,8 +37159,8 @@ def api_multiasset_opportunities():
         }),200
 
 @app.route('/api/multiasset/display', methods=['GET'])
-def api_multiasset_display_33_4():
-    """Commit 33.4 canonical lightweight selected-cell display lane.
+def api_multiasset_display_33_4_2():
+    """33.4.2 canonical lightweight selected-cell display lane.
 
     One symbol + one timeframe only. It reuses the 60-second/4-cell LRU light
     snapshot and NEVER starts the heavy committee/Research/AI pipeline. The
@@ -37067,7 +37173,7 @@ def api_multiasset_display_33_4():
         from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
         if symbol not in MULTIASSET_SYMBOLS or timeframe not in MULTIASSET_TIMEFRAMES:
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
-        data=_multiasset_light_chart_snapshot_33_4(symbol,timeframe) or {}
+        data=_multiasset_light_chart_snapshot_33_4_2(symbol,timeframe) or {}
         # Identity is authoritative even when the provider is temporarily
         # unavailable; stale analysis from another cell must never be reused.
         data=dict(data)
@@ -37076,19 +37182,19 @@ def api_multiasset_display_33_4():
             return jsonify({
                 'success':True,'available':False,'market':'multiasset','symbol':symbol,
                 'timeframe':timeframe,'data':data,'display_lane':True,
-                'retry_after_ms':5000,'response_contract_version':'33.4.1'
+                'retry_after_ms':5000,'response_contract_version':'33.4.2'
             }),200
         return jsonify({
             'success':True,'available':True,'market':'multiasset','symbol':symbol,
             'timeframe':timeframe,'data':data,'display_lane':True,
-            'response_contract_version':'33.4.1'
+            'response_contract_version':'33.4.2'
         }),200
     except Exception as exc:
         return jsonify({
             'success':True,'available':False,'display_lane':True,
             'symbol':str(request.args.get('symbol') or 'CL-USDT').upper().replace('/','-'),
             'timeframe':str(request.args.get('timeframe') or '4h'),
-            'error':str(exc)[:180],'response_contract_version':'33.4.1'
+            'error':str(exc)[:180],'response_contract_version':'33.4.2'
         }),200
 
 
@@ -37104,7 +37210,7 @@ def api_multiasset_analyze():
             return jsonify({'success':False,'error':'Símbolo/temporalidad fuera del universo Multi-Activo'}),400
         cached=_get_futures_ui_cached(symbol,timeframe)
         if isinstance(cached,dict) and cached.get('success') is not False:
-            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4.1'}),200
+            return jsonify({'success':True,'market':'multiasset','data':cached,'cached':True,'response_contract_version':'33.4.2'}),200
         with _MULTI_ASSET_CACHE['lock']:
             compact=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,timeframe)) or {})
         # Commit 18.1.1: the browser owns the separate lightweight display GET.
@@ -37118,7 +37224,7 @@ def api_multiasset_analyze():
             partial.update(compact)
             partial['symbol']=symbol; partial['timeframe']=timeframe
             partial['market']='multiasset'; partial['is_multiasset']=True
-        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4.1'}
+        body={'success':True,'busy':True,'deferred':True,'market':'multiasset','symbol':symbol,'timeframe':timeframe,'job_state':state,'retry_after_ms':7000,'response_contract_version':'33.4.2'}
         if partial:
             body.update({'partial':True,'data':partial})
         if recent_error:
@@ -37880,7 +37986,7 @@ _FUTURES_FAST_RESTORE_STATE = {
     'last_attempt': 0.0,
 }
 
-_FUTURES_CACHE_SCHEMA_VERSION = 5
+_FUTURES_CACHE_SCHEMA_VERSION = 6
 _FUTURES_SIGNAL_MAX_WAIT_BARS = 6
 _FUTURES_TF_SECONDS = {
     '30m': 30 * 60,
@@ -37930,7 +38036,7 @@ def _enrich_futures_public_message(result):
     return result
 
 
-_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_1_PUBLICATION_AUTHORITY_V1'
+_NATIVE_PUBLICATION_AUTHORITY_VERSION = 'COMMIT33_4_2_PUBLICATION_AUTHORITY_V2'
 
 
 def _compact_futures_quality_context(result):
@@ -39182,7 +39288,7 @@ def _load_futures_cache_from_disk():
             return False
         schema_version = int(payload.get('schema_version', 0) or 0)
         if schema_version != _FUTURES_CACHE_SCHEMA_VERSION:
-            # 33.4.1: old analysis authority is invalid after a core contract
+            # 33.4.2: old analysis authority is invalid after a core contract
             # change, but Saved/Guardian lifecycle must survive deployment.
             old_data = _deserialize_futures_cache(payload.get('data')) or {}
             lifecycle_only = dict(old_data.get('lifecycle') or {})
@@ -39193,7 +39299,7 @@ def _load_futures_cache_from_disk():
                     }
                     _futures_analysis_cache['ts'] = 0.0
                 print(
-                    f'♻️ [FUT 33.4.1] contrato v{schema_version} invalidado: '
+                    f'♻️ [FUT 33.4.2] contrato v{schema_version} invalidado: '
                     f'análisis descartado, lifecycle preservado={len(lifecycle_only)}',
                     flush=True,
                 )
@@ -40744,7 +40850,7 @@ def _core_quality_audit(
         funnel = {}
     levels = result.get('levels') if isinstance(result.get('levels'), dict) else {}
     funnel.update({
-        'version': 'CORE_SIGNAL_FUNNEL_33_4_1_V1',
+        'version': 'CORE_SIGNAL_FUNNEL_33_4_2_V2',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': str((result.get('decision') or {}).get('action') or levels.get('manual_observation_action') or ''),
@@ -40791,7 +40897,7 @@ def _core_publication_authority(result, symbol, timeframe):
 
     # Preserve a truthful funnel even when no signal is possible.
     result['signal_engineering_funnel'] = {
-        'version': 'CORE_SIGNAL_FUNNEL_33_4_1_V1',
+        'version': 'CORE_SIGNAL_FUNNEL_33_4_2_V2',
         'symbol': str(symbol or ''),
         'timeframe': str(timeframe or ''),
         'action': action,
@@ -40807,7 +40913,7 @@ def _core_publication_authority(result, symbol, timeframe):
         return _core_quality_audit(
             result, symbol, timeframe, status='NOT_DIRECTIONAL',
             reason_codes=['DIRECTION_UNDEFINED'], authority={
-                'version': 'CORE_PUBLICATION_QUALITY_33_4_1_V2',
+                'version': 'CORE_PUBLICATION_QUALITY_33_4_2_V3',
                 'eligible': False,
                 'reason_codes': ['DIRECTION_UNDEFINED'],
             },
@@ -40872,7 +40978,7 @@ def _core_publication_authority(result, symbol, timeframe):
             parallel=parallel,
             reason_codes=[f'CORE_PUBLICATION_AUTHORITY_ERROR:{type(exc).__name__}'],
             authority={
-                'version': 'CORE_PUBLICATION_QUALITY_33_4_1_V2',
+                'version': 'CORE_PUBLICATION_QUALITY_33_4_2_V3',
                 'eligible': False,
                 'reason_codes': [f'CORE_PUBLICATION_AUTHORITY_ERROR:{type(exc).__name__}'],
             },
@@ -40890,7 +40996,7 @@ def _core_publication_authority(result, symbol, timeframe):
     levels['quality_composite'] = (authority.get('quality_domains') or {}).get('composite')
     levels['quality_filter_authority'] = str((authority.get('movement_profile') or {}).get('name') or '')
     levels['quality_filter_confirmed'] = eligible
-    levels['quality_authority_mode'] = 'CORE_SPECIALISED_SAFETY_33_4_1'
+    levels['quality_authority_mode'] = 'CORE_SPECIALISED_SAFETY_33_4_2'
     levels['quality_parallel_role'] = 'LEGACY_DIAGNOSTIC_ONLY'
     levels['q10_contract_enforced_by_hard_guards'] = False
     levels['legacy_q1_q10_publication_authority'] = False
@@ -40910,7 +41016,7 @@ def _core_publication_authority(result, symbol, timeframe):
             'is_rejected': False,
             'is_executable': True,
             'publication_gate_reached': True,
-            'publication_gate_source': 'CORE_SPECIALISED_SAFETY_33_4_1',
+            'publication_gate_source': 'CORE_SPECIALISED_SAFETY_33_4_2',
         })
         # Keep the old reason for audit, but never expose it as a current block.
         levels.pop('rejected_reason', None)
@@ -41106,7 +41212,7 @@ def _analyze_futures_all_parallel(combos_override=None):
                 and all(isinstance(existing_q_context.get(k), dict) for k in ('trend', 'momentum', 'volatility', 'structure'))
                 and isinstance(existing_q_audit, dict)
                 and str(existing_q_audit.get('version') or '') == _NATIVE_PUBLICATION_AUTHORITY_VERSION
-                and str(existing.get('pipeline_generation') or '') == '33.4.1'
+                and str(existing.get('pipeline_generation') or '') == '33.4.2'
                 and str(((existing.get('quality_authority') or {}).get('version') or '')).startswith('CORE_PUBLICATION_QUALITY_33_4_1')
             )
 
@@ -41916,8 +42022,10 @@ def _trigger_futures_combo_refresh_async(symbol=None, timeframe=None):
                 )
             with cache['lock']:
                 cache['running'] = False
-            if str(timeframe) in _FAST_FUTURES_UI_POINTS:
-                _trim_process_heap()
+            # 33.4.2: every heavy cell releases numpy/pandas arenas.  Limiting
+            # trimming to a subset of TFs let RSS ratchet upward across the
+            # 63-cell incremental cycle and starve interactive Multi/Futures.
+            _trim_process_heap()
 
     threading.Thread(
         target=_do_one,
@@ -60521,11 +60629,11 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
 
 
 # ============================================================================
-# COMMIT 33.4 — CANONICAL CORE BOOTSTRAP
+# COMMIT 33.4.2 — CANONICAL CORE BOOTSTRAP
 # ============================================================================
-def _bootstrap_core_33_4_1():
+def _bootstrap_core_33_4_2():
     """Validate native modules without installing runtime overlays/monkeypatches."""
-    state = {'version':'33.4.1','entrypoint':'app:app','runtime_overlays':False}
+    state = {'version':'33.4.2','entrypoint':'app:app','runtime_overlays':False}
     try:
         _configured_futures_module()
         import market_context, pipeline_integrity, safety_profiles, publication_quality
@@ -60539,9 +60647,9 @@ def _bootstrap_core_33_4_1():
         state['core_error'] = f'{type(exc).__name__}: {str(exc)[:180]}'
     return state
 
-_COMMIT_33_4_1_BOOTSTRAP = _bootstrap_core_33_4_1()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_CANONICAL_CORE_V1'
-print(f"✅ [33.4.1] núcleo canónico activo: {_COMMIT_33_4_1_BOOTSTRAP}", flush=True)
+_COMMIT_33_4_2_BOOTSTRAP = _bootstrap_core_33_4_2()
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_2_EXECUTION_AND_DISPLAY_CORE_V1'
+print(f"✅ [33.4.2] núcleo canónico activo: {_COMMIT_33_4_2_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

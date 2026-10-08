@@ -99,7 +99,7 @@ def _publishable_result():
             "candidate_source": "CORE_SETUP",
             "candidate_quality": 88,
             "candidate_contract": {
-                "version": "33.4.1_PIPELINE_INTEGRITY_V5", "passed": True,
+                "version": "33.4.2_PIPELINE_INTEGRITY_V6", "passed": True,
                 "action": "LONG", "source": "CORE_SETUP",
                 "quality": 88, "quality_floor": 82,
                 "support": ["trend", "mtf", "pullback", "momentum", "volume"],

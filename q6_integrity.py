@@ -255,15 +255,34 @@ def claim_daily_job(
                     )
                     return True
                 except Exception as rest_exc:
-                    logger.warning(
-                        'q6_job_runs claim failed job=%s slot=%s sdk=%s: %s rest=%s: %s',
-                        job_name,
-                        slot,
-                        type(exc).__name__,
-                        str(exc)[:180],
-                        type(rest_exc).__name__,
-                        str(rest_exc)[:180],
+                    rest_msg = str(rest_exc).lower()
+                    rest_duplicate = (
+                        '23505' in rest_msg
+                        or 'duplicate key' in rest_msg
+                        or 'unique constraint' in rest_msg
+                        or 'http 409' in rest_msg
                     )
+                    if rest_duplicate:
+                        # A REST 409/23505 is the same successful coordination
+                        # fact as an SDK duplicate: another worker owns the slot.
+                        # Do not turn harmless at-most-once coordination into an
+                        # alarming runtime error merely because the SDK read
+                        # failed before returning the duplicate row.
+                        logger.info(
+                            'q6_job_runs slot already claimed job=%s slot=%s',
+                            job_name,
+                            slot,
+                        )
+                    else:
+                        logger.warning(
+                            'q6_job_runs claim failed job=%s slot=%s sdk=%s: %s rest=%s: %s',
+                            job_name,
+                            slot,
+                            type(exc).__name__,
+                            str(exc)[:180],
+                            type(rest_exc).__name__,
+                            str(rest_exc)[:180],
+                        )
             else:
                 logger.warning(
                     'q6_job_runs claim insert failed job=%s slot=%s error=%s: %s',

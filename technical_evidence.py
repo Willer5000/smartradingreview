@@ -1,4 +1,4 @@
-"""Canonical technical-evidence normalization for SmartTradingReview 33.4.1.
+"""Canonical technical-evidence normalization for SmartTradingReview 33.4.2.
 
 Pure normalization only: no I/O, DB, LLM, runtime patching or direction authority.
 """
@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List
 
-VERSION = "CORE_TECHNICAL_EVIDENCE_33_4_1_V1"
+VERSION = "CORE_TECHNICAL_EVIDENCE_33_4_2_V2"
 
 def _u(value: Any) -> str:
     return str(value or "").strip().upper()

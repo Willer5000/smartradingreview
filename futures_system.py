@@ -5921,7 +5921,7 @@ class FuturesAnalysis(TradingExpertSystem):
             }
         
         # ==============================================================
-        # COMMIT 28 — MULTI-ASSET PRE-EXECUTION CONTEXT PRESERVATION
+        # CANONICAL CORE — MULTI-ASSET PRE-EXECUTION CONTEXT
         # ==============================================================
         # The old ABI adapter also injected the already-computed Multi-Asset
         # Strategy Bank family before Entry/SL/TP.  Now that the ABI is native,
@@ -5984,7 +5984,7 @@ class FuturesAnalysis(TradingExpertSystem):
         # Q2 trabaja DESPUÉS de esto y ANTES de Execution Safety.
         # ==============================================================
 
-        # COMMIT 28 — NATIVE EXECUTION ABI.
+        # CANONICAL CORE — NATIVE EXECUTION ABI.
         # app.py already passes execution_observations with the complete, already-loaded
         # analysis context.  Accept and forward it natively so Futures/Multi cannot
         # fail before primary Entry/SL/TP geometry with a TypeError.  This is pure
@@ -6001,10 +6001,10 @@ class FuturesAnalysis(TradingExpertSystem):
             execution_observations=execution_observations,
         )
         if isinstance(levels, dict):
-            levels['execution_abi_commit28_native'] = True
-            if _commit28_preexec_route.get('engine_family'):
-                levels['_execution_setup_family_commit28'] = _commit28_preexec_route.get('engine_family')
-                levels['_multiasset_pre_execution_route_commit28'] = dict(_commit28_preexec_route)
+            levels['execution_abi_native'] = True
+            if _multi_preexec_route.get('engine_family'):
+                levels['_execution_setup_family'] = _multi_preexec_route.get('engine_family')
+                levels['_multiasset_pre_execution_route'] = dict(_multi_preexec_route)
 
         # ==============================================================
         # QUALITY ENGINE Q2
@@ -6162,15 +6162,19 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['is_rejected'] = True
             levels['publication_status'] = 'ANALYSIS_ONLY'
             levels['rejected_reason'] = reason
-        if (not entry_reaction.get('passed', False)) and levels.get('is_executable', True):
+        # 33.4.2 — the reaction score is a timing/diagnostic layer, not a
+        # second copy of Entry Committee + Safety.  Only the engine's explicit
+        # semantic hard_block may veto.  High-TF lower-TF confirmation above
+        # remains mandatory when the engine says it is required.
+        if entry_reaction.get('hard_block', False) and levels.get('is_executable', True):
             reason = (
-                f"RC4 Entry reaction {entry_reaction.get('score', 0)}/"
+                f"Entry reaction hard block {entry_reaction.get('score', 0)}/"
                 f"{entry_reaction.get('threshold', 0)}: "
                 f"{entry_reaction.get('status')}"
             )
             levels = self._stamp_futures_filter_trace(
                 levels, stage='PRE_GATE',
-                reason_codes=['RC9_8_ENTRY_REACTION_NOT_CONFIRMED'],
+                reason_codes=['ENTRY_REACTION_HARD_BLOCK'],
                 reason=reason, reached_publication_gate=False,
                 outcome='ANALYSIS_ONLY'
             )
@@ -6178,6 +6182,13 @@ class FuturesAnalysis(TradingExpertSystem):
             levels['is_rejected'] = True
             levels['publication_status'] = 'ANALYSIS_ONLY'
             levels['rejected_reason'] = reason
+        elif not entry_reaction.get('passed', False):
+            levels['entry_reaction_advisory'] = {
+                'status': entry_reaction.get('status'),
+                'score': entry_reaction.get('score'),
+                'threshold': entry_reaction.get('threshold'),
+                'publication_veto': False,
+            }
 
         # RC9.8: learned defendibility is an advisory input, not a second
         # execution veto.  Structural/Safety/publication gates stay intact; the
@@ -6945,7 +6956,7 @@ class FuturesAnalysis(TradingExpertSystem):
             else 0
         )
 
-        # 33.4.1: leverage has one owner: the economic risk model above.
+        # 33.4.2: leverage has one owner: the economic risk model above.
         # No contingency/default-playbook cap is allowed to create a second authority.
 
         # Tamaño estándar recomendado DESPUÉS de seleccionar leverage. Así el
