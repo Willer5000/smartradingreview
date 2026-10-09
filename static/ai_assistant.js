@@ -1407,7 +1407,10 @@ console.log(
     // CONSEJO AUTOMÁTICO
     // ========================================================================
 
+    let lastAdvicePayload = null;
+
     async function loadHourlyAdvice() {
+        if (document.hidden) return;
 
         if (
             !mount()
@@ -1492,6 +1495,8 @@ console.log(
                 json
             );
 
+            if (json && json.success) lastAdvicePayload = json;
+
 
             if (json.success) {
 
@@ -1502,11 +1507,15 @@ console.log(
 
         } catch (error) {
 
-            console.error(
-                '❌ Consejo IA:',
-                error
+            console.warn(
+                '⚠️ Consejo IA temporalmente no disponible; se conserva el último consejo.',
+                error?.message || error
             );
 
+            if (lastAdvicePayload) {
+                renderHourlyAdvice(lastAdvicePayload);
+                return;
+            }
 
             renderHourlyAdvice({
 

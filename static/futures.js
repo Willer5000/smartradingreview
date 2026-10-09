@@ -1,28 +1,117 @@
-// 17.5.11: bound read requests including body, release loading flags via existing finally.
-async function _futFetchBounded(url, options = {}, timeoutMs = 15000) {
-    // Write actions retain their existing transport/confirmation behavior.
-    if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase())) return fetch(url, options);
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    const signal = options.signal;
-    if (signal?.aborted) controller.abort();
-    else signal?.addEventListener('abort', abort, {once:true});
-    let timer;
+// 33.4.6 — bounded reads with single-flight, short fresh cache and stale-on-error.
+// Read-only UI lanes must never amplify a busy 512 MB worker.  Trading writes
+// still use their original transport and are never cached here.
+const __FUT_READ_CACHE__ = window.__FUT_READ_CACHE__ || (window.__FUT_READ_CACHE__ = new Map());
+const __FUT_READ_INFLIGHT__ = window.__FUT_READ_INFLIGHT__ || (window.__FUT_READ_INFLIGHT__ = new Map());
+
+function _futReadPolicy(url) {
+    const u = String(url || '');
+    if (u.includes('/signals/active')) return {freshMs: 60000, staleMs: 5*60*1000, timeoutMs: 24000};
+    if (u.includes('/signals/previous')) return {freshMs: 120000, staleMs: 10*60*1000, timeoutMs: 24000};
+    if (u.includes('/opportunities')) return {freshMs: 60000, staleMs: 5*60*1000, timeoutMs: 22000};
+    if (u.includes('/user/futures-risk-profile')) return {freshMs: 300000, staleMs: 30*60*1000, timeoutMs: 20000};
+    if (u.includes('/saved_signals/kpis')) return {freshMs: 60000, staleMs: 10*60*1000, timeoutMs: 18000};
+    if (u.includes('/saved_signals?status=active')) return {freshMs: 60000, staleMs: 5*60*1000, timeoutMs: 20000};
+    if (u.includes('/position-guardian')) return {freshMs: 30000, staleMs: 2*60*1000, timeoutMs: 16000};
+    return {freshMs: 15000, staleMs: 120000, timeoutMs: 24000};
+}
+
+function _futCanonicalReadKey(url) {
     try {
-        return await Promise.race([
-            (async () => {
-                const response = await fetch(url, {...options, signal:controller.signal});
-                const body = await response.arrayBuffer();
-                return new Response([204,205,304].includes(response.status) ? null : body,
-                    {status:response.status, statusText:response.statusText, headers:response.headers});
-            })(),
-            new Promise((_, reject) => { timer = setTimeout(() => {
-                controller.abort(); reject(new Error('La consulta excedió 15 segundos; vuelve a intentarlo.'));
-            }, timeoutMs); })
-        ]);
+        const u = new URL(url, window.location.origin);
+        u.searchParams.delete('_ts');
+        const entries = Array.from(u.searchParams.entries()).sort(([a,av],[b,bv]) => (a+av).localeCompare(b+bv));
+        u.search = '';
+        entries.forEach(([k,v]) => u.searchParams.append(k,v));
+        return u.pathname + (u.search ? u.search : '');
+    } catch (_) {
+        return String(url || '').replace(/([?&])_ts=\\d+(&?)/, '$1').replace(/[?&]$/, '');
+    }
+}
+
+function _futResponseFromCached(row, stale=false) {
+    const headers = new Headers(row.headers || []);
+    if (stale) headers.set('X-STR-Stale', '1');
+    return new Response(row.body ? row.body.slice(0) : null, {
+        status: row.status,
+        statusText: row.statusText,
+        headers
+    });
+}
+
+async function _futFetchBounded(url, options = {}, timeoutMs = null) {
+    const method = String(options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD'].includes(method)) return fetch(url, options);
+
+    const policy = _futReadPolicy(url);
+    const effectiveTimeout = Number(timeoutMs || policy.timeoutMs || 24000);
+    const key = _futCanonicalReadKey(url);
+    const now = Date.now();
+    const cached = __FUT_READ_CACHE__.get(key);
+
+    // Hidden tabs should never wake the worker just to repaint old UI.
+    if (cached && (now - cached.ts) <= policy.freshMs) {
+        return _futResponseFromCached(cached, false);
+    }
+    if (document.hidden && cached && (now - cached.ts) <= policy.staleMs) {
+        return _futResponseFromCached(cached, true);
+    }
+    if (__FUT_READ_INFLIGHT__.has(key)) {
+        const row = await __FUT_READ_INFLIGHT__.get(key);
+        return _futResponseFromCached(row, false);
+    }
+
+    const task = (async () => {
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        const signal = options.signal;
+        if (signal?.aborted) controller.abort();
+        else signal?.addEventListener('abort', abort, {once:true});
+        let timer;
+        try {
+            const response = await Promise.race([
+                fetch(url, {...options, signal:controller.signal}),
+                new Promise((_, reject) => { timer = setTimeout(() => {
+                    controller.abort();
+                    const e = new Error(`La consulta excedió ${Math.round(effectiveTimeout/1000)} segundos; se conserva el último estado disponible.`);
+                    e.name = 'TimeoutError';
+                    reject(e);
+                }, effectiveTimeout); })
+            ]);
+            const body = [204,205,304].includes(response.status) ? null : await response.arrayBuffer();
+            const row = {
+                status: response.status,
+                statusText: response.statusText,
+                headers: Array.from(response.headers.entries()),
+                body,
+                ts: Date.now()
+            };
+            // Cache successful reads.  A 5xx never replaces a known-good state.
+            if (response.ok || response.status === 304) {
+                __FUT_READ_CACHE__.set(key, row);
+                return row;
+            }
+            if (cached && (Date.now() - cached.ts) <= policy.staleMs && response.status >= 500) {
+                return {...cached, _stale: true};
+            }
+            return row;
+        } catch (error) {
+            if (cached && (Date.now() - cached.ts) <= policy.staleMs) {
+                return {...cached, _stale: true};
+            }
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', abort);
+        }
+    })();
+
+    __FUT_READ_INFLIGHT__.set(key, task);
+    try {
+        const row = await task;
+        return _futResponseFromCached(row, Boolean(row._stale));
     } finally {
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', abort);
+        __FUT_READ_INFLIGHT__.delete(key);
     }
 }
 
@@ -5843,17 +5932,17 @@ if (window.IS_FUTURES_PAGE || window.IS_MULTI_ASSET_PAGE) {
     }
 
     if (typeof window.updateActiveSignals === 'function' && !window.updateActiveSignals.__commit2021Wrapped) {
-        window.updateActiveSignals = guard('active', window.updateActiveSignals, 15000);
+        window.updateActiveSignals = guard('active', window.updateActiveSignals, 60000);
     }
     if (typeof window.updatePreviousSignals === 'function' && !window.updatePreviousSignals.__commit2021Wrapped) {
-        window.updatePreviousSignals = guard('previous', window.updatePreviousSignals, 30000);
+        window.updatePreviousSignals = guard('previous', window.updatePreviousSignals, 120000);
     }
     if (typeof window.loadFuturesOpportunities96 === 'function' && !window.loadFuturesOpportunities96.__commit2021Wrapped) {
-        window.loadFuturesOpportunities96 = guard('opportunities', window.loadFuturesOpportunities96, 12000);
+        window.loadFuturesOpportunities96 = guard('opportunities', window.loadFuturesOpportunities96, 60000);
     }
     if (typeof window.loadFuturesRiskProfile === 'function' && !window.loadFuturesRiskProfile.__commit2021Wrapped) {
-        window.loadFuturesRiskProfile = guard('risk', window.loadFuturesRiskProfile, 120000);
+        window.loadFuturesRiskProfile = guard('risk', window.loadFuturesRiskProfile, 300000);
     }
 
-    console.log('✅ [COMMIT20.2.1] Request Governor activo: single-flight + cooldowns; análisis pesado independiente.');
+    console.log('✅ [33.4.6] Request Governor activo: stale-cache + single-flight + low-bandwidth cooldowns.');
 })();

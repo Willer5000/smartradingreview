@@ -31634,9 +31634,14 @@ _RESOURCE_WATCHDOG_BACKOFF_MB = max(280.0, float(os.environ.get(
 ) or 300))
 _RESOURCE_WATCHDOG_EMERGENCY_MB = max(
     _RESOURCE_WATCHDOG_BACKOFF_MB + 32.0,
-    float(os.environ.get('RESOURCE_WATCHDOG_EMERGENCY_MB', '380') or 380),
+    float(os.environ.get('RESOURCE_WATCHDOG_EMERGENCY_MB', '325') or 380),
 )
 _RESOURCE_WATCHDOG_LAST_SHED_AT = 0.0
+if _LOW_MEMORY_MODE:
+    # 512 MB cgroup: start shedding disposable research/market caches before
+    # allocator fragmentation + one live analysis can push the process over the wall.
+    _RESOURCE_WATCHDOG_BACKOFF_MB = min(_RESOURCE_WATCHDOG_BACKOFF_MB, 290.0)
+    _RESOURCE_WATCHDOG_EMERGENCY_MB = min(_RESOURCE_WATCHDOG_EMERGENCY_MB, 325.0)
 
 
 def resource_watchdog_loop():
@@ -46648,8 +46653,6 @@ def _build_confirmed_signal_telegram_message(market, signal):
     link = _telegram_signal_deep_link(market, signal)
     lines.extend([
         '',
-        'Esta señal quedó confirmada al cierre de vela.',
-        'La alerta de Entry se enviará aparte si el precio alcanza la zona de entrada.',
     ])
     if link:
         lines.append(f'🔗 <a href="{_telegram_escape(link)}">Abrir esta señal</a>')
@@ -60818,8 +60821,8 @@ def _bootstrap_core_33_4_4():
     return state
 
 _COMMIT_33_4_4_BOOTSTRAP = _bootstrap_core_33_4_4()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_5_RESOURCE_BUDGET_CORE_V1'
-print(f"✅ [33.4.5] resource budget core sobre núcleo canónico 33.4.4: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_6_RESOURCE_UI_RESEARCH_GOVERNANCE_V1'
+print(f"✅ [33.4.6] resource/UI governance sobre núcleo canónico 33.4.4: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)

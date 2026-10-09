@@ -7719,6 +7719,27 @@ class FuturesAnalysis(TradingExpertSystem):
                 'error': str(e)
             }
     
+    @staticmethod
+    def _shadow_enrichment_budget_ok(max_rss_mb: float = 235.0) -> bool:
+        """Shadow-only enrichments yield first under a 512 MB Render budget.
+
+        Q3/public microstructure and Execution Intelligence V2 are explicitly
+        non-authoritative for Entry/SL/TP/Safety/publication.  Skipping them
+        under pressure cannot change a LIVE signal, but prevents research-only
+        network/pandas allocations from becoming the last push before OOM.
+        """
+        try:
+            import os as _os
+            limit = float(_os.environ.get('FUTURES_SHADOW_ENRICH_MAX_RSS_MB', str(max_rss_mb)) or max_rss_mb)
+            with open('/proc/self/status', 'r', encoding='utf-8') as fh:
+                for line in fh:
+                    if line.startswith('VmRSS:'):
+                        rss = float(line.split()[1]) / 1024.0
+                        return rss < limit
+        except Exception:
+            return True
+        return True
+
     def analyze_futures_market(self, symbol: str, timeframe: str, 
                                 btc_analysis: Optional[Dict] = None,
                                 closed_candle_only: bool = True,
@@ -8027,13 +8048,23 @@ class FuturesAnalysis(TradingExpertSystem):
         # Sólo deja evidencia para aprendizaje prospectivo.
         # ==============================================================
 
-        microstructure_context = (
-            self
-            ._analyze_futures_microstructure(
-                symbol=symbol,
-                action=translated_action
+        if self._shadow_enrichment_budget_ok():
+            microstructure_context = (
+                self
+                ._analyze_futures_microstructure(
+                    symbol=symbol,
+                    action=translated_action
+                )
             )
-        )
+        else:
+            microstructure_context = {
+                'available': False,
+                'model_version': 'Q3_RESOURCE_DEFERRED_33_4_6',
+                'alignment': 'NOT_EVALUATED',
+                'alignment_score': 0.0,
+                'shadow_verdict': 'RESOURCE_BUDGET_DEFERRED',
+                'reason': 'Shadow-only microstructure deferred to protect the 512 MB runtime.',
+            }
 
         result[
             'futures_microstructure_context'
@@ -8138,6 +8169,8 @@ class FuturesAnalysis(TradingExpertSystem):
         # uncertainty layer records a nonconformity-like score.  Neither can
         # modify production before OOS calibration + governance.
         try:
+            if not (microstructure_context.get('available') and self._shadow_enrichment_budget_ok()):
+                raise RuntimeError('SHADOW_RESOURCE_BUDGET_DEFERRED')
             from execution_intelligence_v2 import (
                 attach_microstructure_entry_challenger,
                 build_uncertainty_shadow_gate,

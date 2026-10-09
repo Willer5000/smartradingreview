@@ -2900,6 +2900,14 @@ function _h3ReleaseAnalysisLock(label) {
 }
 
 window.runCompleteAnalysis = function() {
+    if (document.hidden && window.IS_FUTURES_PAGE) {
+        console.debug('⏸️ [33.4.6] análisis interactivo omitido: pestaña oculta.');
+        return;
+    }
+    if (window.IS_FUTURES_PAGE && Number(window.__FUTURES_SERVER_BUSY_UNTIL__ || 0) > Date.now()) {
+        console.debug('⏸️ [33.4.6] backend Futures/Multi en cooldown; no se duplica POST /analyze.');
+        return;
+    }
     if (!_h3AcquireAnalysisLock('runCompleteAnalysis')) {
         console.log('⏳ Análisis ya en ejecución. H.3 evita duplicar la petición.');
         return;
@@ -3142,10 +3150,11 @@ window.runCompleteAnalysis = function() {
                 const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
                 const retryAfterMs = isMulti
-                    ? Math.min(10000, Math.max(6000, Number(data.retry_after_ms || 7000)))
-                    : Math.min(12000, Math.max(4000, Number(data.retry_after_ms || 6000)));
-                const maxBusyMs = isMulti ? 65000 : 90000;
-                const maxBusyRetries = isMulti ? 10 : 8;
+                    ? Math.min(30000, Math.max(22000, Number(data.retry_after_ms || 25000)))
+                    : Math.min(25000, Math.max(18000, Number(data.retry_after_ms || 20000)));
+                const maxBusyMs = isMulti ? 40000 : 35000;
+                const maxBusyRetries = 1;
+                window.__FUTURES_SERVER_BUSY_UNTIL__ = Date.now() + retryAfterMs;
 
                 if (data.partial && data.data) {
                     const expectedSymbol = String(symbol || '').toUpperCase().replace('/', '-');
@@ -3189,7 +3198,7 @@ window.runCompleteAnalysis = function() {
                     `;
                 }
 
-                if (elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
+                if (!document.hidden && elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                     window.__FUTURES_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
@@ -3221,6 +3230,8 @@ window.runCompleteAnalysis = function() {
                 return;
             }
         
+            if (window.IS_FUTURES_PAGE) window.__FUTURES_SERVER_BUSY_UNTIL__ = 0;
+
             // ============================================================
             // NORMALIZAR RESPUESTA DEL BACKEND
             // ============================================================
@@ -3800,15 +3811,16 @@ window.runCompleteAnalysis = function() {
                 );
                 const isMulti = window.IS_MULTI_ASSET_PAGE === true;
                 const retryAfterMs = isMulti
-                    ? Math.min(10000, Math.max(6000, serverRetry || 7000))
-                    : Math.min(12000, Math.max(4000, serverRetry));
-                const maxBusyMs = isMulti ? 65000 : 90000;
-                const maxBusyRetries = isMulti ? 10 : 8;
+                    ? Math.min(30000, Math.max(22000, serverRetry || 25000))
+                    : Math.min(25000, Math.max(18000, serverRetry || 20000));
+                const maxBusyMs = isMulti ? 40000 : 35000;
+                const maxBusyRetries = 1;
+                window.__FUTURES_SERVER_BUSY_UNTIL__ = Date.now() + retryAfterMs;
 
                 // RC8: backoff amplio ante 520/522; evitar tormenta de polls. If the backend cannot
                 // prepare the rich chart payload in that window, surface a
                 // normal retry button instead of keeping the page spinning.
-                if (elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
+                if (!document.hidden && elapsedMs < maxBusyMs && retryCount < maxBusyRetries) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
 
                     const recommendationEl = document.getElementById(
