@@ -136,6 +136,14 @@ FUTURES_DATA_TTL_SECONDS = {
 }
 _futures_data_cache = {}
 _futures_data_cache_lock = threading.Lock()
+# Lifecycle/Guardian necesita high/low reciente, no el histórico de 200 velas
+# usado para generar señales. Mantiene un pequeño rolling window por celda y
+# después del bootstrap sólo refresca unas pocas velas. Es recreable y acotado.
+FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES = max(4, min(24, int(
+    os.environ.get('FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES', '12') or 12
+)))
+_futures_lifecycle_data_cache = {}
+_futures_lifecycle_data_cache_lock = threading.Lock()
 _futures_fetch_inflight = {}
 _futures_fetch_inflight_lock = threading.Lock()
 _futures_http_session = None
@@ -457,6 +465,10 @@ def clear_futures_runtime_caches(*, include_microstructure: bool = False) -> Dic
         raw_n = len(_futures_data_cache)
         _futures_data_cache.clear()
 
+    with _futures_lifecycle_data_cache_lock:
+        lifecycle_n = len(_futures_lifecycle_data_cache)
+        _futures_lifecycle_data_cache.clear()
+
     micro_n = 0
     if include_microstructure:
         with _futures_microstructure_cache_lock:
@@ -465,6 +477,7 @@ def clear_futures_runtime_caches(*, include_microstructure: bool = False) -> Dic
 
     return {
         'raw_ohlcv': raw_n,
+        'lifecycle_ohlcv': lifecycle_n,
         'microstructure': micro_n,
     }
 def _get_cached_futures_microstructure(
@@ -2069,6 +2082,138 @@ class FuturesAnalysis(TradingExpertSystem):
         self._futures_data_errors[error_key] = error
         logger.warning(f'{symbol} {interval}: {error}')
         return None
+
+    def get_kucoin_data_recent(self, symbol: str, interval: str, max_candles: int = 96):
+        """Return a bounded rolling OHLCV window for lifecycle/Guardian only.
+
+        Signal generation is untouched: ``get_kucoin_data`` still requires and
+        downloads its normal >=100-candle history.  Lifecycle bootstraps a small
+        recent window once, then refreshes only the last few bars every minute.
+        """
+        contract_symbol = self._market_contract_symbols().get(symbol)
+        granularity = self._market_granularity_minutes().get(interval)
+        if not contract_symbol or not granularity:
+            return None
+
+        try:
+            limit = max(48, min(160, int(max_candles or 96)))
+        except Exception:
+            limit = 96
+
+        cache_key = (str(self._market_label()), symbol, interval)
+        cached_df = None
+        with _futures_lifecycle_data_cache_lock:
+            cached = _futures_lifecycle_data_cache.get(cache_key)
+            if cached is not None:
+                try:
+                    cached_df = cached['df'].copy(deep=True)
+                except Exception:
+                    cached_df = None
+
+        # First call after a real process boot catches up a broad but bounded
+        # window. Later calls only request enough rows to update current high/low
+        # and the most recent closed bars. This preserves touch detection while
+        # cutting the recurring response payload by roughly an order of magnitude.
+        refresh_bars = 6 if cached_df is not None and not cached_df.empty else (limit + 4)
+        end_seconds = int(time.time())
+        start_seconds = end_seconds - int(granularity * 60 * refresh_bars)
+
+        try:
+            session = _get_futures_http_session()
+            response = session.get(
+                KUCOIN_FUTURES_KLINES_URL,
+                params={
+                    'symbol': contract_symbol,
+                    'granularity': granularity,
+                    'from': start_seconds * 1000,
+                    'to': end_seconds * 1000,
+                },
+                timeout=8,
+            )
+            _track_futures_network_response(response, 'lifecycle_ohlcv')
+            if response.status_code != 200:
+                return cached_df
+            payload = response.json()
+            if str(payload.get('code')) != '200000':
+                return cached_df
+            candles = payload.get('data') or []
+            valid_rows = [
+                row for row in candles
+                if isinstance(row, (list, tuple)) and len(row) >= 7
+            ]
+            if not valid_rows:
+                return cached_df
+
+            fresh = pd.DataFrame(
+                [row[:7] for row in valid_rows],
+                columns=['time', 'open', 'high', 'low', 'close', 'volume', 'turnover'],
+            )
+            fresh['time'] = pd.to_datetime(
+                pd.to_numeric(fresh['time'], errors='coerce'),
+                unit='ms',
+                utc=True,
+                errors='coerce',
+            ).dt.tz_convert(None)
+            numeric_columns = ['open', 'high', 'low', 'close', 'volume', 'turnover']
+            for column in numeric_columns:
+                fresh[column] = pd.to_numeric(fresh[column], errors='coerce')
+            fresh = (
+                fresh.dropna(subset=['time'] + numeric_columns)
+                .drop_duplicates(subset=['time'], keep='last')
+                .sort_values('time')
+                .reset_index(drop=True)
+            )
+            coherent_ohlc = (
+                (fresh['open'] > 0)
+                & (fresh['high'] > 0)
+                & (fresh['low'] > 0)
+                & (fresh['close'] > 0)
+                & (fresh['volume'] >= 0)
+                & (fresh['high'] >= fresh[['open', 'close']].max(axis=1))
+                & (fresh['low'] <= fresh[['open', 'close']].min(axis=1))
+                & (fresh['high'] >= fresh['low'])
+            )
+            fresh = fresh.loc[coherent_ohlc].reset_index(drop=True)
+            if fresh.empty:
+                return cached_df
+
+            if cached_df is not None and not cached_df.empty:
+                merged = pd.concat([cached_df, fresh], ignore_index=True)
+            else:
+                merged = fresh
+            merged = (
+                merged.drop_duplicates(subset=['time'], keep='last')
+                .sort_values('time')
+                .tail(limit)
+                .reset_index(drop=True)
+            )
+            merged.attrs.update({
+                'market_data_source': self._market_data_source(),
+                'market_data_is_synthetic': False,
+                'contract_symbol': contract_symbol,
+                'fetched_at': datetime.utcnow().isoformat() + 'Z',
+                'candles_count': int(len(merged)),
+                'lifecycle_window_only': True,
+            })
+
+            now_mono = time.monotonic()
+            with _futures_lifecycle_data_cache_lock:
+                _futures_lifecycle_data_cache[cache_key] = {
+                    'df': merged.copy(deep=True),
+                    'stored_at': now_mono,
+                }
+                if len(_futures_lifecycle_data_cache) > FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES:
+                    oldest = sorted(
+                        _futures_lifecycle_data_cache.items(),
+                        key=lambda item: float((item[1] or {}).get('stored_at') or 0),
+                    )
+                    excess = len(_futures_lifecycle_data_cache) - FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES
+                    for key, _ in oldest[:excess]:
+                        _futures_lifecycle_data_cache.pop(key, None)
+            return merged
+        except Exception as exc:
+            logger.debug('Recent lifecycle OHLCV unavailable for %s %s: %s', symbol, interval, exc)
+            return cached_df
 
     def _confirm_high_tf_entry_trigger(self, symbol: str, timeframe: str, action: str, entry_price: float) -> Dict:
         """Require a closed lower-TF reaction when execution precision demands it.

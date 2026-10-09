@@ -1,10 +1,10 @@
-# COMMIT 33.3 — native core authority, no WSGI monkeypatch chain.
+# COMMIT 33.4.5 — native core authority, no WSGI monkeypatch chain.
 services:
   - type: web
     name: crypto-trader-analyst
     env: python
     buildCommand: bash build.sh
-    startCommand: gunicorn app:app --timeout 120 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 15 --max-requests 50 --max-requests-jitter 10
+    startCommand: gunicorn app:app --timeout 180 --workers 1 --threads 2 --worker-class gthread --graceful-timeout 30 --max-requests 0
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
@@ -16,6 +16,8 @@ services:
         value: "65536"
       - key: PYTHONUNBUFFERED
         value: "1"
+      - key: LOG_LEVEL
+        value: "INFO"
       - key: OMP_NUM_THREADS
         value: "1"
       - key: OPENBLAS_NUM_THREADS
@@ -112,7 +114,21 @@ services:
       - key: SYSTEM_INTERACTIVE_PRIORITY_SECONDS
         value: "120"
       - key: FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS
-        value: "120"
+        value: "600"
+      - key: SAVED_FUTURES_LIFECYCLE_INTERVAL_SECONDS
+        value: "60"
+      - key: SAVED_FUTURES_LIFECYCLE_RECENT_CANDLES
+        value: "96"
+      - key: FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES
+        value: "12"
+      - key: RESOURCE_WATCHDOG_INTERVAL_SECONDS
+        value: "20"
+      - key: RESOURCE_WATCHDOG_BACKOFF_MB
+        value: "300"
+      - key: RESOURCE_WATCHDOG_EMERGENCY_MB
+        value: "380"
+      - key: DERIVATIVES_PROVIDER_HARD_BLOCK_TTL_SECONDS
+        value: "21600"
       - key: FUTURES_INCREMENTAL_START_DELAY_SECONDS
         value: "180"
       - key: RUNTIME_BOOTSTRAP_DELAY_SECONDS

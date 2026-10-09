@@ -80,13 +80,18 @@ except (ValueError, RuntimeError):
 # ============================================================================
 
 import logging
-logging.basicConfig(level=logging.DEBUG)
+_LOG_LEVEL_NAME = str(os.environ.get('LOG_LEVEL', 'INFO') or 'INFO').strip().upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
+logging.basicConfig(level=_LOG_LEVEL)
+# urllib3 DEBUG imprime una línea por request externo y multiplica I/O de logs.
+# WARNING conserva fallos reales sin afectar ninguna decisión de trading.
+logging.getLogger('urllib3').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 print("=" * 60)
 print("🚀 CRYPTO TRADER ANALYST PRO - INICIANDO SISTEMA")
 print("=" * 60)
-print(f"✅ Logging activado - Nivel: DEBUG")
+print(f"✅ Logging activado - Nivel: {_LOG_LEVEL_NAME}")
 
 
 def _boot_rss_mb():
@@ -25778,9 +25783,17 @@ class LiquidationPublicCalibration:
 
     SUCCESS_TTL_SECONDS = 900
     FAILURE_TTL_SECONDS = 180
+    # Render puede recibir 403/451 persistentes desde algunos proveedores.
+    # Una respuesta de bloqueo no contiene alpha; repetirla sólo consume egress,
+    # threads y sockets. El fallback público existente permanece idéntico.
+    PROVIDER_HARD_BLOCK_TTL_SECONDS = max(900, int(os.environ.get(
+        'DERIVATIVES_PROVIDER_HARD_BLOCK_TTL_SECONDS', '21600'
+    ) or 21600))
     _cache = {}
     _lock = threading.RLock()
     _network_gate = threading.BoundedSemaphore(2)
+    _provider_blocked_until = {}
+    _provider_block_lock = threading.Lock()
 
     @staticmethod
     def _clip(value, low, high):
@@ -25809,16 +25822,27 @@ class LiquidationPublicCalibration:
         }.get(tf, '4h')
         return binance, bybit
 
-    @staticmethod
-    def _safe_json(url, params):
+    @classmethod
+    def _safe_json(cls, url, params, provider=None):
+        provider_key = str(provider or '').strip().lower()
+        if provider_key:
+            now = time.monotonic()
+            with cls._provider_block_lock:
+                if now < float(cls._provider_blocked_until.get(provider_key) or 0.0):
+                    return None
         try:
             response = requests.get(
                 url,
                 params=params,
                 timeout=(0.55, 0.85),
-                headers={'User-Agent': 'SmarTradingReview/Commit14'}
+                headers={'User-Agent': 'SmarTradingReview/33.4.5'}
             )
             if response.status_code != 200:
+                if provider_key and response.status_code in (403, 451):
+                    with cls._provider_block_lock:
+                        cls._provider_blocked_until[provider_key] = (
+                            time.monotonic() + cls.PROVIDER_HARD_BLOCK_TTL_SECONDS
+                        )
                 return None
             return response.json()
         except Exception:
@@ -25881,7 +25905,7 @@ class LiquidationPublicCalibration:
             out = {}
             with ThreadPoolExecutor(max_workers=3) as pool:
                 futures = {
-                    name: pool.submit(cls._safe_json, url, params)
+                    name: pool.submit(cls._safe_json, url, params, 'binance_futures')
                     for name, url, params in jobs
                 }
                 for name, future in futures.items():
@@ -25890,7 +25914,7 @@ class LiquidationPublicCalibration:
                     except Exception:
                         out[name] = None
         except Exception:
-            out = {name: cls._safe_json(url, params) for name, url, params in jobs}
+            out = {name: cls._safe_json(url, params, 'binance_futures') for name, url, params in jobs}
 
         ratio_row = cls._latest_row(out.get('ratio'))
         oi_rows = out.get('oi') if isinstance(out.get('oi'), list) else []
@@ -31243,6 +31267,7 @@ def _shed_recreatable_memory(reason='memory-pressure', *, aggressive=False):
     released = {
         'analysis_cache': 0,
         'futures_raw': 0,
+        'futures_lifecycle': 0,
         'futures_micro': 0,
         'spot_raw': 0,
     }
@@ -31272,6 +31297,7 @@ def _shed_recreatable_memory(reason='memory-pressure', *, aggressive=False):
         if callable(clear_fn):
             stats = clear_fn(include_microstructure=bool(aggressive)) or {}
             released['futures_raw'] = int(stats.get('raw_ohlcv') or 0)
+            released['futures_lifecycle'] = int(stats.get('lifecycle_ohlcv') or 0)
             released['futures_micro'] = int(stats.get('microstructure') or 0)
     except Exception:
         pass
@@ -31598,6 +31624,54 @@ def _release_heavy_analysis(owner):
         _mark_background_heavy_cooldown()
 
     _log_memory_runtime(f'{owner}: fin')
+
+
+_RESOURCE_WATCHDOG_INTERVAL_SECONDS = max(10, int(os.environ.get(
+    'RESOURCE_WATCHDOG_INTERVAL_SECONDS', '20'
+) or 20))
+_RESOURCE_WATCHDOG_BACKOFF_MB = max(280.0, float(os.environ.get(
+    'RESOURCE_WATCHDOG_BACKOFF_MB', '300'
+) or 300))
+_RESOURCE_WATCHDOG_EMERGENCY_MB = max(
+    _RESOURCE_WATCHDOG_BACKOFF_MB + 32.0,
+    float(os.environ.get('RESOURCE_WATCHDOG_EMERGENCY_MB', '380') or 380),
+)
+_RESOURCE_WATCHDOG_LAST_SHED_AT = 0.0
+
+
+def resource_watchdog_loop():
+    """Native Render resource governor.
+
+    It never edits signals, Entry/SL/TP, Safety, leverage or persisted lifecycle.
+    Under pressure it only frees recreatable caches and pauses NEW background
+    heavy work; an analysis already holding the heavy slot is allowed to finish.
+    This is intentionally a resource boundary, not a trading filter.
+    """
+    global _RESOURCE_WATCHDOG_LAST_SHED_AT
+    while True:
+        try:
+            rss = _process_rss_mb()
+            if rss is not None and float(rss) >= _RESOURCE_WATCHDOG_BACKOFF_MB:
+                with _HEAVY_ANALYSIS_STATE_LOCK:
+                    owner = _HEAVY_ANALYSIS_OWNER
+                _free_runtime_note_background_backoff(
+                    owner or 'resource-watchdog',
+                    reason=f'WATCHDOG_RSS_{float(rss):.1f}MB',
+                    seconds=300.0,
+                )
+                now_mono = time.monotonic()
+                min_shed_gap = (
+                    20.0 if float(rss) >= _RESOURCE_WATCHDOG_EMERGENCY_MB else 90.0
+                )
+                if now_mono - _RESOURCE_WATCHDOG_LAST_SHED_AT >= min_shed_gap:
+                    _RESOURCE_WATCHDOG_LAST_SHED_AT = now_mono
+                    _shed_recreatable_memory(
+                        reason=f'watchdog:{float(rss):.1f}MB',
+                        aggressive=float(rss) >= _RESOURCE_WATCHDOG_EMERGENCY_MB,
+                    )
+        except Exception as exc:
+            logger.warning('resource watchdog: %s', exc)
+        time.sleep(_RESOURCE_WATCHDOG_INTERVAL_SECONDS)
 
 
 # ============================================================================
@@ -39371,9 +39445,9 @@ def _trigger_futures_fast_restore():
     return True
 
 
-_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(30, int(os.environ.get(
-    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '120'
-) or 120))
+_FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS = max(60, int(os.environ.get(
+    'FUTURES_SNAPSHOT_MIN_INTERVAL_SECONDS', '600'
+) or 600))
 _FUTURES_LAST_SNAPSHOT_SAVE_AT = 0.0
 _FUTURES_SNAPSHOT_SAVE_LOCK = threading.Lock()
 _RUNTIME_PERSISTENCE_VERIFY_STATE = {
@@ -39405,35 +39479,38 @@ def _save_futures_cache_to_disk(force=False):
         if not serial_data:
             return False
 
-        # RC9.7.11: an incremental request can finish before the deferred boot
-        # restore. If the previous-process snapshot has broader coverage, merge
-        # it instead of replacing it with one combo. Current keys always win,
-        # so a newly analysed combo is never rolled back.
-        try:
-            stored = load_runtime_snapshot(
-                'futures', 'analysis_cache', allow_expired=False
-            )
-            old_payload = (stored or {}).get('payload') or {}
-            if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
-                old_serial = old_payload.get('data') or {}
-                old_analysis = dict(old_serial.get('analysis_serial') or {})
-                new_analysis = dict(serial_data.get('analysis_serial') or {})
-                if len(old_analysis) > len(new_analysis):
-                    merged_analysis = dict(old_analysis)
-                    merged_analysis.update(new_analysis)
-                    old_lifecycle = dict(old_serial.get('lifecycle') or {})
-                    new_lifecycle = dict(serial_data.get('lifecycle') or {})
-                    merged_lifecycle = dict(old_lifecycle)
-                    merged_lifecycle.update(new_lifecycle)
-                    serial_data['analysis_serial'] = merged_analysis
-                    serial_data['lifecycle'] = merged_lifecycle
-                    print(
-                        '🛡️ [FUT] Snapshot parcial fusionado con estado persistido '
-                        f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
-                        flush=True,
-                    )
-        except Exception as merge_error:
-            print(f'⚠️ [FUT] merge pre-save omitido: {merge_error}', flush=True)
+        # El merge remoto sólo es necesario durante la pequeña carrera de cold-start
+        # ANTES del primer restore. Una vez que el restore ya fue intentado, la RAM
+        # del worker es la autoridad y volver a leer Supabase antes de cada save
+        # duplica egress/objetos sin aportar información nueva.
+        with _FUTURES_FAST_RESTORE_LOCK:
+            restore_attempted = bool(_FUTURES_FAST_RESTORE_STATE.get('attempted'))
+        if not restore_attempted:
+            try:
+                stored = load_runtime_snapshot(
+                    'futures', 'analysis_cache', allow_expired=False
+                )
+                old_payload = (stored or {}).get('payload') or {}
+                if int(old_payload.get('schema_version', 0) or 0) == _FUTURES_CACHE_SCHEMA_VERSION:
+                    old_serial = old_payload.get('data') or {}
+                    old_analysis = dict(old_serial.get('analysis_serial') or {})
+                    new_analysis = dict(serial_data.get('analysis_serial') or {})
+                    if len(old_analysis) > len(new_analysis):
+                        merged_analysis = dict(old_analysis)
+                        merged_analysis.update(new_analysis)
+                        old_lifecycle = dict(old_serial.get('lifecycle') or {})
+                        new_lifecycle = dict(serial_data.get('lifecycle') or {})
+                        merged_lifecycle = dict(old_lifecycle)
+                        merged_lifecycle.update(new_lifecycle)
+                        serial_data['analysis_serial'] = merged_analysis
+                        serial_data['lifecycle'] = merged_lifecycle
+                        print(
+                            '🛡️ [FUT] Snapshot parcial fusionado con estado persistido '
+                            f'({len(new_analysis)}→{len(merged_analysis)} análisis)',
+                            flush=True,
+                        )
+            except Exception as merge_error:
+                print(f'⚠️ [FUT] merge pre-save omitido: {merge_error}', flush=True)
 
         payload = {
             'schema_version': _FUTURES_CACHE_SCHEMA_VERSION,
@@ -47107,7 +47184,14 @@ def monitor_entries_loop():
 # - ejecuta órdenes.
 # ============================================================================
 
-_SAVED_FUTURES_LIFECYCLE_INTERVAL = 60
+_SAVED_FUTURES_LIFECYCLE_INTERVAL = max(30, int(os.environ.get(
+    'SAVED_FUTURES_LIFECYCLE_INTERVAL_SECONDS', '60'
+) or 60))
+# Sólo Guardian/lifecycle usa este lookback corto. El motor de señales sigue
+# descargando su histórico completo (>=100 velas), por lo que no cambia alpha.
+_SAVED_FUTURES_LIFECYCLE_RECENT_CANDLES = max(48, min(160, int(os.environ.get(
+    'SAVED_FUTURES_LIFECYCLE_RECENT_CANDLES', '96'
+) or 96)))
 
 
 def _build_saved_futures_lifecycle_message(
@@ -47478,7 +47562,25 @@ def saved_futures_lifecycle_loop():
                         market_engine = multiasset_system if symbol in MULTIASSET_SYMBOLS else futures_market
                     except Exception:
                         market_engine = futures_market
-                    price_cache[key] = market_engine.get_kucoin_data(symbol, timeframe)
+                    recent_fetch = getattr(market_engine, 'get_kucoin_data_recent', None)
+                    if callable(recent_fetch):
+                        recent_data = recent_fetch(
+                            symbol,
+                            timeframe,
+                            max_candles=_SAVED_FUTURES_LIFECYCLE_RECENT_CANDLES,
+                        )
+                        # Fail-open sólo hacia el contrato anterior: si el endpoint
+                        # acotado falla, Guardian conserva exactamente la descarga
+                        # completa que ya utilizaba 33.4.4. Nunca inventamos velas.
+                        price_cache[key] = (
+                            recent_data
+                            if recent_data is not None
+                            else market_engine.get_kucoin_data(symbol, timeframe)
+                        )
+                    else:
+                        # Compatibilidad defensiva: un engine externo antiguo
+                        # conserva el comportamiento previo, nunca inventa datos.
+                        price_cache[key] = market_engine.get_kucoin_data(symbol, timeframe)
 
                 return price_cache[
                     key
@@ -57175,6 +57277,22 @@ def _start_background_threads():
     print("\n" + "=" * 60)
     print("🚀 ARRANCANDO THREADS BACKGROUND (compatible con Gunicorn)")
     print("=" * 60)
+
+    # Resource governor: sólo backpressure/caches recreables; cero autoridad trading.
+    try:
+        t_resource = threading.Thread(
+            target=resource_watchdog_loop,
+            name='resource-watchdog',
+            daemon=True,
+        )
+        t_resource.start()
+        print(
+            "✅ Thread resource_watchdog iniciado "
+            f"({ _RESOURCE_WATCHDOG_INTERVAL_SECONDS }s; "
+            f"backoff={_RESOURCE_WATCHDOG_BACKOFF_MB:.0f}MB)"
+        )
+    except Exception as e:
+        print(f"⚠️ Error iniciando resource_watchdog: {e}")
     
     # 1. Verificador de horarios (dispara análisis + review diario a las 20:00)
     try:
@@ -60700,8 +60818,8 @@ def _bootstrap_core_33_4_4():
     return state
 
 _COMMIT_33_4_4_BOOTSTRAP = _bootstrap_core_33_4_4()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_4_QUICK_EXECUTION_ECONOMICS_TELEGRAM_V1'
-print(f"✅ [33.4.4] núcleo canónico activo: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
+_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_5_RESOURCE_BUDGET_CORE_V1'
+print(f"✅ [33.4.5] resource budget core sobre núcleo canónico 33.4.4: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
