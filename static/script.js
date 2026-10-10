@@ -1836,6 +1836,57 @@ window.watchMultiRecommendationReady345 = function(symbol, timeframe) {
     // No instant extra request on first render; existing POST is still running.
 };
 
+// Commit 35: passive technical recovery for FUTURES and SPOT.
+// The single timer reads only an existing completed analysis; no heavy job,
+// no indicators recalculated and no signal publication from a cached result.
+window.stopTechnicalRecommendationWatch35 = function() {
+    const st=window.__TECHNICAL_RECOMMENDATION_WATCH_35__;
+    if(st?.timer) clearInterval(st.timer);
+    window.__TECHNICAL_RECOMMENDATION_WATCH_35__=null;
+};
+window.watchTechnicalRecommendationReady35 = function(market,symbol,timeframe) {
+    market=String(market||'').toLowerCase();
+    if(!['spot','futures'].includes(market)) return;
+    const norm=x=>String(x||'').trim().toUpperCase().replace('/','-');
+    const key=`${market}|${norm(symbol)}|${String(timeframe)}`;
+    if(window.__TECHNICAL_RECOMMENDATION_WATCH_35__?.key===key) return;
+    window.stopTechnicalRecommendationWatch35();
+    const st={key,started:Date.now(),busy:false,timer:null};
+    window.__TECHNICAL_RECOMMENDATION_WATCH_35__=st;
+    const tick=async()=>{
+        if(document.hidden||st.busy||window.__TECHNICAL_RECOMMENDATION_WATCH_35__!==st) return;
+        if(Date.now()-st.started>15*60*1000) {window.stopTechnicalRecommendationWatch35();return;}
+        const visible=`${market}|${norm(document.getElementById('symbol-select')?.value)}|${String(document.getElementById('interval-select')?.value||'')}`;
+        if(key!==visible){window.stopTechnicalRecommendationWatch35();return;}
+        st.busy=true;
+        const ctrl=new AbortController(); const timeout=setTimeout(()=>ctrl.abort(),5000);
+        try {
+            const qs=new URLSearchParams({market,symbol:norm(symbol),timeframe:String(timeframe)});
+            const res=await fetch(`/api/commit35/recommendation-ready?${qs}`,{credentials:'same-origin',signal:ctrl.signal});
+            if(!res.ok) return;
+            const body=await res.json();
+            if(!body?.ready||!body?.data?.decision||window.__TECHNICAL_RECOMMENDATION_WATCH_35__!==st) return;
+            if(key!==`${market}|${norm(document.getElementById('symbol-select')?.value)}|${String(document.getElementById('interval-select')?.value||'')}`) return;
+            const rec=document.getElementById('system-recommendation');
+            if(!rec||typeof window.updateRecommendation!=='function') return;
+            const payload=body.data;
+            const stamp=String(payload.source_candle_close_timestamp||payload.source_candle_timestamp||'no disponible');
+            const digest=`${key}|${stamp}|${payload.decision.action}|${payload.decision.confidence}`;
+            if(rec.dataset.c35Digest===digest){window.stopTechnicalRecommendationWatch35();return;}
+            window.updateRecommendation(payload);
+            const note=document.createElement('div');
+            note.className='alert alert-secondary py-2 small mb-2';
+            note.textContent=`Referencia técnica del último análisis completado (${stamp}). No es una señal LIVE nueva. Consulta Confirmadas/Vigentes.`;
+            rec.prepend(note); rec.dataset.c35Digest=digest;
+            rec.dataset.analysisStale='true';
+            window.currentAnalysis=payload;
+            window.stopTechnicalRecommendationWatch35();
+        }catch(_){/* passive read only */}finally{clearTimeout(timeout);st.busy=false;}
+    };
+    st.timer=setInterval(tick,24000);
+    setTimeout(tick,1000);
+};
+
 window.commit18MultiIdentityReset = function(symbol, timeframe) {
     if (window.IS_MULTI_ASSET_PAGE !== true) return;
     const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
@@ -3197,6 +3248,7 @@ window.runCompleteAnalysis = function() {
             // el backend devuelve 202. No mostramos error ni lanzamos otra
             // petición paralela; un único timer reintenta la misma vista.
             if (!window.IS_FUTURES_PAGE && data?.busy) {
+                window.watchTechnicalRecommendationReady35?.('spot', symbol, interval);
                 const now = Date.now();
                 let startedAt = Number(window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ || 0);
                 if (!startedAt) {
@@ -3249,6 +3301,7 @@ window.runCompleteAnalysis = function() {
 
                 const isMulti = window.IS_MULTI_ASSET_PAGE === true;
                 if (isMulti) window.watchMultiRecommendationReady345?.(symbol, interval);
+                else window.watchTechnicalRecommendationReady35?.('futures', symbol, interval);
                 const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
                 const retryAfterMs = isMulti
@@ -3403,6 +3456,7 @@ window.runCompleteAnalysis = function() {
                     window.__SPOT_ANALYSIS_RETRY_STARTED_AT__ = 0;
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                 }
+                window.stopTechnicalRecommendationWatch35?.();
                 window.currentAnalysis = data.data;
                 if (data.stale || data.display_only || data.data?.display_only_closed_candle) {
                     const rec = document.getElementById('system-recommendation');

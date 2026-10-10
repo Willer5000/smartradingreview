@@ -53,7 +53,7 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, Any], *, ttl_seconds: int = 21600) -> bool:
+def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, Any], *, ttl_seconds: int = 21600, require_remote: bool = False) -> bool:
     if not isinstance(payload, dict):
         return False
     local_ok = False
@@ -64,7 +64,7 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
         local_ok = False
     db = _db()
     if db is None or bool(getattr(db, 'provider_restricted', lambda: False)()):
-        return local_ok
+        return False if require_remote else local_ok
     now = utc_now()
     cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
     digest = _stable_digest(payload)
@@ -107,10 +107,10 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
         return True
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot save {namespace}/{snapshot_key}: {exc}")
-        return local_ok
+        return False if require_remote else local_ok
 
 
-def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: bool = False) -> Optional[Dict[str, Any]]:
+def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: bool = False, require_remote: bool = False) -> Optional[Dict[str, Any]]:
     db = _db()
     cache_key = (str(namespace or 'runtime')[:64], str(snapshot_key or 'default')[:128])
     with _RC8_WRITE_LOCK:
@@ -120,6 +120,8 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
             if isinstance(value, dict):
                 return dict(value)
     if db is None or bool(getattr(db, 'provider_restricted', lambda: False)()):
+        if require_remote:
+            return None
         try:
             return _local_load_snapshot(namespace, snapshot_key, allow_expired=allow_expired) if _local_load_snapshot else None
         except Exception:
@@ -165,6 +167,8 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
         return value
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot load {namespace}/{snapshot_key}: {exc}")
+        if require_remote:
+            return None
         try:
             return _local_load_snapshot(namespace, snapshot_key, allow_expired=allow_expired) if _local_load_snapshot else None
         except Exception:

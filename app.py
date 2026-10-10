@@ -31311,34 +31311,101 @@ def _commit34_cgroup_mb():
     return None, None
 
 
-def _commit34_guard_stage(owner, *, optional=False):
-    """Fail safely before the next large allocation, never after the OOM.
+def _commit346_inactive_file_mb():
+    """Return reclaimable *inactive* file-cache bytes from the active cgroup.
 
-    Does not change trade quality/geometry.  For optional research pass,
-    returns False instead of killing a legitimate canonical opportunity.
-    A REJECTED heavy job keeps its last persisted snapshot for the frontend.
+    memory.current includes disk cache and cannot be treated like process RSS.
+    We credit at most half of inactive_file and cap that credit to 120 MiB;
+    active_file, anonymous allocations and shared kernel slabs get NO credit.
+    Missing/unreadable stats yield zero credit (safe failure mode).
     """
-    used,limit = _commit34_cgroup_mb()
+    for path in ('/sys/fs/cgroup/memory.stat',
+                 '/sys/fs/cgroup/memory/memory.stat'):
+        try:
+            with open(path, 'r', encoding='ascii') as stream:
+                for line in stream:
+                    parts = line.split()
+                    if not parts:
+                        continue
+                    if parts[0] in ('inactive_file', 'total_inactive_file') and len(parts) > 1:
+                        return max(0.0, float(parts[1]) / (1024.0 ** 2))
+        except (OSError, ValueError, OverflowError):
+            continue
+    return 0.0
+
+
+def _commit346_cgroup_budget(reserve_mb=96.0):
+    """Check hard physical headroom AND conservatively reclaimable page-cache.
+
+    `limit - memory.current` is not physical free RAM: cold page-cache may be
+    reclaimed by Linux. Conversely, allowing all page cache as free is unsafe.
+    We require at least 64 MiB of *raw* headroom, scaled to workload,
+    plus a workload-specific reserve after 50%% discounted cache credit.
+    This is not a trading filter. It guards only temporary working-set peaks.
+    """
+    used, limit = _commit34_cgroup_mb()
+    if limit is None or used is None:
+        return {'safe': True, 'used_mb': used, 'limit_mb': limit,
+                'raw_headroom_mb': None, 'effective_headroom_mb': None,
+                'inactive_file_mb': 0.0, 'credit_mb': 0.0}
+    raw = float(limit) - float(used)
+    inactive = _commit346_inactive_file_mb()
+    credit = min(120.0, max(0.0, inactive) * 0.50)
+    effective = raw + credit
+    # cgroup OOM is immediate without raw space: never count file cache alone.
+    safe = raw >= max(64.0, min(112.0, float(reserve_mb) * 0.65)) and effective >= float(reserve_mb)
+    return {'safe': bool(safe), 'used_mb': used, 'limit_mb': limit,
+            'raw_headroom_mb': round(raw, 1),
+            'effective_headroom_mb': round(effective, 1),
+            'inactive_file_mb': round(inactive, 1), 'credit_mb': round(credit, 1)}
+
+
+def _commit346_stage_reserve(owner):
+    """In-flight checkpoints, not a new heavy-job admission policy.
+
+    By this point one heavy job already owns the exclusive lock and has made
+    its initial allocations. The old fixed 112 MiB reserve aborted safe 1h
+    analysis at cgroup=415/512 despite process RSS=164.5 MiB.
+    """
+    text = str(owner or '').lower()
+    tf = text.rsplit(':', 1)[-1]
+    if tf in ('1d', '12h', '1w'):
+        return 128.0
+    if text.startswith('heatmap:'):
+        return 96.0
+    if text.startswith('family-analysis:'):
+        return 72.0
+    return 88.0
+
+
+def _commit34_guard_stage(owner, *, optional=False):
+    """Protect true cgroup/heap danger without aborting on reclaimable cache.
+
+    Stage checks are deliberately distinct from job *start* admission. A real
+    danger still aborts and never invents a vote, Entry, SL or TP. Only an
+    optional research component can be skipped under pressure.
+    """
+    reserve = _commit346_stage_reserve(owner)
+    budget = _commit346_cgroup_budget(reserve)
     rss = _process_rss_mb()
-    # Respect the live configured cap; reserve substantial room for pandas,
-    # heatmaps and 2 gunicorn threads.  Cgroup limit varies by Render plan.
-    # The cgroup includes kernel page cache; compare that with the total
-    # allowance, not with the process RSS threshold.  Separate thresholds
-    # avoid starving legitimate analyses when the cgroup has reclaimable cache.
-    group_danger = max(240.0, limit - 112.0) if limit is not None else None
-    rss_danger = max(250.0, float(os.getenv('MEMORY_IN_JOB_ABORT_MB','295')))
-    exhausted = ((used is not None and group_danger is not None and used >= group_danger)
-                 or (rss is not None and rss >= rss_danger))
+    rss_danger = max(250.0, float(os.getenv('MEMORY_IN_JOB_ABORT_MB', '295')))
+    exhausted = not budget['safe'] or (rss is not None and rss >= rss_danger)
     if not exhausted:
         return True
-    _shed_recreatable_memory(reason=f'commit34:{owner}', aggressive=True)
-    used,limit = _commit34_cgroup_mb()
+    _shed_recreatable_memory(reason=f'commit346:{owner}', aggressive=True)
+    budget = _commit346_cgroup_budget(reserve)
     rss = _process_rss_mb()
-    exhausted = ((used is not None and group_danger is not None and used >= group_danger)
-                 or (rss is not None and rss >= rss_danger))
-    if not exhausted: return True
-    if optional: return False
-    raise RuntimeError(f'RESOURCE_PRESSURE_ABORT:{owner}:rss={rss}:cgroup={used}')
+    if budget['safe'] and (rss is None or rss < rss_danger):
+        return True
+    if optional:
+        return False
+    print(f"🛑 [MEM-34.6] stage={owner} budget={budget} rss={rss}; "
+          "canonical analysis deferred, not published", flush=True)
+    raise RuntimeError(
+        f"RESOURCE_PRESSURE_ABORT:{owner}:rss={rss}:"
+        f"cgroup={budget['used_mb']}:"
+        f"effective_headroom={budget['effective_headroom_mb']}"
+    )
 
 
 def _process_rss_mb():
@@ -31700,9 +31767,15 @@ def _acquire_heavy_analysis(owner, timeout=None):
     # authoritative and a single global heavy slot is unchanged.
     _owner_lower = str(owner or '').lower()
     _reserved_mb = 176.0 if _owner_lower.endswith((':1d', ':12h')) else (160.0 if _owner_lower.endswith((':2h', ':4h')) else 128.0)
-    if (_cgroup_limit and _cgroup_used is not None and
-            _cgroup_used >= max(175.0, _cgroup_limit - _reserved_mb)):
-        _free_runtime_note_background_backoff(owner, 'CGROUP_HEADROOM', seconds=180.0)
+    # 34.6: the prior memory.current-only test starved ALL 30m/1h jobs
+    # whenever cold page cache occupied the cgroup. Continue protecting the
+    # raw 48 MiB emergency floor and require 50%-discounted inactive-file
+    # headroom for the expected new-job footprint. One heavy lock unchanged.
+    _start_budget = _commit346_cgroup_budget(_reserved_mb)
+    if not _start_budget['safe']:
+        _free_runtime_note_background_backoff(
+            owner, f"CGROUP_HEADROOM_34_6:{_start_budget['raw_headroom_mb']}",
+            seconds=180.0)
         with _HEAVY_ANALYSIS_STATE_LOCK:
             _HEAVY_ANALYSIS_OWNER = None
         _HEAVY_ANALYSIS_LOCK.release()
@@ -37490,6 +37563,86 @@ def api_multiasset_display_33_4_2():
         }),200
 
 
+@app.route('/api/commit35/recommendation-ready', methods=['GET'])
+def api_commit35_recommendation_ready():
+    """Snapshot TECNICO de una celda, solo lectura y sin análisis pesado.
+
+    Se utiliza cuando el primer POST devolvió 202. Nunca se convierte un
+    candidato histórico en señal LIVE ni se estima un Entry/SL/TP.
+    """
+    try:
+        market = str(request.args.get('market') or '').strip().lower()
+        sym = str(request.args.get('symbol') or '').strip().upper().replace('/', '-')
+        tf = str(request.args.get('timeframe') or '').strip()
+        if market not in ('futures', 'multiasset', 'spot'):
+            return jsonify({'success':False,'ready':False,'error':'Mercado no permitido'}),400
+        if not sym or not tf:
+            return jsonify({'success':False,'ready':False,'error':'Celda requerida'}),400
+        if market == 'multiasset':
+            from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
+            if sym not in MULTIASSET_SYMBOLS or tf not in MULTIASSET_TIMEFRAMES:
+                return jsonify({'success':False,'ready':False,'error':'Celda fuera de universo'}),400
+        elif market == 'futures':
+            from futures_system import FUTURES_SYMBOLS, FUTURES_TIMEFRAMES
+            if sym not in FUTURES_SYMBOLS or tf not in FUTURES_TIMEFRAMES:
+                return jsonify({'success':False,'ready':False,'error':'Celda fuera de universo'}),400
+        else:
+            if sym not in SYMBOLS or tf not in TIMEFRAMES:
+                return jsonify({'success':False,'ready':False,'error':'Celda fuera de universo'}),400
+        data = _get_futures_ui_cached(sym, tf) if market != 'spot' else None
+        if not isinstance(data, dict) or not isinstance(data.get('decision'), dict):
+            if market == 'multiasset':
+                with _MULTI_ASSET_CACHE['lock']:
+                    data = dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((sym, tf)) or {})
+            elif market == 'futures':
+                with _futures_analysis_cache['lock']:
+                    data = dict(((_futures_analysis_cache.get('data') or {}).get('analysis') or {}).get((sym, tf)) or {})
+            else:
+                # Sólo la vela cerrada del caché estándar; NUNCA promover una
+                # previsualización intrabar a recomendación confirmada.
+                with _ANALYSIS_CACHE_LOCK:
+                    row = _ANALYSIS_CACHE.get((sym, tf)) or {}
+                    data = dict(row.get('data') or {})
+        if not isinstance(data, dict) or not data.get('success') or not isinstance(data.get('decision'), dict):
+            return jsonify({'success': True, 'ready':False, 'market':market,
+                            'symbol':sym, 'timeframe':tf, 'cache_only':True}),200
+        if str(data.get('symbol') or sym).upper().replace('/', '-') != sym or str(data.get('timeframe') or tf) != tf:
+            return jsonify({'success':True,'ready':False,'cache_only':True}),200
+        decision = data.get('decision') or {}
+        if not str(decision.get('action') or '').strip():
+            return jsonify({'success':True,'ready':False,'cache_only':True}),200
+        # Evitar todo DataFrame, heatmap, árbol de especialistas y estructuras
+        # de investigación. Mantener sólo soporte técnico REAL del análisis.
+        levels = data.get('levels') if isinstance(data.get('levels'), dict) else {}
+        safe = {
+            'success':True, 'symbol':sym, 'timeframe':tf,
+            'system_type':market, 'market':market,
+            'decision':{
+                'action':decision.get('action'),
+                'confidence':decision.get('confidence'),
+                'reason':str(decision.get('reason') or '')[:850],
+                'razones':[str(x)[:200] for x in (decision.get('razones') or [])[:6]],
+                'estrategias':list(decision.get('estrategias') or [])[:6],
+            },
+            'levels':{k:levels.get(k) for k in (
+                'entry','stop_loss','take_profit','risk_reward','leverage','publication_status'
+            ) if k in levels},
+            'trend':dict(data.get('trend') or {}) if isinstance(data.get('trend'),dict) else {},
+            'quality_context': dict(data.get('quality_context') or {}) if isinstance(data.get('quality_context'),dict) else {},
+            'message':str(data.get('message') or '')[:1200],
+            'source_candle_close_timestamp':data.get('source_candle_close_timestamp'),
+            'source_candle_timestamp':data.get('source_candle_timestamp'),
+            'publication_status':data.get('publication_status') or levels.get('publication_status'),
+            'historical_reference':True,
+            'display_only':True,
+        }
+        return jsonify({'success':True,'ready':True,'cache_only':True,
+                        'historical_reference':True,'data':safe}),200
+    except Exception as exc:
+        return jsonify({'success':True,'ready':False,'cache_only':True,
+                        'error':type(exc).__name__}),200
+
+
 @app.route('/api/multiasset/recommendation-ready', methods=['GET'])
 def api_multiasset_recommendation_ready_34_5():
     """Read-only COMPLETED technical analysis; never starts a heavy job.
@@ -38203,6 +38356,10 @@ def api_futures_analyze():
         # every 3 s and turn one transient failure into repeated 502/503 load.
         recent_error = _get_futures_ui_recent_error(symbol, timeframe, 20)
         if recent_error:
+            # Resource backoff is NOT a market verdict and must not be painted
+            # as a failed recommendation. Preserve the last authentic decision
+            # and return a bounded retry without starting another heavy job.
+            _pressure = str(recent_error.get('error') or '').startswith('RESOURCE_PRESSURE_ABORT:')
             return jsonify({
                 'success': False,
                 'busy': True,
@@ -38210,10 +38367,10 @@ def api_futures_analyze():
                 'partial': bool(partial_data),
                 'last_closed_display': last_closed_display,
                 'data': partial_data,
-                'job_state': 'BACKOFF',
-                'retry_after_ms': 5000,
-                'last_error': recent_error.get('error'),
-                'error': 'Futures está recuperándose de un intento reciente; se reintentará sin duplicar análisis.',
+                'job_state': 'RESOURCE_BACKOFF' if _pressure else 'BACKOFF',
+                'retry_after_ms': 30000 if _pressure else 5000,
+                'last_error': None if _pressure else recent_error.get('error'),
+                'error': 'Esperando memoria disponible para completar el análisis, sin publicar una señal incompleta.' if _pressure else 'Futures está recuperándose de un intento reciente; se reintentará sin duplicar análisis.',
             }), 202
 
         _mark_futures_interactive_priority(seconds=12)
@@ -38535,6 +38692,9 @@ def _compact_futures_runtime_result(result):
             if key in trend
         }
 
+    if result.get('message'):
+        compact['message'] = str(result.get('message'))[:1800]
+
     quality_context = _compact_futures_quality_context(result)
     if quality_context:
         compact['quality_context'] = quality_context
@@ -38739,7 +38899,7 @@ _FAST_FUTURES_UI_POINTS = {
     '30m': 128,
 }
 _FAST_FUTURES_UI_CACHE_TTL_SECONDS = max(20, int(os.environ.get(
-    'FAST_FUTURES_UI_CACHE_TTL_SECONDS', '45'
+    'FAST_FUTURES_UI_CACHE_TTL_SECONDS', '150'
 ) or 45))
 
 
@@ -38839,7 +38999,7 @@ def _compact_fast_futures_ui_result(result, timeframe):
 # ============================================================================
 
 _FUTURES_UI_CACHE_TTL_SECONDS = max(30, int(os.environ.get(
-    'FUTURES_UI_CACHE_TTL_SECONDS', '90'
+    'FUTURES_UI_CACHE_TTL_SECONDS', '300'
 ) or 90))
 _FUTURES_UI_CACHE_MAX_ITEMS = 1
 _FUTURES_UI_CACHE = {
@@ -39265,6 +39425,11 @@ def _get_futures_ui_cached(symbol, timeframe):
         item = (_FUTURES_UI_CACHE.get('items') or {}).get(key)
         if not item:
             return None
+        # Never serve an unsuccessful prior 34.5 resource-aborted job as a
+        # technical recommendation after the process has recovered.
+        if isinstance(item.get('data'), dict) and item['data'].get('success') is False:
+            _FUTURES_UI_CACHE['items'].pop(key, None)
+            return None
         age = now - float(item.get('ts') or 0)
         item_tf = str(item.get('timeframe') or str(key).split('|')[-1])
         ttl = (
@@ -39458,8 +39623,13 @@ def _run_futures_ui_analysis_sync(symbol, timeframe, market='futures', pre_acqui
                 closed_candle_only=False,
                 intrabar_preview=True,
             )
-            if not result:
-                raise RuntimeError('Análisis Futures vacío')
+            # 34.6: analyze_full_market catches its own resource exceptions
+            # and returns {'success': False}. Never pass that failed result
+            # through the router/UI cache as if it were a completed analysis:
+            # it made the HTTP 200 response display RESOURCE_PRESSURE_ABORT
+            # as a permanent red "technical recommendation".
+            if not isinstance(result, dict) or not result or result.get('success') is False:
+                raise RuntimeError(str((result or {}).get('error') or 'Análisis Futures incompleto'))
             result = _apply_profitability_router(result, symbol, timeframe)
             result = _apply_96_futures_risk_policy(result, symbol, timeframe)
             result = _apply_36s_futures_ai_control(result, symbol, timeframe)
@@ -39564,36 +39734,84 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
 
 
 def _serialize_futures_cache(data):
+    """C35: compactar ANTES de serializar; sin copia JSON del resultado rico.
+
+    Conserva los identificadores de señal, niveles y lifecycle usados en
+    publicación/Guardian. Los grandes DataFrame/OB/votos permanecen sólo en
+    la duración de la evaluación, nunca en el snapshot Supabase.
     """
-    Convierte el dict del cache a un formato JSON-serializable.
-    Las claves son tuplas (symbol, tf) → las convertimos a strings 'SYMBOL|TF'.
-    """
-    if not data or not isinstance(data, dict):
+    if not isinstance(data, dict) or not data:
         return None
     analysis_serial = {}
-    for k, v in (data.get('analysis') or {}).items():
-        if isinstance(k, tuple) and len(k) == 2:
-            key_str = f"{k[0]}|{k[1]}"
-        else:
-            key_str = str(k)
-        # Verificamos que v sea JSON-serializable removiendo objetos problemáticos
+    for key, result in (data.get('analysis') or {}).items():
+        key_str = '|'.join(map(str, key)) if isinstance(key, tuple) and len(key) == 2 else str(key)
         try:
-            import json
-            json.dumps(v)
-            analysis_serial[key_str] = _compact_futures_runtime_result(v)
-        except (TypeError, ValueError):
-            # Contiene objetos no serializables (ej: pd.DataFrame residual)
-            # Intentamos limpiar campos conocidos
-            try:
-                v_clean = {kk: vv for kk, vv in v.items() if kk not in ('df',)}
-                json.dumps(v_clean)
-                analysis_serial[key_str] = _compact_futures_runtime_result(v_clean)
-            except Exception:
-                # Si aún así falla, saltar esta entrada
+            # Nunca realizar json.dumps(result) del dict original: crea un
+            # buffer completo de megabytes sólo para descartarlo después.
+            compact = _compact_futures_runtime_result(result)
+            if not isinstance(compact, dict):
                 continue
+            # json roundtrip sólo sobre la proyección compacta y con salida
+            # acotada; previene referencias no serializables de pandas/numpy.
+            import json
+            import math
+            def _json_safe(value):
+                if isinstance(value, float) and not math.isfinite(value):
+                    return None
+                if isinstance(value, dict):
+                    return {str(k): _json_safe(v) for k,v in value.items()}
+                if isinstance(value, (tuple,list)):
+                    return [_json_safe(v) for v in value]
+                return value
+            # Missing/non-finite indicators are missing evidence, not reason
+            # to discard the entire confirmed candle on the persistence path.
+            encoded = json.dumps(_json_safe(compact), ensure_ascii=False, default=str,
+                                 separators=(',', ':'), allow_nan=False)
+            if len(encoded.encode('utf-8')) > 192 * 1024:
+                # En un payload patológico NO eliminar toda la celda ni perder
+                # su identidad operativa. Mantener acción, niveles exactos,
+                # ID, cierre y condición de publicación; omitir solo evidencia
+                # diagnóstica redundante para la restauración de la UI.
+                slim_keys = (
+                    'success', 'symbol', 'timeframe', 'system_type',
+                    'signal_id', 'is_futures', 'source_candle_timestamp',
+                    'source_candle_close_timestamp', 'source_candle_closed',
+                    'analysis_price', 'current_price', 'publication_status',
+                    'publication_eligible', 'is_executable', 'timestamp',
+                    'risk_class', 'max_entry_wait_bars',
+                )
+                slim = {k: compact.get(k) for k in slim_keys if k in compact}
+                decision = compact.get('decision') or {}
+                if isinstance(decision, dict):
+                    slim['decision'] = {k:decision.get(k) for k in (
+                        'action','original_action','confidence','reason'
+                    ) if k in decision}
+                    if isinstance(slim['decision'].get('reason'), str):
+                        slim['decision']['reason'] = slim['decision']['reason'][:500]
+                levels = compact.get('levels') or {}
+                if isinstance(levels, dict):
+                    # Preserve the exact trade geometry and validity, not a
+                    # synthesized TP/SL. An oversized levels dict is pruned.
+                    essential = (
+                        'entry', 'entry_price', 'entry_zone', 'entry_zone_low',
+                        'entry_zone_high', 'stop_loss', 'sl', 'take_profit',
+                        'tp', 'risk_reward', 'leverage', 'valid_until',
+                        'publication_status', 'entry_valid_until',
+                    )
+                    slim['levels'] = {k: levels.get(k) for k in essential if k in levels}
+                slim['message'] = str(compact.get('message') or '')[:700]
+                encoded = json.dumps(_json_safe(slim), ensure_ascii=False, default=str,
+                                     separators=(',', ':'), allow_nan=False)
+                if len(encoded.encode('utf-8')) > 192 * 1024:
+                    print(f'⚠️ [C35] snapshot patológico sin payload mínimo: {key_str}', flush=True)
+                    continue
+                print(f'🪶 [C35] snapshot celda resumido sin perder señal: {key_str}', flush=True)
+            analysis_serial[key_str] = json.loads(encoded)
+        except (TypeError, ValueError, RecursionError, OverflowError) as exc:
+            print(f'⚠️ [C35] snapshot omitido {key_str}: {type(exc).__name__}', flush=True)
     return {
         'analysis_serial': analysis_serial,
-        'errors': data.get('errors') or [],
+        'errors': (data.get('errors') or [])[:24],
         'lifecycle': data.get('lifecycle') or {},
     }
 
@@ -42432,7 +42650,11 @@ def _get_futures_analysis_snapshot_read_only():
 
     snapshot.setdefault('analysis', {})
     snapshot.setdefault('lifecycle', {})
-    snapshot['snapshot_available'] = True
+    snapshot.setdefault('errors', [])
+    snapshot['snapshot_available'] = bool(snapshot.get('analysis') or snapshot.get('lifecycle'))
+    snapshot['warming_up'] = not bool(snapshot['snapshot_available'])
+    snapshot['refreshing'] = bool(cache.get('running'))
+    snapshot['cache_age'] = max(0.0, time.time()-float(cache.get('ts') or time.time()))
     return snapshot
 
 
@@ -43762,7 +43984,8 @@ def api_futures_signals_active():
     try:
         min_conf = int(request.args.get('min_confidence', 60))
 
-        cache = _get_or_refresh_futures_analysis()
+        cache = _get_futures_analysis_snapshot_read_only()
+        # C35: tarjeta read-only; el scheduler propio es dueño del refresh.
         warming_up = cache.get('warming_up', False)
         visibility = _build_futures_analysis_visibility(
             cache,
@@ -44227,7 +44450,8 @@ def api_futures_signals_previous():
     try:
         min_conf = int(request.args.get('min_confidence', 55))
         
-        cache = _get_or_refresh_futures_analysis()
+        cache = _get_futures_analysis_snapshot_read_only()
+        # C35: tarjeta read-only; el scheduler propio es dueño del refresh.
         warming_up = cache.get('warming_up', False)
         lifecycle = cache.get('lifecycle') or {}
         visibility = _build_futures_analysis_visibility(
@@ -46253,6 +46477,7 @@ _confirmed_signal_outbox_lock = threading.Lock()
 # Non-blocking process-local send mutex: two refresh lanes must not deliver the
 # same durable event concurrently while Supabase/disk dedup is being updated.
 _confirmed_signal_send_lock = threading.Lock()
+_CONFIRMED_OUTBOX_LAST_RESTORE_MONO_35 = 0.0
 
 
 def _compact_confirmed_outbox_signal(market, signal):
@@ -46306,7 +46531,7 @@ def _load_confirmed_signal_outbox_from_disk():
     global _confirmed_signal_outbox
     try:
         from runtime_persistence import load_runtime_snapshot
-        stored = load_runtime_snapshot('telegram', 'confirmed_signal_outbox_v1', allow_expired=False)
+        stored = load_runtime_snapshot('telegram', 'confirmed_signal_outbox_v1', allow_expired=False, require_remote=True)
         data = ((stored or {}).get('payload') or {}).get('events') or {}
         now = time.time(); restored = {}
         for key, item in (data.items() if isinstance(data, dict) else []):
@@ -46315,6 +46540,7 @@ def _load_confirmed_signal_outbox_from_disk():
             created = float(item.get('created_at') or now)
             if now - created <= _CONFIRMED_SIGNAL_OUTBOX_RETENTION:
                 restored[str(key)] = dict(item)
+                restored[str(key)]['_c35_remote_persisted'] = True
         with _confirmed_signal_outbox_lock:
             _confirmed_signal_outbox = restored
         if restored:
@@ -46384,6 +46610,7 @@ def _save_confirmed_signal_outbox_to_disk():
         return save_runtime_snapshot(
             'telegram', 'confirmed_signal_outbox_v1', {'events': snapshot},
             ttl_seconds=_CONFIRMED_SIGNAL_OUTBOX_RETENTION + 3600,
+            require_remote=True,
         )
     except Exception as exc:
         print(f"⚠️ CONFIRMED outbox persistencia: {exc}")
@@ -46425,8 +46652,13 @@ def _confirmed_outbox_enqueue(market, signal, key):
             'updated_at': now, 'next_retry_at': 0.0, 'last_error': None,
         }
         _confirmed_signal_outbox[key] = item
-    _save_confirmed_signal_outbox_to_disk()
-    return item
+    saved = _save_confirmed_signal_outbox_to_disk()
+    with _confirmed_signal_outbox_lock:
+        if key in _confirmed_signal_outbox:
+            _confirmed_signal_outbox[key]['_c35_remote_persisted'] = bool(saved)
+    # Falla cerrada: jamás emitir Telegram cuando la señal no existe en DB.
+    # El evento sigue PENDING en RAM para reintento posterior de persistencia.
+    return item if saved else None
 
 def _attempt_confirmed_outbox_event(key):
     # Normal production path: process-local non-blocking send mutex + strict
@@ -46519,6 +46751,13 @@ def _attempt_confirmed_outbox_event_inner(key):
         return False
     if now < float(item.get('next_retry_at') or 0.0):
         return False
+    if not bool(item.get('_c35_remote_persisted')):
+        if not _save_confirmed_signal_outbox_to_disk():
+            print('⚠️ [C35] Telegram diferido: outbox sin persistencia remota',flush=True)
+            return False
+        with _confirmed_signal_outbox_lock:
+            if key in _confirmed_signal_outbox:
+                _confirmed_signal_outbox[key]['_c35_remote_persisted'] = True
 
     market = str(item.get('market') or '').lower()
     signal = dict(item.get('signal') or {})
@@ -46573,6 +46812,15 @@ def _attempt_confirmed_outbox_event_inner(key):
     return False
 
 def _retry_confirmed_signal_outbox(limit=3):
+    # Recover after a Supabase outage during boot. This runs in the EXISTING
+    # notification loop, never inside cards GET and never creates a daemon.
+    global _CONFIRMED_OUTBOX_LAST_RESTORE_MONO_35
+    now_mono = time.monotonic()
+    with _confirmed_signal_outbox_lock:
+        empty = not bool(_confirmed_signal_outbox)
+    if empty and now_mono - _CONFIRMED_OUTBOX_LAST_RESTORE_MONO_35 >= 300.0:
+        _CONFIRMED_OUTBOX_LAST_RESTORE_MONO_35 = now_mono
+        _load_confirmed_signal_outbox_from_disk()
     now = time.time(); keys = []
     with _confirmed_signal_outbox_lock:
         for key, item in _confirmed_signal_outbox.items():
@@ -61436,8 +61684,68 @@ def _bootstrap_core_33_4_4():
     return state
 
 _COMMIT_33_4_4_BOOTSTRAP = _bootstrap_core_33_4_4()
-_APP_PY_RUNTIME_VERSION = 'COMMIT33_4_6_RESOURCE_UI_RESEARCH_GOVERNANCE_V1'
+_APP_PY_RUNTIME_VERSION = 'COMMIT35_CORE_RESOURCE_RELIABILITY_V1'
 print(f"✅ [33.4.6] resource/UI governance sobre núcleo canónico 33.4.4: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
+
+# Commit 35: observabilidad ligera para auditar el presupuesto REAL.
+# No analiza mercados, no consulta Supabase y no devuelve configuraciones secretas.
+@app.route('/api/commit35/resource-health', methods=['GET'])
+def api_commit35_resource_health():
+    user = _require_auth()
+    if not isinstance(user, str):
+        return user
+    try:
+        budget = _commit346_cgroup_budget(160.0)
+        state = _memory_runtime_state()
+        return jsonify({
+            'success':True,'version':'COMMIT35_CORE_RESOURCE_RELIABILITY_V1',
+            'rss_mb':state.get('rss_mb'),
+            'cgroup_used_mb':budget.get('used_mb'),
+            'cgroup_limit_mb':budget.get('limit_mb'),
+            'raw_headroom_mb':budget.get('raw_headroom_mb'),
+            'effective_headroom_mb':budget.get('effective_headroom_mb'),
+            'inactive_file_mb':budget.get('inactive_file_mb'),
+            'start_heavy_safe':bool(budget.get('safe')),
+            'heavy_job':state.get('heavy_job'),
+            'threads':state.get('threads'),
+            'signal_caches':{
+                'futures':len((_futures_analysis_cache.get('data') or {}).get('analysis') or {}),
+                'multiasset':len(_MULTI_ASSET_CACHE.get('analysis') or {}),
+            },
+        }),200
+    except Exception as exc:
+        return jsonify({'success':False,'error':type(exc).__name__}),200
+
+
+# COMMIT 35: HTTP bandwidth budget. Compression after route execution does NOT
+# alter signal IDs, timestamps, payload schema, entry/sl/tp or auth checks.
+@app.after_request
+def _commit35_compress_large_json_response(response):
+    try:
+        if request.method != 'GET' or response.status_code != 200:
+            return response
+        if response.is_streamed or response.direct_passthrough:
+            return response
+        if response.mimetype != 'application/json' or response.headers.get('Content-Encoding'):
+            return response
+        accept = request.headers.get('Accept-Encoding', '')
+        if 'gzip' not in accept.lower():
+            return response
+        raw = response.get_data()
+        if len(raw) < 4096 or len(raw) > 1024 * 1024:
+            return response
+        import gzip
+        compressed = gzip.compress(raw, compresslevel=1, mtime=0)
+        if len(compressed) >= len(raw) * 0.95:
+            return response
+        response.set_data(compressed)
+        response.headers['Content-Encoding'] = 'gzip'
+        response.headers['Vary'] = 'Accept-Encoding'
+        response.headers['Content-Length'] = str(len(compressed))
+    except Exception:
+        return response
+    return response
+
 
 # ============================================================================
 # INICIALIZACIÓN (bloque __main__ solo para desarrollo local)
@@ -61466,3 +61774,5 @@ if __name__ == '__main__':
     print("\n🌐 Iniciando servidor Flask...")
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+
+
