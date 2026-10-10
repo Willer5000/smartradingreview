@@ -43748,13 +43748,18 @@ def api_futures_signals_active():
             ):
                 continue
 
+            # COMMIT34.2: resolve the lifecycle row's timeframe BEFORE the
+            # confirmation-window check. Using ``tf`` before assignment raised
+            # UnboundLocalError and made the entire /active endpoint HTTP 500.
+            # This is display-only; no alteration to original valid_until,
+            # Entry/SL/TP, official authority, or lifecycle state.
+            symbol = record.get('symbol')
+            tf = record.get('timeframe')
             if (str(signal_id) in fresh_confirmed_ids
                     or _commit34_confirmation_window_is_current(record, tf)):
                 filter_stats['new_confirmation'] += 1
                 continue
 
-            symbol = record.get('symbol')
-            tf = record.get('timeframe')
             _configured_futures_module()
             from futures_system import futures_timeframe_allowed
             if not futures_timeframe_allowed(symbol, tf):

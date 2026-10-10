@@ -220,9 +220,22 @@
   }
 
   async function refresh() {
-    if (window.IS_MULTI_ASSET_PAGE !== true) return;
-    const sym=normSym(document.getElementById('symbol-select')?.value || window.PAGE_CONFIG?.defaultSymbol);
-    const tf=normTf(document.getElementById('interval-select')?.value || window.PAGE_CONFIG?.defaultTimeframe);
+    // COMMIT34.2: this lightweight lane only belongs to /multiasset, and
+    // must never issue a Multi-Asset GET for a Futures selector such as BTC.
+    // A selector can still hold its template default before Multi is hydrated.
+    if (window.IS_MULTI_ASSET_PAGE !== true ||
+        window.location.pathname.replace(/\/+$/, '') !== '/multiasset') return;
+    const cfg=window.PAGE_CONFIG || {};
+    const universe=cfg.symbols || {};
+    const allowedTf=cfg.allowedTimeframesBySymbol || {};
+    let sym=normSym(document.getElementById('symbol-select')?.value || cfg.defaultSymbol);
+    if (!Object.prototype.hasOwnProperty.call(universe,sym)) sym=normSym(cfg.defaultSymbol);
+    if (!Object.prototype.hasOwnProperty.call(universe,sym)) return null;
+    let tf=normTf(document.getElementById('interval-select')?.value || cfg.defaultTimeframe);
+    if (!Array.isArray(allowedTf[sym]) || !allowedTf[sym].includes(tf)) {
+      tf=normTf(cfg.defaultTimeframe);
+    }
+    if (!Array.isArray(allowedTf[sym]) || !allowedTf[sym].includes(tf)) return null;
     const key=`${sym}|${tf}`, hit=state.cache.get(key);
     if(hit && Date.now()-hit.ts<state.ttl){ render(hit.data); return hit.data; }
     if(state.controller) try{state.controller.abort();}catch(_){}
