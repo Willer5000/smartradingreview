@@ -34314,7 +34314,57 @@ def api_saved_signals_create():
                         or ''
                     ).strip()
 
-                    current_cache = _get_futures_analysis_snapshot_read_only()
+                    if is_multiasset_save:
+                        verified = _find_official_telegram_row_34_4('multiasset', source_signal_id, source_context)
+                        if verified is None:
+                            # Also allow the canonical Multi cache if this
+                            # confirmed result has not needed Telegram delivery.
+                            _multiasset_restore_local_snapshot_once()
+                            with _MULTI_ASSET_CACHE['lock']:
+                                known = list((_MULTI_ASSET_CACHE.get('analysis') or {}).values())
+                            for candidate in known:
+                                if not isinstance(candidate, dict) or str(candidate.get('signal_id') or '') != source_signal_id:
+                                    continue
+                                if not _multiasset_is_executable(candidate):
+                                    continue
+                                state = _multiasset_signal_temporal_state(candidate)
+                                matching = bool(state['fresh']) if source_context == 'PREVIOUS_CONFIRMED' else not bool(state['fresh'])
+                                if state['valid'] and matching:
+                                    verified = _multiasset_signal_row(candidate, source_context)
+                                    verified.update(valid_until=state['valid_until'],
+                                                    lifecycle_status='waiting_entry')
+                                    break
+                        if verified is None:
+                            return jsonify({'success': False, 'error':
+                                            'La señal Multi-Activo ya no está confirmada/vigente en el registro oficial.'}), 409
+                        # Preserve authenticated personal edits but NEVER trust
+                        # client-provided symbol/action/signal identity.
+                        data['symbol'] = verified['symbol']
+                        data['timeframe'] = verified['timeframe']
+                        data['action'] = verified['action']
+                        data['confidence'] = verified['confidence']
+                        data['source_signal_id'] = verified['signal_id']
+                        data['candle_timestamp'] = verified.get('source_candle_timestamp')
+                        data['source_valid_until'] = verified.get('valid_until')
+                        data['original_entry'] = verified['entry']
+                        data['original_stop_loss'] = verified['stop_loss']
+                        data['original_take_profit'] = verified['take_profit']
+                        data['original_leverage'] = verified.get('leverage')
+                        data['original_risk_reward'] = verified.get('risk_reward')
+                        current_cache = {'snapshot_available': True, 'lifecycle': {
+                            source_signal_id: verified,
+                        }}
+                    else:
+                        current_cache = _get_futures_analysis_snapshot_read_only()
+                        if (current_cache.get('snapshot_available') is not True
+                                and source_signal_id):
+                            # A SEND-acknowledged official confirmation survives
+                            # independent of cold-start/worker recycling.
+                            verified = _find_official_telegram_row_34_4('futures', source_signal_id, source_context)
+                            if verified:
+                                current_cache = {'snapshot_available': True, 'lifecycle': {
+                                    source_signal_id: verified,
+                                }}
                     if current_cache.get('snapshot_available') is not True:
                         return jsonify({
                             'success': False,
@@ -34329,7 +34379,9 @@ def api_saved_signals_create():
                         if source_signal_id
                         else None
                     )
-
+                    if not isinstance(lifecycle_record, dict) and not is_multiasset_save:
+                        lifecycle_record = _find_official_telegram_row_34_4(
+                            'futures', source_signal_id, source_context)
                     if source_context == 'ACTIVE_CONFIRMED':
                         if not source_signal_id or not isinstance(lifecycle_record, dict):
                             return jsonify({
@@ -35931,6 +35983,10 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
         'symbol': result.get('symbol'), 'timeframe': result.get('timeframe'),
         'display_name': result.get('display_name'), 'asset_class': result.get('asset_class'),
         'market': 'multiasset',
+        # The shared Futures.js confirmation card enables Guardar only when
+        # activa === 1. Without this field, real Multi official results were
+        # rendered dimmed and un-saveable even when within their first candle.
+        'activa': 1, 'lifecycle_status': 'waiting_entry',
         'action': action, 'confidence': float(decision.get('confidence') or 0),
         'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'),
         'take_profit': levels.get('take_profit'), 'leverage': levels.get('leverage'),
@@ -36358,11 +36414,16 @@ def _multiasset_signal_temporal_state(result, now=None):
     tf = str(result.get('timeframe') or '')
     tf_seconds = {'1h': 3600, '4h': 14400, '1D': 86400}.get(tf, 14400)
     now = now or datetime.now(timezone.utc)
-    source = _parse_utc_iso(result.get('source_candle_close_timestamp') or result.get('source_candle_timestamp'))
+    # Source timestamp normally denotes OPEN, not close. Use the same UTC
+    # candle authority that gated Telegram; old logic aged KSTR 1h one hour
+    # prematurely and treated 1.2 candles as a new confirmed window.
+    source = _confirmed_signal_close_timestamp(result, tf)
+    if source is not None:
+        source = source.to_pydatetime() if hasattr(source, 'to_pydatetime') else source
     if source is None:
         return {'valid': False, 'fresh': False, 'age_seconds': None, 'remaining_seconds': 0, 'valid_until': None}
     age = max(0.0, (now - source).total_seconds())
-    fresh = age <= tf_seconds * 1.20
+    fresh = 0 <= (now - source).total_seconds() < tf_seconds
     valid_until = _parse_utc_iso(result.get('valid_until') or levels.get('valid_until'))
     if valid_until is None:
         try:
@@ -37484,8 +37545,9 @@ def api_multiasset_signals_previous():
             row.update({'valid_until':state['valid_until'],'tiempo_restante':state['remaining_seconds'],
                         'lifecycle_status':'waiting_entry'})
             if row['confidence']>=min_conf: signals.append(row)
-        signals.sort(key=lambda x:-x['confidence'])
-        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'market':'multiasset','pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+        signals = _merge_official_telegram_rows_34_4(signals, 'multiasset', 'previous', min_conf)
+        signals.sort(key=lambda x:-float(x.get('confidence') or 0))
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses) or bool(signals),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'market':'multiasset','pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -37512,9 +37574,10 @@ def api_multiasset_signals_active():
                         'lifecycle_status':'waiting_entry'})
             if row['confidence']>=min_conf:
                 signals.append(row)
+        signals = _merge_official_telegram_rows_34_4(signals, 'multiasset', 'active', min_conf)
         signals.sort(key=lambda x:-float(x.get('confidence') or 0))
         return jsonify({
-            'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses),
+            'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses) or bool(signals),
             'total':len(signals),'active_count':len(signals),'signals':signals,
             'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),
             'vigent_other_directional_signals':[r for r in _multiasset_directional_diagnostics_17511(analyses) if r.get('temporal_valid') is True and r.get('temporal_fresh') is False],
@@ -43857,7 +43920,12 @@ def api_futures_signals_active():
                 'decision_audit': _futures_decision_audit_for_api(record)
             })
 
+        _registry_merge = globals().get('_merge_official_telegram_rows_34_4')
+        if callable(_registry_merge):
+            active_signals = _registry_merge(active_signals, 'futures', 'active', min_conf)
         active_signals = _dedupe_representative_signals(active_signals)
+        if active_signals:
+            warming_up = False
         active_signals.sort(
             key=lambda x: (
                 -_representative_signal_score(x),
@@ -44345,6 +44413,13 @@ def api_futures_signals_previous():
                 'decision_audit': _futures_decision_audit_for_api(result),
             })
         
+        # Telegram send is a positive official-publication record even when
+        # a newer neutral analysis replaced the old in-memory cell snapshot.
+        _registry_merge = globals().get('_merge_official_telegram_rows_34_4')
+        if callable(_registry_merge):
+            previous_signals = _registry_merge(previous_signals, 'futures', 'previous', min_conf)
+        if previous_signals:
+            warming_up = False
         # Ordenar: activas primero, luego por confianza
         previous_signals.sort(key=lambda x: (-x['activa'], -x['confidence']))
         
@@ -46126,7 +46201,10 @@ _confirmed_signal_alerts_lock = threading.Lock()
 # 17.5.10 — durable confirmed-signal delivery outbox. Analysis completion and
 # Telegram delivery are separate states; a temporary transport failure cannot
 # silently consume an otherwise authorized confirmation.
-_CONFIRMED_SIGNAL_OUTBOX_RETENTION = 2 * 24 * 3600
+# COMMIT 34.4: the official delivery record also feeds the lightweight web
+# confirmation registry. A 1D technical setup may remain open >48 h.
+# The existing 300-event queue bound is unchanged; no new daemon/cache.
+_CONFIRMED_SIGNAL_OUTBOX_RETENTION = 10 * 24 * 3600
 _confirmed_signal_outbox = {}
 _confirmed_signal_outbox_lock = threading.Lock()
 # Non-blocking process-local send mutex: two refresh lanes must not deliver the
@@ -46142,7 +46220,7 @@ def _compact_confirmed_outbox_signal(market, signal):
     # level-less retry payload.
     for _name in ('entry','stop_loss','take_profit','leverage','publication_status',
                   'is_rejected','is_executable','risk_class','safety_band',
-                  'valid_until','signal_id'):
+                  'valid_until','signal_id','max_entry_wait_bars','risk_reward','roi_tp','roi_sl'):
         if levels.get(_name) is None and signal.get(_name) is not None:
             levels[_name] = signal.get(_name)
     decision = signal.get('decision') or {}
@@ -46158,6 +46236,9 @@ def _compact_confirmed_outbox_signal(market, signal):
         'levels': compact_levels,
         'publication_status': signal.get('publication_status'),
         'publication_eligible': signal.get('publication_eligible'),
+        'source_candle_closed': signal.get('source_candle_closed'),
+        'market_data_is_synthetic': signal.get('market_data_is_synthetic'),
+        'analysis_mode': signal.get('analysis_mode'),
         'is_executable': signal.get('is_executable'),
         'signal_id': signal.get('signal_id') or signal.get('source_signal_id') or levels.get('signal_id'),
         'source_signal_id': signal.get('source_signal_id'),
@@ -46167,6 +46248,13 @@ def _compact_confirmed_outbox_signal(market, signal):
         'previous_candle_timestamp': signal.get('previous_candle_timestamp'),
         'valid_until': signal.get('valid_until') or levels.get('valid_until'),
         'risk_class': signal.get('risk_class') or levels.get('risk_class') or levels.get('safety_band'),
+        'max_entry_wait_bars': signal.get('max_entry_wait_bars') or levels.get('max_entry_wait_bars'),
+        'risk_reward': signal.get('risk_reward') or levels.get('risk_reward'),
+        'roi_tp': signal.get('roi_tp') or levels.get('roi_tp'),
+        'roi_sl': signal.get('roi_sl') or levels.get('roi_sl'),
+        'display_name': str(signal.get('display_name') or '')[:90],
+        'asset_class': str(signal.get('asset_class') or '')[:55],
+        'message': str(signal.get('message') or '')[:450],
         'market': str(market or '').lower(),
     }
 
@@ -46194,10 +46282,60 @@ def _load_confirmed_signal_outbox_from_disk():
             _confirmed_signal_outbox = {}
 
 
+def _confirmed_outbox_terminal_technical_expired_34_4(item, now_epoch=None):
+    """Compact expired SENT events; separate dedup prevents resending.
+
+    Only transport-terminal rows can be removed. Pending/retryable events are
+    never lost to a memory optimization. No OHLCV/network or threads involved.
+    """
+    item = item if isinstance(item, dict) else {}
+    state = str(item.get('state') or '').upper()
+    if state == 'INVALID':
+        return True
+    if state not in ('SENT', 'EXPIRED_OR_SUPERSEDED'):
+        return False
+    sig = item.get('signal') or {}
+    if not isinstance(sig, dict):
+        return False
+    tf = str(sig.get('timeframe') or '')
+    try:
+        from candle_close_authority_19_2_3 import signal_close_utc, tf_seconds, parse_utc
+        close = signal_close_utc(sig, tf)
+        if close is None:
+            return False
+        expiry = parse_utc(sig.get('valid_until') or (sig.get('levels') or {}).get('valid_until'))
+        if expiry is None:
+            seconds = tf_seconds(tf)
+            if seconds <= 0:
+                return False
+            if str(item.get('market') or '').lower() == 'multiasset':
+                try:
+                    bars = max(1, min(6, int(sig.get('max_entry_wait_bars') or 6)))
+                except (TypeError, ValueError):
+                    bars = 6
+            else:
+                # Missing expiry cannot justify publishing an ACTIVE Futures
+                # signal; still retain it through the confirmation candle.
+                bars = 1
+            expiry = close + timedelta(seconds=seconds*bars)
+        return float(now_epoch if now_epoch is not None else time.time()) >= expiry.timestamp()
+    except Exception:
+        return False
+
+
 def _save_confirmed_signal_outbox_to_disk():
     try:
         from runtime_persistence import save_runtime_snapshot
         with _confirmed_signal_outbox_lock:
+            # Bound Supabase egress and worker RSS under Render's 512 MB limit.
+            # Terminal trading events with no remaining technical validity do
+            # not need ten days in this outbox; sent-dedup is independently
+            # persisted for fourteen days and remains authoritative.
+            now_epoch = time.time()
+            obsolete = [key for key, event in _confirmed_signal_outbox.items()
+                        if _confirmed_outbox_terminal_technical_expired_34_4(event, now_epoch)]
+            for key in obsolete:
+                _confirmed_signal_outbox.pop(key, None)
             snapshot = {k: dict(v) for k, v in _confirmed_signal_outbox.items()}
         return save_runtime_snapshot(
             'telegram', 'confirmed_signal_outbox_v1', {'events': snapshot},
@@ -46873,6 +47011,170 @@ def _confirmed_signal_preferences_allow(market, timeframe):
 
     users = sorted(_telegram_market_users(market))
     return bool(users)
+
+
+def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=None):
+    """Official queued/sent confirmations rendered without needing current analysis.
+
+    Transport and UI read the SAME existing durable outbox (Supabase restored
+    at boot). Not a new publication route, no market/provider/network calls,
+    no signal promotion and no invented Entry/SL/TP.
+    """
+    market = str(market or '').lower()
+    if market not in ('futures', 'multiasset') or lane not in ('previous', 'active'):
+        return []
+    now = _parse_utc_iso(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    if now is None:
+        return []
+    with _confirmed_signal_outbox_lock:
+        events = [(str(key), dict(row)) for key, row in _confirmed_signal_outbox.items()]
+    with _confirmed_signal_alerts_lock:
+        delivered = set(_confirmed_signal_alerts_sent)
+    results = []
+    for event_key, item in events:
+        if str(item.get('market') or '').lower() != market:
+            continue
+        # Outbox is created only AFTER the official publication gates pass.
+        # A Telegram outage must not hide that original official confirmation.
+        # Delivery state is displayed separately from trading authority.
+        state = str(item.get('state') or '').upper()
+        acknowledged = state == 'SENT' or event_key in delivered
+        # A delivery attempt can expire without the signal ever having been
+        # accepted by Telegram. Its terminal state alone is not publication
+        # evidence; only a positive ACK can rescue that terminal row.
+        if state not in ('SENT', 'PENDING', 'FAILED_RETRYABLE') and not acknowledged:
+            continue
+        signal = item.get('signal') or {}
+        if not isinstance(signal, dict):
+            continue
+        levels_check = signal.get('levels') or {}
+        if (signal.get('publication_eligible') is False
+                or signal.get('source_candle_closed') is False
+                or bool(signal.get('market_data_is_synthetic'))
+                or str(signal.get('analysis_mode') or '').upper() in ('PREVIEW','INTRABAR','INTRABAR_PREVIEW')
+                or levels_check.get('is_rejected') is True
+                or levels_check.get('is_executable') is False
+                or signal.get('is_executable') is False):
+            continue
+        tf = str(signal.get('timeframe') or '')
+        seconds = _confirmed_signal_tf_seconds(tf)
+        if seconds <= 0 or (market == 'multiasset' and tf not in ('1h', '4h', '1D')):
+            continue
+        source_close = _confirmed_signal_close_timestamp(signal, tf)
+        if source_close is None:
+            continue
+        close = _parse_utc_iso(source_close)
+        if close is None or close > now + timedelta(seconds=120):
+            continue
+        age = (now - close).total_seconds()
+        is_fresh = 0 <= age < seconds
+        if (lane == 'previous') != is_fresh:
+            continue
+        decision = signal.get('decision') or {}
+        levels = signal.get('levels') or {}
+        action = str(decision.get('action') or '').upper()
+        try:
+            confidence = float(decision.get('confidence') or 0)
+            entry = float(levels.get('entry') or 0)
+            sl = float(levels.get('stop_loss') or 0)
+            tp = float(levels.get('take_profit') or 0)
+            lev = int(float(levels.get('leverage') or 1))
+        except (ValueError, TypeError):
+            continue
+        if confidence < float(min_confidence) or action not in ('LONG','SHORT'):
+            continue
+        if str(levels.get('publication_status') or signal.get('publication_status') or '').upper() != 'EXECUTABLE_SIGNAL':
+            continue
+        if entry <= 0 or sl <= 0 or tp <= 0 or lev < 1:
+            continue
+        risk = (entry-sl) if action == 'LONG' else (sl-entry)
+        reward = (tp-entry) if action == 'LONG' else (entry-tp)
+        if risk <= 0 or reward <= 0:
+            continue
+        original_until = signal.get('valid_until') or levels.get('valid_until')
+        lifecycle_status = 'waiting_entry'
+        if market == 'futures':
+            # Prefer lifecycle source of truth for Entry/TP/SL/expiry; an
+            # already-closed record must NEVER be revived by delivery logs.
+            sid = str(signal.get('signal_id') or signal.get('source_signal_id') or '')
+            _lc = ((_futures_analysis_cache.get('data') or {}).get('lifecycle') or {}).get(sid) or {}
+            if isinstance(_lc, dict) and _lc:
+                lifecycle_status = str(_lc.get('lifecycle_status') or 'waiting_entry')
+                if lifecycle_status not in ('waiting_entry', 'entry_touched'):
+                    continue
+                original_until = _lc.get('valid_until') or original_until
+        if original_until:
+            until = _parse_utc_iso(original_until)
+        elif market == 'multiasset':
+            # Historical Multi cached UI already used max_entry_wait_bars
+            # (default 6). Preserve the SAME rule, not a new extended TTL.
+            try:
+                wait_bars = min(6, max(1, int(signal.get('max_entry_wait_bars') or levels.get('max_entry_wait_bars') or 6)))
+            except (ValueError, TypeError):
+                wait_bars = 6
+            until = close + timedelta(seconds=seconds * wait_bars)
+        else:
+            # Without an explicit Futures technical expiry, only the
+            # confirmed candle is verifiable. Do not fabricate an active TTL.
+            until = close + timedelta(seconds=seconds)
+        if until is None or now >= until:
+            continue
+        # Stronger canonical server identity. Old delivery records may lack a
+        # signal_id; use event key as deterministic reference, not a new trade.
+        sid = str(signal.get('signal_id') or signal.get('source_signal_id') or levels.get('signal_id') or '')
+        if not sid:
+            import hashlib
+            sid = 'confirmed-' + hashlib.sha256(event_key.encode('utf-8')).hexdigest()[:24]
+        rr = reward / risk
+        row = {
+            'signal_id': sid, 'symbol': str(signal.get('symbol') or ''),
+            'timeframe': tf, 'action': action, 'confidence': confidence,
+            'entry': entry, 'stop_loss': sl, 'take_profit': tp, 'leverage': lev,
+            'risk_reward': round(rr, 4), 'publication_status': 'EXECUTABLE_SIGNAL',
+            'system_executable': True, 'market': market,
+            'source_context': 'PREVIOUS_CONFIRMED' if is_fresh else 'ACTIVE_CONFIRMED',
+            'source_candle_timestamp': signal.get('source_candle_timestamp'),
+            'source_candle_close_timestamp': close.isoformat(),
+            'candle_timestamp': signal.get('source_candle_timestamp'),
+            'valid_until': until.isoformat(),
+            'tiempo_restante': max(0, int((until-now).total_seconds())),
+            'lifecycle_status': lifecycle_status,
+            'activa': 1, 'entry_touched': lifecycle_status == 'entry_touched',
+            'display_name': signal.get('display_name'),
+            'asset_class': signal.get('asset_class'),
+            'roi_tp': signal.get('roi_tp'), 'roi_sl': signal.get('roi_sl'),
+            'message': str(signal.get('message') or '')[:450],
+            'source_authority': 'OFFICIAL_CONFIRMED_OUTBOX',
+            'telegram_delivery_confirmed': acknowledged,
+            'telegram_delivery_status': 'SENT' if acknowledged else state,
+        }
+        if not row['symbol']:
+            continue
+        results.append(row)
+    results.sort(key=lambda r: (str(r.get('source_candle_close_timestamp') or ''), float(r.get('confidence') or 0)), reverse=True)
+    return results[:80]
+
+
+def _merge_official_telegram_rows_34_4(current, market, lane, min_confidence=55):
+    """Merge with native lifecycle, never override a stronger canonical row."""
+    canonical = list(current or [])
+    observed = {str(r.get('signal_id') or '') for r in canonical if isinstance(r, dict)}
+    additional = _confirmed_web_registry_rows_34_4(market, lane, min_confidence)
+    for row in additional:
+        sid = str(row.get('signal_id') or '')
+        if sid and sid not in observed:
+            canonical.append(row)
+            observed.add(sid)
+    return canonical
+
+
+def _find_official_telegram_row_34_4(market, source_id, source_context):
+    lane = 'previous' if str(source_context or '') == 'PREVIOUS_CONFIRMED' else 'active'
+    sid = str(source_id or '')
+    if not sid:
+        return None
+    return next((row for row in _confirmed_web_registry_rows_34_4(market, lane, 55)
+                 if str(row.get('signal_id') or '') == sid), None)
 
 
 def _send_confirmed_signal_telegram(market, signal):
