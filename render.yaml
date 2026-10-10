@@ -1,4 +1,4 @@
-# COMMIT 33.4.5 — native core authority, no WSGI monkeypatch chain.
+# COMMIT 34 — native app:app core, validated-route expansion + 512MB governor.
 services:
   - type: web
     name: crypto-trader-analyst
@@ -41,23 +41,28 @@ services:
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "270"
-      - key: MEMORY_HARD_LIMIT_MB
-        value: "335"
-      - key: MEMORY_JOB_START_LIMIT_MB
         value: "255"
-      - key: MEMORY_IN_JOB_ABORT_MB
+      - key: MEMORY_HARD_LIMIT_MB
         value: "315"
+      - key: MEMORY_JOB_START_LIMIT_MB
+        value: "245"
+      - key: MEMORY_IN_JOB_ABORT_MB
+        value: "295"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "1"
+      # Verified-only strategy routes: empty manifest leaves LIVE unchanged.
+      - key: COMMIT34_FAMILIES_ENABLED
+        value: "1"
+      - key: COMMIT34_PREVIEW_RUNTIME_CACHE_KEEP
+        value: "3"
       - key: FUTURES_DATA_CACHE_MAX_ENTRIES
-        value: "4"
+        value: "3"
       - key: FUTURES_MICROSTRUCTURE_CACHE_MAX_ENTRIES
-        value: "8"
+        value: "4"
       - key: LIQUIDATION_HEATMAP_MAX_RESIDENT
         value: "4"
       - key: COMMIT33_3_VISUAL_HARD_RSS_MB
-        value: "430"
+        value: "300"
 
       # Valid current context logic retained.  No Commit32 runtime overlays.
       - key: COMMIT30_PROPOSAL3_ENABLED
@@ -120,9 +125,9 @@ services:
       - key: SAVED_FUTURES_LIFECYCLE_RECENT_CANDLES
         value: "96"
       - key: FUTURES_LIFECYCLE_CACHE_MAX_ENTRIES
-        value: "12"
+        value: "8"
       - key: RESOURCE_WATCHDOG_INTERVAL_SECONDS
-        value: "20"
+        value: "10"
       - key: RESOURCE_WATCHDOG_BACKOFF_MB
         value: "300"
       - key: RESOURCE_WATCHDOG_EMERGENCY_MB

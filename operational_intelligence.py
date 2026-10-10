@@ -714,6 +714,29 @@ def prepare_operational_intelligence(
                 continue
             score = _f(prior.get("support_score")) - _f(prior.get("penalty_score"))
             candidates.append((score, action, prior))
+        # Commit 34: unlike passive regime classifiers, an exact validated
+        # family can supply a missing hypothesis when the old thesis is neutral.
+        # It cannot do so until the immutable IS/selection/OOS + walk-forward
+        # manifest exists AND current independent families corroborate the side.
+        # No manifest is shipped with authorized rows: existing LIVE unaffected.
+        for _row in ((layers.get('commit34_families') or {}).get('candidates') or []):
+            _side = canonical_action(_row.get('action'), market)
+            _support = long_support if _side == bullish_action else short_support
+            if _side not in (bullish_action, bearish_action) or _support < max(4,int(thesis.get('required_independent_families') or 4)):
+                continue
+            try:
+                from commit34_promotion import resolve as _commit34_resolve
+                _verified = _commit34_resolve(symbol, timeframe, _side, _row.get('family'))
+            except Exception:
+                _verified = {'eligible':False}
+            if not _verified.get('eligible'):
+                continue
+            candidates.append((_support*10.0, _side, {
+                'commit34_verified_family':_row.get('family'),
+                'commit34_bank_family':_verified.get('strategy_bank_family'),
+                'commit34_evidence_id':_verified.get('evidence_id'),
+                'support_score': _support*10.0,
+            }))
         if candidates:
             candidates.sort(key=lambda row: row[0], reverse=True)
             best = candidates[0]
@@ -721,7 +744,10 @@ def prepare_operational_intelligence(
             if len(candidates) == 1 or best[0] >= candidates[1][0] + 0.15:
                 selected_action = best[1]
                 selected_prior = best[2]
-                specialist_source = "LEARNED"
+                specialist_source = (
+                    'COMMIT34_VERIFIED' if selected_prior.get('commit34_verified_family')
+                    else 'LEARNED'
+                )
     else:
         selected_prior = research_map.get(selected_action) or {}
         if _research_positive(selected_prior):
@@ -784,13 +810,28 @@ def prepare_operational_intelligence(
                     else ""
                 )
                 _group_prior_family = str(_selected_prior_for_strategy.get("group_prior_strategy_family") or "")
+                if specialist_source == 'COMMIT34_VERIFIED':
+                    _group_prior_family = str(selected_prior.get('commit34_bank_family') or '')
+                _commit34_preferred_family = ''
+                _commit34_authority = {'eligible':False, 'reason':'NO_MATCHING_SETUP'}
+                for _candidate in ((layers.get('commit34_families') or {}).get('candidates') or []):
+                    if _u(_candidate.get('action')) != _u(selected_action):
+                        continue
+                    from commit34_promotion import resolve as _commit34_resolve
+                    _commit34_authority = _commit34_resolve(
+                        symbol, timeframe, selected_action, _candidate.get('family'),
+                        existing_validated_family=_validated_bank_family,
+                    )
+                    if _commit34_authority.get('eligible'):
+                        _commit34_preferred_family = _commit34_authority.get('strategy_bank_family') or ''
+                        break
                 strategy = select_strategy(
                     selected_action, regime, vol_state, indicator_groups,
                     symbol=_u(symbol), timeframe=_u(timeframe), market=market,
                     # Exact OOS-validated local route outranks a representative
                     # group prior. It only chooses among already-eligible bank
                     # playbooks; live indicator quality still scores the row.
-                    preferred_family=(_validated_bank_family or _group_prior_family),
+                    preferred_family=(_validated_bank_family or _commit34_preferred_family or _group_prior_family),
                 )
             except Exception as exc:
                 strategy = {
@@ -838,6 +879,12 @@ def prepare_operational_intelligence(
         and support_count >= learned_support_min
         and mtf_usable
     )
+    commit34_live_ok = bool(
+        specialist_source == 'COMMIT34_VERIFIED'
+        and selected_prior.get('commit34_evidence_id')
+        and support_count >= max(4, int(thesis.get('required_independent_families') or 4))
+        and mtf_usable
+    )
     strategy_ok = bool(
         float(strategy.get("quality") or 0) >= min_quality
         and strategy.get("regime_match", True)
@@ -849,6 +896,8 @@ def prepare_operational_intelligence(
         candidate_source = "LEARNED+DEFAULT"
     elif learned_live_ok:
         candidate_source = "LEARNED+LIVE"
+    elif commit34_live_ok and (strategy_ok or (is_multiasset and (layers.get('multiasset_strategy_bank') or {}).get('preferred_for_context'))):
+        candidate_source = 'COMMIT34_VERIFIED+CANONICAL_EXECUTION'
     elif default_path_ok:
         candidate_source = "THESIS+DEFAULT"
     elif autonomous_thesis_ok:
@@ -877,6 +926,19 @@ def prepare_operational_intelligence(
         "multi_timeframe": dict(mtf_context or {}),
         "thesis": thesis,
         "default_strategy": strategy,
+        "commit34_route_audit": {
+            "version":"COMMIT34_ROUTE_AUDIT_V1",
+            "family_observations": [
+                {"family": str(r.get('family') or ''),
+                 "action":str(r.get('action') or ''),
+                 "source_close_time":r.get('source_close_time')}
+                for r in ((layers.get('commit34_families') or {}).get('candidates') or [])[:4]
+            ],
+            "live_route_selected": specialist_source == 'COMMIT34_VERIFIED',
+            "route_evidence_id": (selected_prior.get('commit34_evidence_id')
+                                  if specialist_source == 'COMMIT34_VERIFIED' else None),
+            "no_fabricated_quality":True,
+        },
         # Public evidence and DynamicZones consume the same normalized market
         # snapshot that the strategy bank evaluated.  This is metadata only; it
         # carries no extra authority and cannot bypass Safety.

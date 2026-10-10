@@ -1,0 +1,5 @@
+{
+  "version": "COMMIT34_LIVE_AUTHORITY_V1",
+  "authorized_routes": {},
+  "note": "Fail-closed. Backtesting with the exact original Commit 33.4.x Entry/SL/TP committees, IS/selection/OOS and walk-forward is required before assigning strategy authority."
+}

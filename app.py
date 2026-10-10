@@ -20832,6 +20832,10 @@ class TradingExpertSystem:
             
             # ============ AÑADIR INFORMACIÓN ADICIONAL A STRUCTURE ============
             if structure and isinstance(structure, dict):
+                # Commit 34: preserve the full, index-aligned structure frame.
+                # Entry/SL/TP specialist committees use high/low/close/volume
+                # and historical OB candle indices. Trimming here would corrupt
+                # canonical geometries and change existing LIVE results.
                 df_dict = {
                     'time': [str(t) for t in df['time'].dt.strftime('%Y-%m-%d %H:%M:%S').tolist()],
                     'open': [float(x) for x in df['open'].tolist()],
@@ -20843,6 +20847,9 @@ class TradingExpertSystem:
                 structure['df'] = df_dict
                 structure['last_candle_index'] = len(df) - 1
             
+            # Commit 34 core pre-allocation checkpoint.  Skip optional work
+            # under pressure; never keep processing up to the 512MB OOM wall.
+            _commit34_guard_stage(f'heatmap:{symbol}:{timeframe}')
             # ============ MAPA DE CALOR DE LIQUIDACIONES ============
             print(f"📊 Calculando capa de liquidaciones para {timeframe}...")
             
@@ -21086,6 +21093,27 @@ class TradingExpertSystem:
             except Exception as _pre_market_error:
                 capas['market_pre_context_error'] = type(_pre_market_error).__name__
 
+            # Commit 34: bounded CLOSED-candle hypotheses before the canonical
+            # Operational Intelligence/Entry/SL/TP/Safety chain.  These are
+            # context, NOT independent directions or quality scores.  They do
+            # not rewrite the currently profitable decision flow.  Exact
+            # statistical route authority is checked inside OI.
+            if analysis_system_type in ('futures', 'multiasset') and not intrabar_preview:
+                try:
+                    if not _commit34_guard_stage(f'family-analysis:{symbol}:{timeframe}', optional=True):
+                        raise RuntimeError('RESOURCE_PRESSURE_OPTIONAL_SKIPPED')
+                    from commit34_family_engine import discover_families
+                    capas['commit34_families'] = discover_families(
+                        df, timeframe=timeframe, market=analysis_system_type,
+                        asset_class=(capas.get('asset_class') or
+                                     (capas.get('market_pre_context') or {}).get('asset_class') or ''),
+                        macro=macro_context_snapshot,
+                    )
+                except Exception as _commit34_fam_error:
+                    capas['commit34_families'] = {
+                        'candidates': [], 'reason': type(_commit34_fam_error).__name__,
+                        'mode': 'NON_AUTHORITATIVE',
+                    }
             # ==========================================================
             # RC9.2 — THESIS-FIRST OPERATIONAL INTELLIGENCE
             # ==========================================================
@@ -21141,6 +21169,7 @@ class TradingExpertSystem:
                     operational_intelligence['pipeline_integrity_error'] = type(_pipeline_integrity_error).__name__
             capas['operational_intelligence'] = operational_intelligence
 
+            _commit34_guard_stage(f'specialists:{symbol}:{timeframe}')
             # ============ SISTEMA DE ESPECIALISTAS INTERNOS ============
             print(f"👥 Iniciando votación de 9 traders...")
             moderador = Moderador()
@@ -22317,6 +22346,9 @@ class TradingExpertSystem:
                 'liquidation': self._make_serializable(liquidation_data),
                 'market_regime': self._make_serializable(market_regime),   # legacy/raw layer
                 'operational_intelligence': self._make_serializable(operational_intelligence),
+                # Bounded route diagnostics persisted with the same closed-candle
+                # result, not a parallel background scanner or memory cache.
+                'commit34_families': self._make_serializable(capas.get('commit34_families') or {}),
                 'operational_execution': self._make_serializable(operational_execution),
                 'execution_policy': self._make_serializable(execution_policy),
                 'strategy_lab': self._make_serializable(strategy_lab),
@@ -31222,6 +31254,61 @@ if _LOW_MEMORY_MODE:
     _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
 
+def _commit34_cgroup_mb():
+    """Read total container memory, not only Gunicorn's own process RSS.
+
+    cgroup v2 memory.current includes other processes, page cache and native
+    allocators; v1 is kept for portability. All reads are O(1) and bounded.
+    """
+    for used_path, limit_path in (
+        ('/sys/fs/cgroup/memory.current', '/sys/fs/cgroup/memory.max'),
+        ('/sys/fs/cgroup/memory/memory.usage_in_bytes',
+         '/sys/fs/cgroup/memory/memory.limit_in_bytes'),
+    ):
+        try:
+            with open(used_path, 'r', encoding='ascii') as stream:
+                used = int(stream.read(32).strip())
+            with open(limit_path, 'r', encoding='ascii') as stream:
+                raw = stream.read(32).strip()
+            if raw == 'max': return None, None
+            limit = int(raw)
+            if limit <= 0 or limit > 1_000_000_000_000: return None, None
+            return used / (1024**2), limit / (1024**2)
+        except (OSError, ValueError, OverflowError):
+            continue
+    return None, None
+
+
+def _commit34_guard_stage(owner, *, optional=False):
+    """Fail safely before the next large allocation, never after the OOM.
+
+    Does not change trade quality/geometry.  For optional research pass,
+    returns False instead of killing a legitimate canonical opportunity.
+    A REJECTED heavy job keeps its last persisted snapshot for the frontend.
+    """
+    used,limit = _commit34_cgroup_mb()
+    rss = _process_rss_mb()
+    # Respect the live configured cap; reserve substantial room for pandas,
+    # heatmaps and 2 gunicorn threads.  Cgroup limit varies by Render plan.
+    # The cgroup includes kernel page cache; compare that with the total
+    # allowance, not with the process RSS threshold.  Separate thresholds
+    # avoid starving legitimate analyses when the cgroup has reclaimable cache.
+    group_danger = max(240.0, limit - 112.0) if limit is not None else None
+    rss_danger = max(250.0, float(os.getenv('MEMORY_IN_JOB_ABORT_MB','295')))
+    exhausted = ((used is not None and group_danger is not None and used >= group_danger)
+                 or (rss is not None and rss >= rss_danger))
+    if not exhausted:
+        return True
+    _shed_recreatable_memory(reason=f'commit34:{owner}', aggressive=True)
+    used,limit = _commit34_cgroup_mb()
+    rss = _process_rss_mb()
+    exhausted = ((used is not None and group_danger is not None and used >= group_danger)
+                 or (rss is not None and rss >= rss_danger))
+    if not exhausted: return True
+    if optional: return False
+    raise RuntimeError(f'RESOURCE_PRESSURE_ABORT:{owner}:rss={rss}:cgroup={used}')
+
+
 def _process_rss_mb():
     """RSS actual del proceso en Linux/Render; None si no está disponible."""
     try:
@@ -31376,8 +31463,12 @@ def _memory_runtime_state():
     except Exception:
         endpoint_cache_entries = None
 
+    _commit34_cgroup_used, _commit34_cgroup_limit = _commit34_cgroup_mb()
     return {
         'rss_mb': _process_rss_mb(),
+        'cgroup_used_mb': (round(_commit34_cgroup_used, 1) if _commit34_cgroup_used is not None else None),
+        'cgroup_limit_mb': (round(_commit34_cgroup_limit, 1) if _commit34_cgroup_limit is not None else None),
+        'commit34_resource_governor': True,
         'threads': threading.active_count(),
         'analysis_cache_entries': analysis_cache_entries,
         'portfolio_cache_entries': endpoint_cache_entries,
@@ -31570,6 +31661,16 @@ def _acquire_heavy_analysis(owner, timeout=None):
     else:
         _trim_process_heap()
     rss = _process_rss_mb()
+    _cgroup_used, _cgroup_limit = _commit34_cgroup_mb()
+    # Start admission checks total cgroup usage as well as worker RSS.
+    # Reserve at least 176MB for a worst-case one-cell analysis burst.
+    if (_cgroup_limit and _cgroup_used is not None and
+            _cgroup_used >= max(175.0, _cgroup_limit - 176.0)):
+        _free_runtime_note_background_backoff(owner, 'CGROUP_HEADROOM', seconds=180.0)
+        with _HEAVY_ANALYSIS_STATE_LOCK:
+            _HEAVY_ANALYSIS_OWNER = None
+        _HEAVY_ANALYSIS_LOCK.release()
+        return False
     _job_start_limit = (
         _free_runtime_background_start_limit(owner)
         if not interactive_owner
@@ -31648,8 +31749,9 @@ def resource_watchdog_loop():
     """Native Render resource governor.
 
     It never edits signals, Entry/SL/TP, Safety, leverage or persisted lifecycle.
-    Under pressure it only frees recreatable caches and pauses NEW background
-    heavy work; an analysis already holding the heavy slot is allowed to finish.
+    Under pressure it frees recreatable caches and pauses NEW background
+    heavy work.  Commit34 also checks cgroup and process RSS between heavy
+    phases; an in-flight job may be safely aborted before the OOM limit.
     This is intentionally a resource boundary, not a trading filter.
     """
     global _RESOURCE_WATCHDOG_LAST_SHED_AT
@@ -38788,6 +38890,13 @@ def _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=No
                 'ts': now,
                 'data': dict(runtime_result),
             }
+            # Commit 34: bounded preview metadata cache.  The active signals,
+            # confirmation outbox and durable DB are separate and untouched.
+            keep = max(1, int(os.getenv('COMMIT34_PREVIEW_RUNTIME_CACHE_KEEP','3') or 3))
+            while len(_FUTURES_INTRABAR_RUNTIME_CACHE) > keep:
+                oldest = min(_FUTURES_INTRABAR_RUNTIME_CACHE,
+                             key=lambda item: float(_FUTURES_INTRABAR_RUNTIME_CACHE[item].get('ts') or 0))
+                _FUTURES_INTRABAR_RUNTIME_CACHE.pop(oldest, None)
 
 
 def _get_futures_intrabar_runtime(symbol, timeframe):
