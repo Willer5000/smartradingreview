@@ -1049,12 +1049,19 @@
                 <div id="recommendation-content" style="display: block;">
                     <div class="recommendation-content">
                         <div id="system-recommendation">
+                            {% if is_multiasset|default(false) %}
+                            <div class="alert alert-info mb-0" role="status">
+                                Consultando el último análisis Multi-Activo. Los gráficos y precios se actualizan por separado;
+                                si el motor profundo está ocupado, se mostrará el último cierre disponible sin generar una nueva señal.
+                            </div>
+                            {% else %}
                             <div class="text-center py-4">
                                 <div class="spinner-border text-warning" role="status">
                                     <span class="visually-hidden">Analizando mercado...</span>
                                 </div>
                                 <p class="mt-3 mb-0">El sistema está analizando 30+ indicadores...</p>
                             </div>
+                            {% endif %}
                         </div>
                         
                         <!-- SECCIÓN DE CONVICCIÓN - NUEVA -->
@@ -2670,7 +2677,7 @@
     {% endif %}
 
     <script
-        src="{{ url_for('static', filename='script.js') }}?v=20261010-COMMIT34-CONSOLIDATED"
+        src="{{ url_for('static', filename='script.js') }}?v=20261010-COMMIT34-3-MULTI-RECOMMENDATION"
     ></script>
 
 

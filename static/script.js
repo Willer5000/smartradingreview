@@ -1759,6 +1759,37 @@ function _commit18TimeframeName(timeframe) {
         || (typeof window.getIntervalName === 'function' ? window.getIntervalName(raw) : raw);
 }
 
+// Commit 34.3: render the last genuine CLOSED-CANDLE Multi analysis from an
+// existing 202.partial snapshot. This never creates a trade or schedules work.
+// A display-only OHLCV snapshot must NEVER be upgraded into a decision.
+window.renderMultiCachedRecommendation343 = function(data, symbol, timeframe) {
+    if (window.IS_MULTI_ASSET_PAGE !== true || !data || !data.decision) return false;
+    const normalize = value => String(value || '').trim().toUpperCase().replace('/', '-');
+    const requestedSymbol = normalize(symbol);
+    const requestedTf = String(timeframe || '');
+    const selectedSymbol = normalize(document.getElementById('symbol-select')?.value);
+    const selectedTf = String(document.getElementById('interval-select')?.value || '');
+    if (!requestedSymbol || !requestedTf || normalize(data.symbol) !== requestedSymbol ||
+        String(data.timeframe || '') !== requestedTf ||
+        selectedSymbol !== requestedSymbol || selectedTf !== requestedTf) return false;
+    const container = document.getElementById('system-recommendation');
+    if (!container || typeof window.updateRecommendation !== 'function') return false;
+    const action = String(data.decision.action || '').toUpperCase();
+    if (!['LONG', 'SHORT', 'ESPERAR', 'PRECAUCION', 'NO_OPERAR'].includes(action)) return false;
+    const stamp = String(data.source_candle_close_timestamp || data.source_candle_timestamp || 'no disponible');
+    const revision = `${requestedSymbol}|${requestedTf}|${stamp}|${action}|${data.decision.confidence ?? ''}`;
+    if (container.dataset.multiCachedRevision === revision) return true;
+    window.updateRecommendation(data);
+    const note = document.createElement('div');
+    note.className = 'alert alert-secondary py-2 small mb-3';
+    note.setAttribute('role', 'status');
+    note.textContent = `Último análisis de cierre (${stamp}) · dato de referencia de ${requestedSymbol} ${requestedTf}. No es una nueva señal LIVE ni una confirmación intrabar. Consulta Confirmadas/Vigentes para su validez operativa.`;
+    container.prepend(note);
+    container.dataset.multiCachedRevision = revision;
+    container.dataset.multiCachedCell = `${requestedSymbol}|${requestedTf}`;
+    return true;
+};
+
 window.commit18MultiIdentityReset = function(symbol, timeframe) {
     if (window.IS_MULTI_ASSET_PAGE !== true) return;
     const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
@@ -1768,6 +1799,25 @@ window.commit18MultiIdentityReset = function(symbol, timeframe) {
 
     window.currentSymbol = sym;
     window.currentInterval = tf;
+
+    // Identity change: never leave a recommendation from the previous asset
+    // visible under the newly selected CL/SPY/QQQ/... label.
+    const newCell = `${sym}|${tf}`;
+    if (window.__MULTI_RECOMMENDATION_SELECTED_CELL__ !== newCell) {
+        window.__MULTI_RECOMMENDATION_SELECTED_CELL__ = newCell;
+        const recommendation = document.getElementById('system-recommendation');
+        if (recommendation) {
+            delete recommendation.dataset.multiCachedRevision;
+            delete recommendation.dataset.multiCachedCell;
+            const waiting = document.createElement('div');
+            waiting.className = 'alert alert-info mb-0';
+            waiting.setAttribute('role', 'status');
+            waiting.textContent = `Consultando el último análisis de ${display} ${tfName}. Los gráficos se cargan independientemente; si el motor está ocupado, se mostrará el último cierre disponible sin generar una señal nueva.`;
+            recommendation.replaceChildren(waiting);
+        }
+        const badgeMini = document.getElementById('rec-badge-mini');
+        if (badgeMini) badgeMini.textContent = 'ESPERANDO';
+    }
 
     const current = window.currentAnalysis;
     const currentSymbol = String(current?.symbol || '').toUpperCase().replace('/', '-');
@@ -3163,7 +3213,10 @@ window.runCompleteAnalysis = function() {
                     const expectedSymbol = String(symbol || '').toUpperCase().replace('/', '-');
                     const gotSymbol = String(data.data?.symbol || '').toUpperCase().replace('/', '-');
                     const gotTf = String(data.data?.timeframe || '');
-                    const identityOk = !isMulti || (gotSymbol === expectedSymbol && gotTf === interval);
+                    const visibleSymbol = String(document.getElementById('symbol-select')?.value || '').toUpperCase().replace('/', '-');
+                    const visibleTf = String(document.getElementById('interval-select')?.value || '');
+                    const identityOk = !isMulti || (gotSymbol === expectedSymbol && gotTf === interval &&
+                        visibleSymbol === expectedSymbol && visibleTf === interval);
                     if (!identityOk) {
                         console.warn('Multi partial descartado por identidad stale', {expectedSymbol, interval, gotSymbol, gotTf});
                     } else {
@@ -3171,6 +3224,11 @@ window.runCompleteAnalysis = function() {
                     }
                     if (identityOk && data.data?.decision) {
                         try {
+                            // Previous code updated only the "Operación Actual" box;
+                            // the central recommendation remained on its initial spinner.
+                            // Render the compact Multi CLOSED-CANDLE recommendation as
+                            // historical reference, NEVER as a new executable signal.
+                            if (isMulti) window.renderMultiCachedRecommendation343?.(data.data, symbol, interval);
                             updateInstantRecommendation(data.data);
                         } catch (partialErr) {
                             console.debug(`${isMulti ? 'Multi-Activo' : 'Futures'} parcial: recomendación compacta no renderizada`, partialErr);
@@ -3188,7 +3246,11 @@ window.runCompleteAnalysis = function() {
                 }
 
                 const recommendationEl = document.getElementById('system-recommendation');
-                if (recommendationEl && !(data.partial && data.data?.decision) && !window.currentAnalysis?.decision) {
+                const visibleCachedMulti = Boolean(isMulti && recommendationEl?.dataset.multiCachedCell === `${symbol}|${interval}`);
+                if (recommendationEl && !visibleCachedMulti &&
+                    !(data.partial && data.data?.decision && (!isMulti ||
+                    recommendationEl?.dataset.multiCachedCell === `${symbol}|${interval}`)) &&
+                    !(window.currentAnalysis?.decision && !isMulti)) {
                     const old = data?.last_closed_display;
                     if (old && String(old.symbol) === symbol && String(old.timeframe) === interval) {
                         const action = ['LONG', 'SHORT', 'ESPERAR', 'NO_OPERAR'].includes(old.action) ? old.action : 'ESPERAR';
@@ -3221,7 +3283,7 @@ window.runCompleteAnalysis = function() {
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                     if (recommendationEl) {
-                        if (!window.currentAnalysis?.decision && !recommendationEl.querySelector('.alert-secondary')) recommendationEl.innerHTML = `
+                        if (!visibleCachedMulti && !window.currentAnalysis?.decision && !recommendationEl.querySelector('.alert-secondary')) recommendationEl.innerHTML = `
                             <div class="alert alert-warning mb-0">
                                 <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'La recomendación completa sigue ocupada'}.</strong>
                                 <div class="small mt-2">
@@ -3272,6 +3334,16 @@ window.runCompleteAnalysis = function() {
                 && data.success === true
                 && data.data
             ) {
+                if (window.IS_MULTI_ASSET_PAGE === true) {
+                    const clean = x => String(x || '').trim().toUpperCase().replace('/', '-');
+                    if (clean(data.data.symbol) !== clean(document.getElementById('symbol-select')?.value) ||
+                        String(data.data.timeframe || '') !== String(document.getElementById('interval-select')?.value || '')) {
+                        console.debug('Multi full result: descartado resultado tardío de otra celda');
+                        return;
+                    }
+                    const rec = document.getElementById('system-recommendation');
+                    if (rec) { delete rec.dataset.multiCachedRevision; delete rec.dataset.multiCachedCell; }
+                }
                 if (window.IS_FUTURES_PAGE) {
                     window.__FUTURES_ANALYSIS_BUSY_RETRIES__ = 0;
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
@@ -9901,7 +9973,11 @@ window.updateRecommendation = function(data) {
     if (!container) return;
     
     if (!data || !data.decision) {
-        container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-warning"></div><p class="mt-3">Analizando mercado...</p></div>';
+        if (window.IS_MULTI_ASSET_PAGE === true) {
+            container.innerHTML = '<div class="alert alert-info mb-0" role="status">Aún no hay una recomendación confirmada para el activo y la temporalidad seleccionados. El gráfico de mercado sigue disponible y el cálculo profundo se completará cuando tenga recursos; no hay una señal nueva que mostrar.</div>';
+        } else {
+            container.innerHTML = '<div class="text-center py-4"><div class="spinner-border text-warning"></div><p class="mt-3">Analizando mercado...</p></div>';
+        }
         updateMobileRecommendationSummary({}, 'ESPERAR');
         return;
     }
