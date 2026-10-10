@@ -37490,6 +37490,49 @@ def api_multiasset_display_33_4_2():
         }),200
 
 
+@app.route('/api/multiasset/recommendation-ready', methods=['GET'])
+def api_multiasset_recommendation_ready_34_5():
+    """Read-only COMPLETED technical analysis; never starts a heavy job.
+
+    Allows the browser to receive a decision AFTER the initial 202/poll limit.
+    Does not manufacture an action from OHLCV or from Telegram history.
+    """
+    try:
+        symbol=str(request.args.get('symbol') or '').upper().replace('/','-')
+        tf=str(request.args.get('timeframe') or '')
+        from multiasset_system import MULTIASSET_SYMBOLS, MULTIASSET_TIMEFRAMES
+        if symbol not in MULTIASSET_SYMBOLS or tf not in MULTIASSET_TIMEFRAMES:
+            return jsonify({'success':False,'error':'Celda Multi-Activo no permitida'}),400
+        cached=_get_futures_ui_cached(symbol,tf)
+        if not isinstance(cached,dict) or not isinstance(cached.get('decision'),dict):
+            with _MULTI_ASSET_CACHE['lock']:
+                cached=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((symbol,tf)) or {})
+        if not isinstance(cached,dict) or not isinstance(cached.get('decision'),dict):
+            return jsonify({'success':True,'ready':False,'symbol':symbol,'timeframe':tf,'cache_only':True}),200
+        if str(cached.get('symbol') or symbol).upper().replace('/','-')!=symbol or str(cached.get('timeframe') or tf)!=tf:
+            return jsonify({'success':True,'ready':False,'symbol':symbol,'timeframe':tf,'cache_only':True}),200
+        compact_fn=globals().get('_compact_futures_ui_result')
+        payload=compact_fn(cached) if callable(compact_fn) else dict(cached)
+        # Bound payload: frontend needs decision/message/technical context,
+        # not full historical OHLCV, DataFrame, heatmaps or 30+ chart objects.
+        safe={k:payload.get(k) for k in (
+            'symbol','timeframe','decision','levels','message','source_candle_timestamp',
+            'source_candle_close_timestamp','publication_status','risk_class',
+            'display_name','asset_class') if k in payload}
+        safe['symbol']=symbol; safe['timeframe']=tf
+        safe['message']=str(safe.get('message') or '')[:1800]
+        raw_levels=safe.get('levels') if isinstance(safe.get('levels'),dict) else {}
+        safe['levels']={k:raw_levels.get(k) for k in ('entry','stop_loss','take_profit',
+                       'risk_reward','leverage','publication_status') if k in raw_levels}
+        return jsonify({'success':True,'ready':True,'historical_reference':True,
+                        'market':'multiasset','cache_only':True,'data':safe}),200
+    except Exception as exc:
+        # This read lane cannot cause a 500/502; analysis availability does not
+        # depend on telemetry or on restarting a heavy analysis.
+        return jsonify({'success':True,'ready':False,'cache_only':True,
+                        'error':type(exc).__name__}),200
+
+
 @app.route('/api/multiasset/analyze', methods=['POST'])
 def api_multiasset_analyze():
     """17.5.11 non-blocking UI contract. Heavy analysis never lives in HTTP."""
@@ -37547,7 +37590,7 @@ def api_multiasset_signals_previous():
             if row['confidence']>=min_conf: signals.append(row)
         signals = _merge_official_telegram_rows_34_4(signals, 'multiasset', 'previous', min_conf)
         signals.sort(key=lambda x:-float(x.get('confidence') or 0))
-        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses) or bool(signals),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'market':'multiasset','pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
+        return jsonify({'success':True,'warming_up':False,'running':False,'cache_ready':bool(analyses) or bool(signals),'total':len(signals),'active_count':len(signals),'signals':signals,'other_directional_signals':_multiasset_directional_diagnostics_17511(analyses),'analysis_candidates':_multiasset_directional_diagnostics_17511(analyses),'recent_official_history':_confirmed_web_recent_history_34_5('multiasset'),'market':'multiasset','pipeline_health':_public_pipeline_health_175103(analyses),'progress':{'total':7,'completed':len(analyses),'errors':0},'timestamp':datetime.now(bolivia_tz).isoformat()})
     except Exception as exc:
         return jsonify({'success':False,'error':str(exc)[:180]}),500
 
@@ -46318,7 +46361,8 @@ def _confirmed_outbox_terminal_technical_expired_34_4(item, now_epoch=None):
                 # signal; still retain it through the confirmation candle.
                 bars = 1
             expiry = close + timedelta(seconds=seconds*bars)
-        return float(now_epoch if now_epoch is not None else time.time()) >= expiry.timestamp()
+        # Keep audit for 24 hours beyond ORIGINAL technical expiry; never changes trade TTL.
+        return float(now_epoch if now_epoch is not None else time.time()) >= expiry.timestamp() + 24*3600
     except Exception:
         return False
 
@@ -47153,6 +47197,67 @@ def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=N
         results.append(row)
     results.sort(key=lambda r: (str(r.get('source_candle_close_timestamp') or ''), float(r.get('confidence') or 0)), reverse=True)
     return results[:80]
+
+
+def _confirmed_web_recent_history_34_5(market, now_utc=None, max_rows=12):
+    """Bounded audit of *delivered* Telegram confirmations no longer trading-valid.
+
+    UI-only; no broker/provider requests, no strategy authority and no save
+    path. Expired events must NEVER reappear in the active/previous lanes.
+    """
+    market = str(market or '').strip().lower()
+    if market not in ('futures', 'multiasset'):
+        return []
+    now = _parse_utc_iso(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    if now is None:
+        return []
+    with _confirmed_signal_outbox_lock:
+        events = [(str(k), dict(v)) for k,v in _confirmed_signal_outbox.items()]
+    with _confirmed_signal_alerts_lock:
+        delivered = set(_confirmed_signal_alerts_sent)
+    rows = []
+    for key, item in events:
+        if str(item.get('market') or '').lower() != market:
+            continue
+        if str(item.get('state') or '').upper() != 'SENT' and key not in delivered:
+            continue
+        sig = item.get('signal') or {}
+        if not isinstance(sig, dict) or not sig.get('symbol'):
+            continue
+        tf = str(sig.get('timeframe') or '')
+        tf_sec = _confirmed_signal_tf_seconds(tf)
+        close_val = _confirmed_signal_close_timestamp(sig, tf)
+        close_dt = _parse_utc_iso(close_val)
+        if not tf_sec or close_dt is None or close_dt > now:
+            continue
+        levels = sig.get('levels') or {}
+        until = _parse_utc_iso(sig.get('valid_until') or levels.get('valid_until'))
+        if until is None:
+            if market == 'multiasset':
+                try:
+                    bars = max(1, min(6, int(sig.get('max_entry_wait_bars') or 6)))
+                except (ValueError, TypeError):
+                    bars = 6
+            else:
+                bars = 1
+            until = close_dt + timedelta(seconds=tf_sec*bars)
+        if until > now or (now-until).total_seconds() > 24*3600:
+            continue
+        action = str((sig.get('decision') or {}).get('action') or '').upper()
+        if action not in ('LONG','SHORT'):
+            continue
+        if str(levels.get('publication_status') or sig.get('publication_status') or '').upper() != 'EXECUTABLE_SIGNAL':
+            continue
+        rows.append({
+            'symbol': str(sig['symbol']), 'timeframe': tf,
+            'action': action, 'display_name': sig.get('display_name'),
+            'confirmed_at': close_dt.isoformat(), 'expired_at': until.isoformat(),
+            'telegram_delivery_status': 'SENT', 'classification': 'OFFICIAL_HISTORY',
+            'tradable': False, 'manual_save_allowed': False,
+            'reason': 'Alerta Telegram confirmada histórica: vigencia técnica terminada. No habilitada para guardar ni operar.',
+        })
+    rows.sort(key=lambda r: r['confirmed_at'], reverse=True)
+    return rows[:max(1, min(30, int(max_rows)))]
 
 
 def _merge_official_telegram_rows_34_4(current, market, lane, min_confidence=55):

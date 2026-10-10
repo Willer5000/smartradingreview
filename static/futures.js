@@ -709,6 +709,22 @@ window.openManualAnalysisSave = function(
         )
     );
 };
+function futRenderRecentOfficialHistory345(json, context) {
+    // Only genuine Telegram ACKs returned by the backend, already TECHNICALLY
+    // EXPIRED. Information only: not a new confirmation, no Guardar button.
+    if (context !== 'previous' || window.IS_MULTI_ASSET_PAGE !== true) return '';
+    const entries=Array.isArray(json?.recent_official_history)?json.recent_official_history:[];
+    if (!entries.length) return '';
+    const rows=entries.slice(0,12).map(raw=>{
+        const symbol=futEscapeHtml(String(raw?.display_name||raw?.symbol||'--'));
+        const tf=futEscapeHtml(String(raw?.timeframe||'--'));
+        const direction=futEscapeHtml(String(raw?.action||'--'));
+        const close=futEscapeHtml(String(raw?.confirmed_at||'--'));
+        return `<div class="border-top border-secondary py-2 small">📨 <strong>${symbol}</strong> ${tf} · ${direction}<div class="text-muted">Alerta Telegram confirmada ${close}. Vigencia técnica terminada; historial informativo, no se puede guardar como entrada nueva.</div></div>`;
+    }).join('');
+    return `<details class="mt-2 px-2 pb-2"><summary class="text-info" style="cursor:pointer;">Historial de alertas Telegram finalizadas (${entries.length})</summary>${rows}</details>`;
+}
+
 function futRenderAnalysisDiagnostics(json, context) {
     // 17.5.11R.2 — restore the user's previous workflow: every governed
     // LONG/SHORT diagnostic remains visible; when the server says its original
@@ -747,7 +763,7 @@ function futRenderAnalysisDiagnostics(json, context) {
 
     const title = 'Por qué no aparecen otras señales';
     if (!candidates.length) {
-        return `<details class="mt-2 px-2 pb-2"><summary class="text-secondary" style="cursor:pointer;">${title} (0)</summary><div class="small text-muted mt-2">No hay otra tesis LONG/SHORT no ejecutable en el snapshot analizado. Un cero no se interpreta como prueba de que el mercado carece de oportunidades.</div></details>`;
+        return `<details class="mt-2 px-2 pb-2"><summary class="text-secondary" style="cursor:pointer;">${title} (0)</summary><div class="small text-muted mt-2">No hay otra tesis LONG/SHORT no ejecutable en el snapshot analizado. Un cero no se interpreta como prueba de que el mercado carece de oportunidades.</div></details>${futRenderRecentOfficialHistory345(json,context)}`;
     }
 
     const rows = candidates.map(c => {
@@ -797,7 +813,7 @@ function futRenderAnalysisDiagnostics(json, context) {
 
     // R3 inherited contract phrase retained for QA traceability:
     // Cada una recibe Entry/SL/TP técnico para seguimiento manual.
-    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis direccionales del cierre confirmado que no superaron la publicación Premium. Si se muestran aquí con Entry/SL/TP coherentes, puedes guardarlas bajo tu riesgo y Guardian las seguirá; guardarlas no cambia su clasificación oficial.</div><div style="max-height:460px;overflow:auto;">${rows}</div></details>`;
+    return `<details class="mt-2 px-2 pb-2"><summary class="text-warning" style="cursor:pointer;">${title} (${candidates.length})</summary><div class="small text-muted mt-2">Hipótesis direccionales del cierre confirmado que no superaron la publicación Premium. Si se muestran aquí con Entry/SL/TP coherentes, puedes guardarlas bajo tu riesgo y Guardian las seguirá; guardarlas no cambia su clasificación oficial.</div><div style="max-height:460px;overflow:auto;">${rows}</div></details>${futRenderRecentOfficialHistory345(json,context)}`;
 }
 
 function insertReviewTraderPanel() {

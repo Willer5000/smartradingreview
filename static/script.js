@@ -1790,6 +1790,52 @@ window.renderMultiCachedRecommendation343 = function(data, symbol, timeframe) {
     return true;
 };
 
+// 34.5 — passive cache-only completion watch for Multi-Activo.
+// A full 30+ indicators analysis may finish AFTER the 34.3 HTTP 202 retry
+// window. This only reads a completed decision, never launches a heavy job.
+window.stopMultiRecommendationWatch345 = function() {
+    const state=window.__MULTI_RECOMMENDATION_WATCH_345__;
+    if (state?.timer) clearInterval(state.timer);
+    window.__MULTI_RECOMMENDATION_WATCH_345__ = null;
+};
+window.watchMultiRecommendationReady345 = function(symbol, timeframe) {
+    if (window.IS_MULTI_ASSET_PAGE !== true) return;
+    const norm = x=>String(x||'').trim().toUpperCase().replace('/', '-');
+    const key=`${norm(symbol)}|${String(timeframe||'')}`;
+    const current=window.__MULTI_RECOMMENDATION_WATCH_345__;
+    if (current?.key === key) return;
+    window.stopMultiRecommendationWatch345();
+    const state={key,started:Date.now(),timer:null,inflight:false};
+    window.__MULTI_RECOMMENDATION_WATCH_345__=state;
+    async function tick() {
+        if (window.__MULTI_RECOMMENDATION_WATCH_345__ !== state) return;
+        if (Date.now()-state.started > 6*60*1000) {
+            window.stopMultiRecommendationWatch345();
+            return;
+        }
+        if (document.hidden || state.inflight) return;
+        const selected=`${norm(document.getElementById('symbol-select')?.value)}|${String(document.getElementById('interval-select')?.value||'')}`;
+        if (selected !== key) { window.stopMultiRecommendationWatch345(); return; }
+        state.inflight=true;
+        const controller=new AbortController();
+        const timeout=setTimeout(()=>controller.abort(),5000);
+        try {
+            const qs=new URLSearchParams({symbol:norm(symbol),timeframe:String(timeframe)});
+            const response=await fetch(`/api/multiasset/recommendation-ready?${qs}`,{credentials:'same-origin',cache:'no-store',signal:controller.signal});
+            if (!response.ok) return;
+            const payload=await response.json();
+            if (window.__MULTI_RECOMMENDATION_WATCH_345__!==state || !payload?.ready || !payload?.data?.decision) return;
+            if (window.renderMultiCachedRecommendation343?.(payload.data,symbol,timeframe)) {
+                window.currentAnalysis=payload.data;
+                window.stopMultiRecommendationWatch345();
+            }
+        } catch (_) { /* retry cache read only, never heavier work */ }
+        finally { clearTimeout(timeout); state.inflight=false; }
+    }
+    state.timer=setInterval(tick,25000);
+    // No instant extra request on first render; existing POST is still running.
+};
+
 window.commit18MultiIdentityReset = function(symbol, timeframe) {
     if (window.IS_MULTI_ASSET_PAGE !== true) return;
     const sym = String(symbol || window.PAGE_CONFIG?.defaultSymbol || 'CL-USDT');
@@ -1799,6 +1845,8 @@ window.commit18MultiIdentityReset = function(symbol, timeframe) {
 
     window.currentSymbol = sym;
     window.currentInterval = tf;
+    if (window.__MULTI_RECOMMENDATION_WATCH_345__?.key !== `${String(sym).trim().toUpperCase().replace('/', '-')}|${tf}`)
+        window.stopMultiRecommendationWatch345?.();
 
     // Identity change: never leave a recommendation from the previous asset
     // visible under the newly selected CL/SPY/QQQ/... label.
@@ -3200,6 +3248,7 @@ window.runCompleteAnalysis = function() {
                 }
 
                 const isMulti = window.IS_MULTI_ASSET_PAGE === true;
+                if (isMulti) window.watchMultiRecommendationReady345?.(symbol, interval);
                 const retryCount = Number(window.__FUTURES_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
                 const retryAfterMs = isMulti
@@ -3341,6 +3390,7 @@ window.runCompleteAnalysis = function() {
                         console.debug('Multi full result: descartado resultado tardío de otra celda');
                         return;
                     }
+                    window.stopMultiRecommendationWatch345?.();
                     const rec = document.getElementById('system-recommendation');
                     if (rec) { delete rec.dataset.multiCachedRevision; delete rec.dataset.multiCachedCell; }
                 }
