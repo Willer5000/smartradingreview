@@ -30006,7 +30006,7 @@ def api_auth_logout():
 def index():
     return render_template('index.html', is_futures=False)
 
-_FUTURES_DISPLAY_LANE_SCRIPT = '<script>\n(function () {\n    \'use strict\';\n    if (window.__SMARTRADING_FUTURES_DISPLAY_LANE__) return;\n    window.__SMARTRADING_FUTURES_DISPLAY_LANE__ = true;\n\n    const state = { seq: 0, inflightKey: \'\', inflight: null, cache: new Map(), ttlMs: 30000, failedAt: new Map() };\n\n    function normSymbol(v) { return String(v || \'\').trim().toUpperCase().replace(\'/\', \'-\'); }\n    function normTf(v) { const x = String(v || \'\').trim(); return x.toUpperCase() === \'1D\' ? \'1D\' : x.toLowerCase(); }\n\n    async function load(symbol, timeframe) {\n        const sym = normSymbol(symbol || window.currentSymbol || \'BTC-USDT\');\n        const tf = normTf(timeframe || window.currentInterval || \'1h\');\n        const key = `${sym}|${tf}`;\n        const now = Date.now();\n\n        const cached = state.cache.get(key);\n        if (cached && now - cached.ts < state.ttlMs && cached.data?.df) {\n            render(cached.data);\n            return cached.data;\n        }\n        if (state.inflight && state.inflightKey === key) return state.inflight;\n        const failedAt = Number(state.failedAt.get(key) || 0);\n        if (failedAt && now - failedAt < 5000) return null;\n\n        const seq = ++state.seq;\n        const controller = new AbortController();\n        const timer = setTimeout(() => controller.abort(), 9000);\n\n        state.inflightKey = key;\n        state.inflight = (async () => {\n            try {\n                const qs = new URLSearchParams({\n                    symbol: sym, timeframe: tf, market: \'futures\', _ts: String(Date.now())\n                });\n                const res = await fetch(`/api/futures/visuals?${qs.toString()}`, {\n                    method: \'GET\', credentials: \'same-origin\', cache: \'no-store\', signal: controller.signal\n                });\n                const payload = await res.json();\n                if (seq !== state.seq) return null;\n                if (!res.ok || payload?.success === false) throw new Error(payload?.error || `HTTP ${res.status}`);\n                const data = payload?.data || payload;\n                const gotSymbol = normSymbol(data?.symbol || payload?.symbol);\n                const gotTf = normTf(data?.timeframe || payload?.timeframe);\n                if (gotSymbol !== sym || gotTf !== tf || !data?.df?.time?.length) throw new Error(\'FUTURES_DISPLAY_IDENTITY_MISMATCH\');\n                state.cache.set(key, {ts: Date.now(), data});\n                while (state.cache.size > 2) {\n                    const oldest = [...state.cache.entries()].sort((a,b) => a[1].ts - b[1].ts)[0]?.[0];\n                    if (oldest == null) break;\n                    state.cache.delete(oldest);\n                }\n                state.failedAt.delete(key);\n                render(data);\n                return data;\n            } catch (err) {\n                state.failedAt.set(key, Date.now());\n                if (err?.name !== \'AbortError\') console.debug(\'Futures display lane:\', err?.message || err);\n                return null;\n            } finally {\n                clearTimeout(timer);\n                if (state.inflightKey === key) { state.inflight = null; state.inflightKey = \'\'; }\n            }\n        })();\n        return state.inflight;\n    }\n\n    function render(data) {\n        if (!data?.df) return;\n        const gotSymbol = normSymbol(data.symbol);\n        const gotTf = normTf(data.timeframe);\n        if (gotSymbol !== normSymbol(window.currentSymbol) || gotTf !== normTf(window.currentInterval)) return;\n        try { window.updateCandleChart?.(data); } catch (_) {}\n        try { window.updateTradingZones?.(data); } catch (_) {}\n        try { window.updatePattern4Chart?.(data); } catch (_) {}\n        try { window.updateFormation40Chart?.(data); } catch (_) {}\n        const price = Number(data.current_price ?? data.live_price);\n        const live = document.getElementById(\'live-price\');\n        if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined, {maximumFractionDigits: 8})}`;\n        const title = document.getElementById(\'chart-title\');\n        if (title) {\n            const symName = (window.PAGE_CONFIG?.symbols?.[gotSymbol]) || gotSymbol.replace(\'-\', \'/\');\n            const tfName = window.PAGE_CONFIG?.timeframes?.[gotTf] || gotTf;\n            title.innerHTML = `${symName} ${tfName} - <span id="live-price" class="live-price">${live?.textContent || \'--\'}</span>`;\n        }\n    }\n\n    window.loadFuturesDisplayLane = load;\n\n    function installRunWrapper() {\n        const original = window.runCompleteAnalysis;\n        if (typeof original !== \'function\' || original.__futuresDisplayWrapped) return false;\n        function wrappedRunCompleteAnalysis() {\n            const symbol = document.getElementById(\'symbol-select\')?.value || window.currentSymbol || \'BTC-USDT\';\n            const tf = document.getElementById(\'interval-select\')?.value || window.currentInterval || \'1h\';\n            load(symbol, tf);\n            return original.apply(this, arguments);\n        }\n        wrappedRunCompleteAnalysis.__futuresDisplayWrapped = true;\n        wrappedRunCompleteAnalysis.__original = original;\n        window.runCompleteAnalysis = wrappedRunCompleteAnalysis;\n        return true;\n    }\n\n    // Install immediately because script.js has already defined the analysis\n    // function before this display-only lane is injected into /futures.\n    installRunWrapper();\n    document.addEventListener(\'DOMContentLoaded\', function () {\n        installRunWrapper();\n        const symbol = document.getElementById(\'symbol-select\')?.value || window.currentSymbol || \'BTC-USDT\';\n        const tf = document.getElementById(\'interval-select\')?.value || window.currentInterval || \'1h\';\n        load(symbol, tf);\n    }, {once: true});\n})();\n</script>\n'
+_FUTURES_DISPLAY_LANE_SCRIPT = "<script>\n(function () {\n    'use strict';\n    if (window.__SMARTRADING_FUTURES_DISPLAY_LANE__) return;\n    window.__SMARTRADING_FUTURES_DISPLAY_LANE__ = true;\n\n    const state = { seq: 0, inflightKey: '', inflight: null, cache: new Map(), ttlMs: 30000, failedAt: new Map(), deferredAttempts: new Map() };\n\n    function normSymbol(v) { return String(v || '').trim().toUpperCase().replace('/', '-'); }\n    function normTf(v) { const x = String(v || '').trim(); return x.toUpperCase() === '1D' ? '1D' : x.toLowerCase(); }\n\n    async function load(symbol, timeframe) {\n        const sym = normSymbol(symbol || window.currentSymbol || 'BTC-USDT');\n        const tf = normTf(timeframe || window.currentInterval || '1h');\n        const key = `${sym}|${tf}`;\n        const now = Date.now();\n\n        const cached = state.cache.get(key);\n        if (cached && now - cached.ts < state.ttlMs && cached.data?.df) {\n            render(cached.data);\n            return cached.data;\n        }\n        if (state.inflight && state.inflightKey === key) return state.inflight;\n        const failedAt = Number(state.failedAt.get(key) || 0);\n        if (failedAt && now - failedAt < 5000) return null;\n\n        const seq = ++state.seq;\n        const controller = new AbortController();\n        const timer = setTimeout(() => controller.abort(), 9000);\n\n        state.inflightKey = key;\n        state.inflight = (async () => {\n            try {\n                const qs = new URLSearchParams({\n                    symbol: sym, timeframe: tf, market: 'futures', _ts: String(Date.now())\n                });\n                const res = await fetch(`/api/futures/visuals?${qs.toString()}`, {\n                    method: 'GET', credentials: 'same-origin', cache: 'no-store', signal: controller.signal\n                });\n                const payload = await res.json();\n                if (seq !== state.seq) return null;\n                if (!res.ok || payload?.success === false) throw new Error(payload?.error || `HTTP ${res.status}`);\n                if (payload?.deferred) {\n                    const attempts = Number(state.deferredAttempts.get(key) || 0);\n                    if (attempts < 5) {\n                        state.deferredAttempts.set(key, attempts + 1);\n                        setTimeout(() => {\n                            if (!document.hidden && normSymbol(document.getElementById('symbol-select')?.value) === sym\n                                && normTf(document.getElementById('interval-select')?.value) === tf) load(sym, tf);\n                        }, 15000);\n                    }\n                    return null;\n                }\n                state.deferredAttempts.delete(key);\n                const data = payload?.data || payload;\n                const gotSymbol = normSymbol(data?.symbol || payload?.symbol);\n                const gotTf = normTf(data?.timeframe || payload?.timeframe);\n                if (gotSymbol !== sym || gotTf !== tf || !data?.df?.time?.length) throw new Error('FUTURES_DISPLAY_IDENTITY_MISMATCH');\n                state.cache.set(key, {ts: Date.now(), data});\n                while (state.cache.size > 2) {\n                    const oldest = [...state.cache.entries()].sort((a,b) => a[1].ts - b[1].ts)[0]?.[0];\n                    if (oldest == null) break;\n                    state.cache.delete(oldest);\n                }\n                state.failedAt.delete(key);\n                render(data);\n                return data;\n            } catch (err) {\n                state.failedAt.set(key, Date.now());\n                if (err?.name !== 'AbortError') console.debug('Futures display lane:', err?.message || err);\n                return null;\n            } finally {\n                clearTimeout(timer);\n                if (state.inflightKey === key) { state.inflight = null; state.inflightKey = ''; }\n            }\n        })();\n        return state.inflight;\n    }\n\n    function render(data) {\n        if (!data?.df) return;\n        const gotSymbol = normSymbol(data.symbol);\n        const gotTf = normTf(data.timeframe);\n        if (gotSymbol !== normSymbol(window.currentSymbol) || gotTf !== normTf(window.currentInterval)) return;\n        const prior = window.currentAnalysis?.decision ? window.currentAnalysis : null;\n        try { if (prior) window.updateCandleChart?.(data); else window.updateAllCharts?.(data); }\n        catch (_) { try { window.updateCandleChart?.(data); } catch (_) {} }\n        if (prior) window.currentAnalysis = prior;\n        try { window.updatePattern4Chart?.(data); } catch (_) {}\n        try { window.updateFormation40Chart?.(data); } catch (_) {}\n        const price = Number(data.current_price ?? data.live_price);\n        const live = document.getElementById('live-price');\n        if (live && Number.isFinite(price) && price > 0) live.textContent = `$${price.toLocaleString(undefined, {maximumFractionDigits: 8})}`;\n        const title = document.getElementById('chart-title');\n        if (title) {\n            const symName = (window.PAGE_CONFIG?.symbols?.[gotSymbol]) || gotSymbol.replace('-', '/');\n            const tfName = window.PAGE_CONFIG?.timeframes?.[gotTf] || gotTf;\n            title.innerHTML = `${symName} ${tfName} - <span id=\"live-price\" class=\"live-price\">${live?.textContent || '--'}</span>`;\n        }\n    }\n\n    window.loadFuturesDisplayLane = load;\n\n    function installRunWrapper() {\n        const original = window.runCompleteAnalysis;\n        if (typeof original !== 'function' || original.__futuresDisplayWrapped) return false;\n        function wrappedRunCompleteAnalysis() {\n            const symbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';\n            const tf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';\n            load(symbol, tf);\n            return original.apply(this, arguments);\n        }\n        wrappedRunCompleteAnalysis.__futuresDisplayWrapped = true;\n        wrappedRunCompleteAnalysis.__original = original;\n        window.runCompleteAnalysis = wrappedRunCompleteAnalysis;\n        return true;\n    }\n\n    // Install immediately because script.js has already defined the analysis\n    // function before this display-only lane is injected into /futures.\n    installRunWrapper();\n    document.addEventListener('DOMContentLoaded', function () {\n        installRunWrapper();\n        const symbol = document.getElementById('symbol-select')?.value || window.currentSymbol || 'BTC-USDT';\n        const tf = document.getElementById('interval-select')?.value || window.currentInterval || '1h';\n        load(symbol, tf);\n    }, {once: true});\n})();\n</script>\n"
 
 @app.route('/futures')
 def futures_page():
@@ -30117,6 +30117,8 @@ def api_runtime_version_commit33_4_2():
     }), 200
 
 
+_COMMIT34_VISUAL_FETCH_LOCK = threading.Lock()
+
 @app.route('/api/futures/visuals')
 def api_futures_visuals():
     """Commit 21.1 — lightweight visual payload, no trader analysis.
@@ -30149,45 +30151,71 @@ def api_futures_visuals():
         if isinstance(cached, dict) and isinstance(cached.get('df'), dict) and cached['df'].get('time'):
             df = cached['df']
         else:
-            # COMMIT 29 — UI never competes with heavy analysis near memory
-            # pressure. Preserve the last chart in the browser and retry later.
+            # COMMIT34 consolidated: charts are READ-ONLY market data, not a
+            # full analysis. Blocking charts at RSS 210MB made them permanently
+            # empty when the normal live baseline was 275-300MB. The lightweight
+            # lane has a separate singleflight and checks actual cgroup headroom.
+            # It NEVER enters the 9-trader pipeline and cannot generate a signal.
             _visual_rss = _process_rss_mb()
+            _vis_cgroup_used, _vis_cgroup_limit = _commit34_cgroup_mb()
             with _HEAVY_ANALYSIS_STATE_LOCK:
                 _visual_heavy = _HEAVY_ANALYSIS_OWNER
-            if _LOW_MEMORY_MODE and (_visual_heavy or (_visual_rss is not None and _visual_rss >= 210.0)):
+            _vis_no_headroom = bool(
+                _vis_cgroup_used is not None and _vis_cgroup_limit is not None
+                and _vis_cgroup_limit - _vis_cgroup_used < 96.0
+            )
+            if _LOW_MEMORY_MODE and (
+                _vis_no_headroom
+                or (_visual_rss is not None and _visual_rss >= 365.0)
+                or (_visual_heavy and _visual_rss is not None and _visual_rss >= 245.0)
+            ):
                 return jsonify({
-                    'success': True, 'deferred': True, 'source': 'COMMIT29_CACHE_ONLY_PRESSURE',
+                    'success': True, 'deferred': True,
+                    'source': 'COMMIT34_READONLY_CGROUP_PROTECTION',
                     'symbol': symbol, 'timeframe': timeframe, 'market': market,
-                    'reason': 'HEAVY_OR_MEMORY_PRESSURE', 'rss_mb': _visual_rss,
+                    'reason': 'INSUFFICIENT_CHART_HEADROOM',
+                    'retry_after_ms': 30000,
                 }), 200
-            if market == 'futures':
-                engine = _get_futures_system()
-                df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
-            elif market == 'multiasset':
-                engine = _get_multiasset_system()
-                df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
-            else:
-                from kucoin_cache import fetch_kucoin_candles
-                df_obj = fetch_kucoin_candles(symbol, timeframe, timeout=8)
-            if df_obj is None or getattr(df_obj, 'empty', True):
-                return jsonify({'success': False, 'error': 'Sin datos OHLCV', 'symbol': symbol, 'timeframe': timeframe, 'market': market}), 503
-            work = df_obj.tail(120).copy().reset_index(drop=True)
-            time_col = 'time' if 'time' in work.columns else ('timestamp' if 'timestamp' in work.columns else None)
-            if time_col is None:
-                return jsonify({'success': False, 'error': 'OHLC_SCHEMA_INVALID', 'symbol': symbol, 'timeframe': timeframe}), 503
-            df = {
-                'time': [str(x) for x in work[time_col].astype(str).tolist()],
-                'open': [float(x) for x in work['open'].tolist()],
-                'high': [float(x) for x in work['high'].tolist()],
-                'low': [float(x) for x in work['low'].tolist()],
-                'close': [float(x) for x in work['close'].tolist()],
-                'volume': [float(x) for x in work['volume'].tolist()] if 'volume' in work.columns else [0.0] * len(work),
-            }
-            del df_obj
+            # Do not allow two web threads to pull/copy the same OHLCV data
+            # concurrently. A losing caller can retry without blocking Gunicorn.
+            if not _COMMIT34_VISUAL_FETCH_LOCK.acquire(blocking=False):
+                return jsonify({
+                    'success': True, 'deferred': True,
+                    'source': 'COMMIT34_CHART_SINGLEFLIGHT',
+                    'symbol': symbol, 'timeframe': timeframe, 'market': market,
+                    'retry_after_ms': 5000,
+                }), 200
+            try:
+                if market == 'futures':
+                    engine = _get_futures_system()
+                    df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
+                elif market == 'multiasset':
+                    engine = _get_multiasset_system()
+                    df_obj = engine.get_kucoin_data(symbol, timeframe) if engine is not None else None
+                else:
+                    from kucoin_cache import fetch_kucoin_candles
+                    df_obj = fetch_kucoin_candles(symbol, timeframe, timeout=8)
+                if df_obj is None or getattr(df_obj, 'empty', True):
+                    return jsonify({'success': False, 'error': 'Sin datos OHLCV', 'symbol': symbol, 'timeframe': timeframe, 'market': market}), 503
+                work = df_obj.tail(120).copy().reset_index(drop=True)
+                time_col = 'time' if 'time' in work.columns else ('timestamp' if 'timestamp' in work.columns else None)
+                if time_col is None:
+                    return jsonify({'success': False, 'error': 'OHLC_SCHEMA_INVALID', 'symbol': symbol, 'timeframe': timeframe}), 503
+                df = {
+                    'time': [str(x) for x in work[time_col].astype(str).tolist()],
+                    'open': [float(x) for x in work['open'].tolist()],
+                    'high': [float(x) for x in work['high'].tolist()],
+                    'low': [float(x) for x in work['low'].tolist()],
+                    'close': [float(x) for x in work['close'].tolist()],
+                    'volume': [float(x) for x in work['volume'].tolist()] if 'volume' in work.columns else [0.0] * len(work),
+                }
+                del df_obj
+            finally:
+                _COMMIT34_VISUAL_FETCH_LOCK.release()
 
         payload = {
             'success': True,
-            'source': 'COMMIT21_1_LIGHT_VISUALS',
+            'source': 'COMMIT34_READONLY_VISUALS',
             'symbol': symbol,
             'timeframe': timeframe,
             'market': market,
@@ -30325,10 +30353,11 @@ def api_analyze():
         # Hotfix 15.3 — la UI Spot tiene prioridad sobre research/learning.
         # Si existe caché fresco no tomamos el slot pesado. En cache miss,
         # serializamos el cálculo con Futures/Learning para evitar competencia.
-        _mark_system_interactive_priority()
-        print(f"🔍 Ejecutando analyze_full_market...")
         cache_key = (symbol, interval)
         cache_only = str(request.args.get('cache_only', '')).strip().lower() in {'1','true','yes','on'}
+        if not cache_only:
+            _mark_system_interactive_priority(seconds=12)
+        print(f"🔍 Ejecutando analyze_full_market... cache_only={cache_only}")
         if cache_only:
             # Paneles pasivos: nunca disparan cálculo pesado. Preferir preview
             # intrabar reciente; si no existe, pueden leer el snapshot cerrado
@@ -31248,9 +31277,12 @@ if _LOW_MEMORY_MODE:
     # demonstrated that the process can complete inside the Render Free cgroup.
     # Keep meaningful cgroup headroom, but admit a new job after cache shedding.
     # Observed working-set deltas are typically ~40-50 MB per heavy Futures pass.
-    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 270.0)
-    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 335.0)
-    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 255.0)
+    # 34 consolidated: previous 255MB job/soft clamps became a permanent
+    # starvation gate after stable live RSS rose above 275MB. The true cgroup
+    # check and per-timeframe headroom remain the safety authority.
+    _MEMORY_SOFT_LIMIT_MB = min(_MEMORY_SOFT_LIMIT_MB, 310.0)
+    _MEMORY_HARD_LIMIT_MB = min(_MEMORY_HARD_LIMIT_MB, 365.0)
+    _MEMORY_JOB_START_LIMIT_MB = min(_MEMORY_JOB_START_LIMIT_MB, 295.0)
     _MEMORY_ANALYSIS_CACHE_KEEP = min(_MEMORY_ANALYSIS_CACHE_KEEP, 1)
 
 
@@ -31662,10 +31694,14 @@ def _acquire_heavy_analysis(owner, timeout=None):
         _trim_process_heap()
     rss = _process_rss_mb()
     _cgroup_used, _cgroup_limit = _commit34_cgroup_mb()
-    # Start admission checks total cgroup usage as well as worker RSS.
-    # Reserve at least 176MB for a worst-case one-cell analysis burst.
+    # Admission depends on expected timeframe memory footprint. A fixed
+    # 176MB reserve starved all 30m/1h incremental jobs at normal 275MB RSS.
+    # The 1D/12h pipelines retain the larger reserve. Cgroup headroom remains
+    # authoritative and a single global heavy slot is unchanged.
+    _owner_lower = str(owner or '').lower()
+    _reserved_mb = 176.0 if _owner_lower.endswith((':1d', ':12h')) else (160.0 if _owner_lower.endswith((':2h', ':4h')) else 128.0)
     if (_cgroup_limit and _cgroup_used is not None and
-            _cgroup_used >= max(175.0, _cgroup_limit - 176.0)):
+            _cgroup_used >= max(175.0, _cgroup_limit - _reserved_mb)):
         _free_runtime_note_background_backoff(owner, 'CGROUP_HEADROOM', seconds=180.0)
         with _HEAVY_ANALYSIS_STATE_LOCK:
             _HEAVY_ANALYSIS_OWNER = None
@@ -31741,8 +31777,8 @@ _RESOURCE_WATCHDOG_LAST_SHED_AT = 0.0
 if _LOW_MEMORY_MODE:
     # 512 MB cgroup: start shedding disposable research/market caches before
     # allocator fragmentation + one live analysis can push the process over the wall.
-    _RESOURCE_WATCHDOG_BACKOFF_MB = min(_RESOURCE_WATCHDOG_BACKOFF_MB, 290.0)
-    _RESOURCE_WATCHDOG_EMERGENCY_MB = min(_RESOURCE_WATCHDOG_EMERGENCY_MB, 325.0)
+    _RESOURCE_WATCHDOG_BACKOFF_MB = min(_RESOURCE_WATCHDOG_BACKOFF_MB, 325.0)
+    _RESOURCE_WATCHDOG_EMERGENCY_MB = min(_RESOURCE_WATCHDOG_EMERGENCY_MB, 380.0)
 
 
 def resource_watchdog_loop():
@@ -32457,6 +32493,10 @@ def _futures_frontend_representative_ids(cache):
         class_priority = 2 if official else 1
         rank = (
             class_priority,
+            # A newly confirmed setup must be visible during exactly its
+            # source-candle confirmation window; older still-vigent setups
+            # can be surfaced after the confirmed window finishes.
+            1 if official and _commit34_confirmation_window_is_current(row, timeframe) else 0,
             _representative_signal_score(row),
             _signal_source_epoch(row),
             remaining,
@@ -36503,7 +36543,7 @@ def _multiasset_run_analysis(symbol, timeframe, owner='multi-background'):
     if is_ui:
         # QA 12.1: a human opening Multi-Activo has the same priority as Spot
         # and Futures. No extra worker is created; background simply yields.
-        _mark_system_interactive_priority(seconds=120)
+        _mark_system_interactive_priority(seconds=15)
 
     acquired=_acquire_heavy_analysis(owner, timeout=6.0 if is_ui else 0.0)
     if not acquired:
@@ -38030,6 +38070,27 @@ def api_futures_analyze():
         # Si el incremental ya tiene una decisión compacta, entregarla YA para
         # que el usuario vea dirección/Entry/SL/TP mientras se preparan gráficos.
         partial_data = _get_futures_runtime_cached(symbol, timeframe)
+        last_closed_display = None
+        try:
+            with _futures_analysis_cache['lock']:
+                stored = (_futures_analysis_cache.get('data') or {}).get('analysis') or {}
+                closed = stored.get((symbol, timeframe)) or {}
+            if isinstance(closed, dict) and closed.get('success'):
+                decision = closed.get('decision') or {}
+                levels = closed.get('levels') or {}
+                last_closed_display = {
+                    'symbol': symbol, 'timeframe': timeframe,
+                    'action': str(decision.get('action') or 'ESPERAR')[:16],
+                    'confidence': decision.get('confidence'),
+                    'source_candle_close_timestamp': closed.get('source_candle_close_timestamp'),
+                    'publication_status': levels.get('publication_status'),
+                    'entry': levels.get('entry'),
+                    'stop_loss': levels.get('stop_loss'),
+                    'take_profit': levels.get('take_profit'),
+                    'display_only': True,
+                }
+        except Exception:
+            pass
 
         # RC7 anti-storm: a failed async job gets a short quiet period. Browser
         # polls still receive 202/partial data, but cannot relaunch a heavy job
@@ -38041,6 +38102,7 @@ def api_futures_analyze():
                 'busy': True,
                 'deferred': True,
                 'partial': bool(partial_data),
+                'last_closed_display': last_closed_display,
                 'data': partial_data,
                 'job_state': 'BACKOFF',
                 'retry_after_ms': 5000,
@@ -38048,7 +38110,7 @@ def api_futures_analyze():
                 'error': 'Futures está recuperándose de un intento reciente; se reintentará sin duplicar análisis.',
             }), 202
 
-        _mark_futures_interactive_priority()
+        _mark_futures_interactive_priority(seconds=12)
         job_state = _start_futures_ui_analysis_async(symbol, timeframe)
 
         # HTTP 202 = trabajo aceptado/en progreso. Un 503 era interpretado por
@@ -38059,6 +38121,7 @@ def api_futures_analyze():
             'busy': True,
             'deferred': True,
             'partial': bool(partial_data),
+            'last_closed_display': last_closed_display,
             'data': partial_data,
             'job_state': job_state,
             'retry_after_ms': 3000,
@@ -39082,8 +39145,8 @@ def _hotfix16_1_navigation_priority():
     try:
         path = str(request.path or '')
         if path in _INTERACTIVE_PAGE_PATHS:
-            _mark_system_interactive_priority(seconds=120)
-            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 120s")
+            _mark_system_interactive_priority(seconds=25)
+            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 25s")
     except Exception:
         # Fail-open: nunca romper una petición por el mecanismo de prioridad.
         pass
@@ -39351,7 +39414,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
     market = str(market or 'futures').lower()
     key = _futures_ui_key(symbol, timeframe)
     owner = f"multi-ui:{symbol}:{timeframe}" if market == 'multiasset' else f"{market}-ui:{symbol}:{timeframe}"
-    _mark_futures_interactive_priority()
+    # Hold priority only after a UI job is actually admitted.
 
     with _FUTURES_UI_CACHE['lock']:
         running = _FUTURES_UI_CACHE['running']
@@ -39370,6 +39433,7 @@ def _start_futures_ui_analysis_async(symbol, timeframe, market='futures'):
         result = _enqueue_ui_analysis(symbol, timeframe, market, blocked_by=holder or 'MEMORY_GUARD')
         return 'DEFERRED_INTERACTIVE_QUEUE'
 
+    _mark_futures_interactive_priority(seconds=12)
     with _FUTURES_UI_CACHE['lock']:
         _FUTURES_UI_CACHE['running'].add(key)
         _FUTURES_UI_CACHE['errors'].pop(key, None)
@@ -43572,6 +43636,17 @@ def _futures_vigent_manual_candidates(
     return visible
 
 
+
+def _commit34_confirmation_window_is_current(row, timeframe=None, now_utc=None):
+    from commit34_lifecycle_contract import in_confirmation_window
+    row = row or {}
+    return in_confirmation_window(
+        row.get('source_candle_close_timestamp'),
+        row.get('source_candle_timestamp'),
+        timeframe or row.get('timeframe'),
+        now_utc=now_utc,
+    )
+
 # ============================================================================
 # ENDPOINT: Señales VIGENTES (ciclo de vida persistente, excluye nuevas confirmadas)
 # ============================================================================
@@ -43614,7 +43689,8 @@ def api_futures_signals_active():
             if not _signal_id or _action not in ('LONG', 'SHORT'):
                 continue
             if _publication == 'EXECUTABLE_SIGNAL':
-                fresh_confirmed_ids.add(_signal_id)
+                if _commit34_confirmation_window_is_current(_latest, _tf):
+                    fresh_confirmed_ids.add(_signal_id)
                 continue
             _manual_profile = _futures_manual_risk_profile(_latest)
             if (
@@ -43622,7 +43698,8 @@ def api_futures_signals_active():
                 and str(_manual_profile.get('risk_class') or '').upper()
                     in ('MEDIUM', 'HIGH')
             ):
-                fresh_manual_ids.add(_signal_id)
+                if _commit34_confirmation_window_is_current(_latest, _tf):
+                    fresh_manual_ids.add(_signal_id)
 
         representative_ids = _futures_frontend_representative_ids(cache)
 
@@ -43671,7 +43748,8 @@ def api_futures_signals_active():
             ):
                 continue
 
-            if str(signal_id) in fresh_confirmed_ids:
+            if (str(signal_id) in fresh_confirmed_ids
+                    or _commit34_confirmation_window_is_current(record, tf)):
                 filter_stats['new_confirmation'] += 1
                 continue
 
@@ -44173,6 +44251,11 @@ def api_futures_signals_previous():
                 record.get('lifecycle_status') or ''
             )
 
+            # A confirmed signal is NEW only during the candle after the
+            # source close, regardless of snapshot refresh/direction changes.
+            if not _commit34_confirmation_window_is_current(result, tf):
+                filter_stats['non_executable'] += 1
+                continue
             if (
                 lifecycle_status not in ('waiting_entry', 'entry_touched')
                 or signal_id not in representative_ids
@@ -59270,7 +59353,7 @@ def api_analyze_with_portfolio():
 
         # El usuario que abrió Spot tiene prioridad sobre Futures incremental,
         # ReviewTrader y research. Es una marca corta; no detiene lifecycle.
-        _mark_system_interactive_priority()
+        _mark_system_interactive_priority(seconds=8)
 
         # ==============================================================
         # IDENTIDAD Y PORTFOLIO SERVER-SIDE
@@ -59422,7 +59505,7 @@ def api_analyze_with_portfolio():
         # ==============================================================
 
         cache_key = (
-            f"{symbol}_{timeframe}"
+            f"{authenticated_user}|{symbol}_{timeframe}"
         )
 
         cache_ts = getattr(
@@ -59599,12 +59682,22 @@ def api_analyze_with_portfolio():
                 f'spot-ui:tgp:{symbol}:{timeframe}',
             )
             if result is None:
+                # Keep one user-scoped last-good recommendation visible. The
+                # signal remains historical and is never re-published here.
+                last_good = cache_data.get(cache_key)
+                if isinstance(last_good, dict) and last_good.get('success'):
+                    return jsonify({
+                        'success': True, 'data': last_good,
+                        'tgp': last_good.get('tgp'),
+                        'stale': True, 'display_only': True,
+                        'message': 'Último análisis disponible; actualización diferida por recursos.',
+                    }), 200
                 return jsonify({
                     'success': False,
                     'busy': True,
                     'deferred': True,
-                    'retry_after_ms': 1800,
-                    'error': 'El mismo análisis ya está en curso o el sistema está terminando una tarea de mercado.'
+                    'retry_after_ms': 30000,
+                    'error': 'Análisis ocupado; la página y los gráficos siguen disponibles.'
                 }), 202
             print(f"♻️ [H3] Spot TGP {symbol} {timeframe}: {result_source}", flush=True)
 
@@ -59636,28 +59729,26 @@ def api_analyze_with_portfolio():
             f'spot-ui:tgp-intrabar:{symbol}:{timeframe}',
         )
         if preview_result is None:
-            return jsonify({
-                'success': False,
-                'busy': True,
-                'deferred': True,
-                'retry_after_ms': 1800,
-                'error': 'La señal activa intrabar está esperando el turno de análisis.'
-            }), 202
+            # Intrabar preview is OPTIONAL for the main Spot/Guardian UI. It
+            # must not suppress an otherwise valid CLOSED-CANDLE analysis.
+            result = guardian_result
+            preview_source = 'CLOSED_CANDLE_DISPLAY_ONLY'
         if isinstance(preview_result, dict) and preview_result.get('success'):
             result = preview_result
             print(
                 f"♻️ [RC9.7.12] Spot TGP preview {symbol} {timeframe}: {preview_source}",
                 flush=True,
             )
+        elif preview_result is None:
+            # No provisional intrabar signal is claimed.
+            pass
         else:
-            return jsonify({
-                'success': False,
-                'error': 'No se pudo construir la señal activa intrabar.',
-                'system_result': preview_result,
-            }), 500
+            result = guardian_result
+            preview_source = 'CLOSED_CANDLE_DISPLAY_ONLY'
 
         try:
-            _sync_spot_active_signal_from_result(result)
+            if preview_source not in ('CLOSED_CANDLE_DISPLAY_ONLY',):
+                _sync_spot_active_signal_from_result(result)
         except Exception as spot_sync_error:
             print(f"⚠️ [SPOT ACTIVE] sync TGP: {spot_sync_error}", flush=True)
 
@@ -59911,6 +60002,9 @@ def api_analyze_with_portfolio():
         result['tgp'] = (
             tgp_result
         )
+        if preview_source == 'CLOSED_CANDLE_DISPLAY_ONLY':
+            result['display_only_closed_candle'] = True
+            result['intrabar_unavailable'] = True
 
         result['user'] = user
 

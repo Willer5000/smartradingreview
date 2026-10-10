@@ -2957,6 +2957,9 @@ window.runCompleteAnalysis = function() {
     window.currentInterval = interval;
     
     window.showToast('🔍 Iniciando análisis completo...', 'info');
+    if (!window.IS_FUTURES_PAGE && typeof window.loadSpotReadOnlyCharts === 'function') {
+        window.loadSpotReadOnlyCharts(symbol, interval);
+    }
     
     // Usar el wrapper universal (Spot o Futuros según window.IS_FUTURES_PAGE)
     // ====== TGP: Usar /api/analyze-with-portfolio en Spot para obtener recomendación del Guardián ======
@@ -3104,16 +3107,16 @@ window.runCompleteAnalysis = function() {
                 }
                 const retryCount = Number(window.__SPOT_ANALYSIS_BUSY_RETRIES__ || 0);
                 const elapsedMs = now - startedAt;
-                const retryAfterMs = Math.min(5000, Math.max(1500, Number(data.retry_after_ms || 1800)));
+                const retryAfterMs = Math.min(45000, Math.max(20000, Number(data.retry_after_ms || 30000)));
                 const recommendationEl = document.getElementById('system-recommendation');
-                if (recommendationEl) {
+                if (recommendationEl && !window.currentAnalysis?.decision) {
                     recommendationEl.innerHTML = `
                         <div class="alert alert-info mb-0">
                             <strong>⏳ Actualizando análisis Spot.</strong>
                             <div class="small mt-2">El sistema está terminando un cálculo previo; no se duplicará el trabajo.</div>
                         </div>`;
                 }
-                if (elapsedMs < 60000 && retryCount < 20) {
+                if (!document.hidden && elapsedMs < 70000 && retryCount < 2) {
                     window.__SPOT_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                     window.__SPOT_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => {
@@ -3185,8 +3188,15 @@ window.runCompleteAnalysis = function() {
                 }
 
                 const recommendationEl = document.getElementById('system-recommendation');
-                if (recommendationEl && !(data.partial && data.data?.decision)) {
-                    recommendationEl.innerHTML = `
+                if (recommendationEl && !(data.partial && data.data?.decision) && !window.currentAnalysis?.decision) {
+                    const old = data?.last_closed_display;
+                    if (old && String(old.symbol) === symbol && String(old.timeframe) === interval) {
+                        const action = ['LONG', 'SHORT', 'ESPERAR', 'NO_OPERAR'].includes(old.action) ? old.action : 'ESPERAR';
+                        const d = document.createElement('div');
+                        d.className = 'alert alert-secondary mb-0';
+                        d.textContent = `Último cierre confirmado (${old.source_candle_close_timestamp || '--'}): ${action}. Consulta histórica; no es una recomendación intrabar nueva. Gráficos independientes disponibles.`;
+                        recommendationEl.replaceChildren(d);
+                    } else recommendationEl.innerHTML = `
                         <div class="alert alert-info mb-0">
                             <strong>⏳ ${isMulti ? 'Preparando análisis Multi-Activo' : 'Preparando gráficos Futures'}.</strong>
                             <div class="small mt-2">
@@ -3211,9 +3221,9 @@ window.runCompleteAnalysis = function() {
                     window.__FUTURES_ANALYSIS_RETRY_STARTED_AT__ = 0;
                     clearTimeout(window.__FUTURES_ANALYSIS_RETRY_TIMER__);
                     if (recommendationEl) {
-                        recommendationEl.innerHTML = `
+                        if (!window.currentAnalysis?.decision && !recommendationEl.querySelector('.alert-secondary')) recommendationEl.innerHTML = `
                             <div class="alert alert-warning mb-0">
-                                <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'Los gráficos tardaron más de lo esperado'}.</strong>
+                                <strong>⚠️ ${isMulti ? 'El motor compartido sigue ocupado' : 'La recomendación completa sigue ocupada'}.</strong>
                                 <div class="small mt-2">
                                     ${isMulti
                                         ? 'No se seguirá haciendo polling. El gráfico ligero, el Router, el precio y el último análisis válido continúan disponibles; reintenta cuando quieras.'
@@ -3272,6 +3282,13 @@ window.runCompleteAnalysis = function() {
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                 }
                 window.currentAnalysis = data.data;
+                if (data.stale || data.display_only || data.data?.display_only_closed_candle) {
+                    const rec = document.getElementById('system-recommendation');
+                    if (rec) rec.dataset.analysisStale = 'true';
+                } else {
+                    const rec = document.getElementById('system-recommendation');
+                    if (rec) delete rec.dataset.analysisStale;
+                }
                 // ============================================================
                 // MOSTRAR TGP
                 // ============================================================
@@ -3428,6 +3445,15 @@ window.runCompleteAnalysis = function() {
                 
                 if (typeof window.updateRecommendation === 'function') {
                     window.updateRecommendation(data.data);
+                }
+                if (!window.IS_FUTURES_PAGE && (data.stale || data.display_only || data.data?.display_only_closed_candle)) {
+                    const rec = document.getElementById('system-recommendation');
+                    if (rec) {
+                        const badge = document.createElement('div');
+                        badge.className = 'alert alert-warning py-1 small mb-2';
+                        badge.textContent = 'Último cierre conocido · visualización informativa; el intrabar está diferido por recursos.';
+                        rec.prepend(badge);
+                    }
                 }
 
                 // H.2: el backend ya sincronizó esta recomendación con el
@@ -3778,7 +3804,7 @@ window.runCompleteAnalysis = function() {
                 const retryCount = Number(window.__SPOT_ANALYSIS_BUSY_RETRIES__ || 0);
                 if ((now - startedAt) < 60000 && retryCount < 20) {
                     window.__SPOT_ANALYSIS_BUSY_RETRIES__ = retryCount + 1;
-                    const retryAfterMs = Math.min(5000, Math.max(1500, Number(error?.serverData?.retry_after_ms || 1800)));
+                    const retryAfterMs = Math.min(45000, Math.max(20000, Number(error?.serverData?.retry_after_ms || 30000)));
                     clearTimeout(window.__SPOT_ANALYSIS_RETRY_TIMER__);
                     window.__SPOT_ANALYSIS_RETRY_TIMER__ = window.setTimeout(() => window.runCompleteAnalysis?.(), retryAfterMs);
                     return;
@@ -12764,3 +12790,58 @@ window.prioritizeSpotSignalLanes = function prioritizeSpotSignalLanes() {
 })();
 
 // COMMIT20.2.1-STABILITY-FIX: 20.2 baseline frontend. No visuals-first dependency.
+
+
+// COMMIT34 — Independent read-only OHLCV lane. Display is never trading authority.
+(function () {
+    const cache = new Map();
+    let inFlight = null;
+    const attempts = new Map();
+    window.loadSpotReadOnlyCharts = async function(symbol, timeframe) {
+        if (window.IS_FUTURES_PAGE) return null;
+        const key = `${symbol}|${timeframe}`;
+        const cached = cache.get(key);
+        if (cached && Date.now() - cached.ts < 45000) {
+            const lastDecision = window.currentAnalysis?.decision ? window.currentAnalysis : null;
+            try { if (lastDecision) window.updateCandleChart?.(cached.data); else window.updateAllCharts?.(cached.data); } catch (_) { window.updateCandleChart?.(cached.data); }
+            if (lastDecision) window.currentAnalysis = lastDecision;
+            return cached.data;
+        }
+        if (inFlight?.key === key) return inFlight.task;
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        const task = (async () => {
+            try {
+                const q = new URLSearchParams({symbol, timeframe, market:'spot'});
+                const res = await fetch(`/api/futures/visuals?${q.toString()}`,
+                    {credentials:'same-origin', cache:'no-store', signal:controller.signal});
+                const data = await res.json();
+                if (data?.deferred) {
+                    const count = attempts.get(key) || 0;
+                    if (count < 5) {
+                        attempts.set(key, count + 1);
+                        setTimeout(() => {
+                            if (!document.hidden && document.getElementById('symbol-select')?.value === symbol
+                                    && document.getElementById('interval-select')?.value === timeframe)
+                                window.loadSpotReadOnlyCharts(symbol, timeframe);
+                        }, 15000);
+                    }
+                    return null;
+                }
+                if (!res.ok || !data?.success || !data?.df?.time?.length) return null;
+                attempts.delete(key);
+                if (String(document.getElementById('symbol-select')?.value) !== String(symbol)
+                    || String(document.getElementById('interval-select')?.value) !== String(timeframe)) return null;
+                cache.set(key,{ts:Date.now(),data});
+                while (cache.size > 2) cache.delete(cache.keys().next().value);
+                const lastDecision = window.currentAnalysis?.decision ? window.currentAnalysis : null;
+                try { if (lastDecision) window.updateCandleChart?.(data); else window.updateAllCharts?.(data); } catch (_) { window.updateCandleChart?.(data); }
+                if (lastDecision) window.currentAnalysis = lastDecision;
+                return data;
+            } catch (_) { return null; }
+            finally { clearTimeout(timeout); if (inFlight?.key === key) inFlight = null; }
+        })();
+        inFlight = {key,task};
+        return task;
+    };
+})();

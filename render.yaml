@@ -41,13 +41,13 @@ services:
       - key: LOW_MEMORY_MODE
         value: "1"
       - key: MEMORY_SOFT_LIMIT_MB
-        value: "255"
+        value: "310"
       - key: MEMORY_HARD_LIMIT_MB
-        value: "315"
+        value: "365"
       - key: MEMORY_JOB_START_LIMIT_MB
-        value: "245"
-      - key: MEMORY_IN_JOB_ABORT_MB
         value: "295"
+      - key: MEMORY_IN_JOB_ABORT_MB
+        value: "335"
       - key: MEMORY_ANALYSIS_CACHE_KEEP
         value: "1"
       # Verified-only strategy routes: empty manifest leaves LIVE unchanged.
@@ -129,7 +129,7 @@ services:
       - key: RESOURCE_WATCHDOG_INTERVAL_SECONDS
         value: "10"
       - key: RESOURCE_WATCHDOG_BACKOFF_MB
-        value: "300"
+        value: "325"
       - key: RESOURCE_WATCHDOG_EMERGENCY_MB
         value: "380"
       - key: DERIVATIVES_PROVIDER_HARD_BLOCK_TTL_SECONDS
