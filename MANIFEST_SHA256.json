@@ -1,0 +1,19 @@
+{
+  "base": "SmartTradingReview_COMMIT36R_REPOSITORIO_COMPLETO_ESTABILIDAD.zip",
+  "changes": [
+    "app.py",
+    "official_signal_store.py",
+    "static/futures.js",
+    "templates/index.html",
+    "tests/test_commit36r1_official_visibility.py",
+    "INSTRUCCIONES_COMMIT36R1_VISIBILIDAD.md"
+  ],
+  "sha256": {
+    "app.py": "8c8978e9fc297b60fbdb8ddb48073aafe7bccb9f2a0bd6826e393d46f99cfdaa",
+    "official_signal_store.py": "554d5993cdc6ac28cc3e1024d54d6b214fc3065ecb9002943ed5c6487000a227",
+    "static/futures.js": "f6394d5467b0ecbc51caef6768ec1e8e84d404e1db2b9104703aee3f21f5e915",
+    "templates/index.html": "55a7c00036445fa61aef897f55ca92a5de8f1ccee86c5e5cc7c18fa7caadd8e9",
+    "tests/test_commit36r1_official_visibility.py": "900fc340955d5f70f071048c927936c716a08f3e0af83e7e16ef9acf0fb9d6bc",
+    "INSTRUCCIONES_COMMIT36R1_VISIBILIDAD.md": "7dfe1415ee23262414b4e39ab23ec330274193811d2ab1d505fccd499f8d0a59"
+  }
+}

@@ -45092,6 +45092,9 @@ def api_futures_signals_previous():
         
             'signals':
                 previous_signals,
+            # Read-only audit of actually SENT confirmations. Expired signals
+            # stay visible as history, NEVER actionable or re-confirmed.
+            'recent_official_history': _confirmed_web_recent_history_34_5('futures'),
         
             'progress': {
                 'total':
@@ -47850,7 +47853,22 @@ def _confirmed_web_recent_history_34_5(market, now_utc=None, max_rows=12):
     if now is None:
         return []
     with _confirmed_signal_outbox_lock:
-        events = [(str(k), dict(v)) for k,v in _confirmed_signal_outbox.items()]
+        events_by_key = {str(k): dict(v) for k,v in _confirmed_signal_outbox.items()}
+    # Recover an expired-but-SENT Telegram alert after an OOM or outbox pruning.
+    # The official DB index is memory-only here: no remote read on HTTP GET.
+    try:
+        from official_signal_store import recent_official_events
+        for event in recent_official_events():
+            if not isinstance(event, dict) or str(event.get('market') or '').lower() != market:
+                continue
+            key = str(event.get('key') or '')
+            current = events_by_key.get(key)
+            if current is None or (str(event.get('state') or '').upper() == 'SENT'
+                                   and str(current.get('state') or '').upper() != 'SENT'):
+                events_by_key[key] = event
+    except Exception:
+        pass
+    events = list(events_by_key.items())
     with _confirmed_signal_alerts_lock:
         delivered = set(_confirmed_signal_alerts_sent)
     rows = []
@@ -56285,6 +56303,16 @@ def futures_standard_alert_loop():
     confirmation path.  No second Futures Entry/TP/SL Telegram event is emitted.
     """
     print('🎯 FUTURES lifecycle: shadow monitor activo · Telegram CONFIRMADA-only')
+    # Rebuild the compact, read-only official index at startup. On an OOM the
+    # aggregate outbox may be missing; waiting two minutes for the first loop
+    # previously made valid Telegram confirmations temporarily disappear.
+    # The same existing worker performs one bounded Supabase read (no new
+    # thread, strategy, or frontend-blocking network call).
+    try:
+        from official_signal_store import recent_official_events
+        recent_official_events(refresh=True)
+    except Exception as _index_boot_err:
+        print(f'⚠️ [OFFICIAL] startup index deferred: {type(_index_boot_err).__name__}', flush=True)
     time.sleep(120)
     while True:
         try:

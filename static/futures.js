@@ -712,7 +712,7 @@ window.openManualAnalysisSave = function(
 function futRenderRecentOfficialHistory345(json, context) {
     // Only genuine Telegram ACKs returned by the backend, already TECHNICALLY
     // EXPIRED. Information only: not a new confirmation, no Guardar button.
-    if (context !== 'previous' || window.IS_MULTI_ASSET_PAGE !== true) return '';
+    if (context !== 'previous') return ''; // also audit Futures confirmations
     const entries=Array.isArray(json?.recent_official_history)?json.recent_official_history:[];
     if (!entries.length) return '';
     const rows=entries.slice(0,12).map(raw=>{
@@ -881,12 +881,16 @@ window.updateActiveSignals = async function() {
     console.log(
         '🚀 ACTIVE: iniciando consulta...'
     );
-    signalsList.innerHTML = `
-        <div class="list-group-item bg-dark text-info text-center py-3">
-            <div class="spinner-border spinner-border-sm me-2"></div>
-            Consultando señales vigentes...
-        </div>
-    `;
+    // No borrar tarjetas válidas mientras se actualiza el GET.
+    // La fuente vuelve a clasificar su vigencia al responder.
+    if (!signalsList.querySelector('[data-signal-id]')) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-info text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2"></div>
+                Consultando señales vigentes...
+            </div>
+        `;
+    }
 
     if (signalsCount) {
         signalsCount.textContent = '...';
@@ -961,8 +965,12 @@ window.updateActiveSignals = async function() {
             : [];
 
         // RC9.8.2: estado de guardado PERSONAL. No altera la señal global.
-        await window.refreshUserSavedSignalRefs(false);
-        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
+        // Las confirmaciones son GLOBALES: guardarlas es un atributo del
+        // usuario, nunca una razón para ocultarlas o reducir el contador.
+        // El índice de Guardadas se refresca en segundo plano, no bloquea
+        // la representación si Supabase responde lentamente.
+        void window.refreshUserSavedSignalRefs(false);
+        const signals = allSignals;
 
         const progress = json.progress || {};
         const filterStats =
@@ -1086,7 +1094,7 @@ window.updateActiveSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            const hiddenInSaved = allSignals.length > 0;
+            const hiddenInSaved = false; // global rows are never removed due to saved status
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
                     <strong>✅ Análisis de ${window.IS_MULTI_ASSET_PAGE ? 'Multi-Activo' : 'Futuros'} completado</strong>
@@ -1199,7 +1207,10 @@ window.updateActiveSignals = async function() {
                 source_context: 'ACTIVE_CONFIRMED'
             });
 
-            const saveButtons = sig.lifecycle_status === 'entry_touched'
+            const alreadySaved = _isSignalSavedByCurrentUser(sig);
+            const saveButtons = alreadySaved
+                ? '<div class="mt-2"><span class="badge bg-success">🔖 Ya guardada · disponible en Guardadas</span></div>'
+                : sig.lifecycle_status === 'entry_touched'
                 ? `
                     <div class="d-flex flex-wrap gap-2 mt-2">
                         <button type="button" class="btn btn-sm btn-success"
@@ -1222,6 +1233,7 @@ window.updateActiveSignals = async function() {
             html += `
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
+                    data-signal-id="${futEscapeHtml(sig.signal_id || '')}"
                     style="cursor:pointer;"
                     onclick="window.changeToSignal(
                         '${sig.symbol}',
@@ -1505,15 +1517,15 @@ window.updatePreviousSignals = async function() {
         '🚀 PREVIOUS: iniciando consulta...'
     );
 
-    signalsList.innerHTML = `
-        <div class="list-group-item bg-dark text-info text-center py-3">
-
-            <div class="spinner-border spinner-border-sm me-2"></div>
-
-            Consultando último cierre confirmado...
-
-        </div>
-    `;
+    // No ocultar confirmaciones de calidad ya dibujadas por una petición nueva.
+    if (!signalsList.querySelector('[data-signal-id]')) {
+        signalsList.innerHTML = `
+            <div class="list-group-item bg-dark text-info text-center py-3">
+                <div class="spinner-border spinner-border-sm me-2"></div>
+                Consultando último cierre confirmado...
+            </div>
+        `;
+    }
 
     if (signalsCount) {
 
@@ -1605,8 +1617,12 @@ window.updatePreviousSignals = async function() {
                 : [];
 
         // RC9.8.2: ocultar sólo para el usuario que ya la guardó.
-        await window.refreshUserSavedSignalRefs(false);
-        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
+        // Las confirmaciones son GLOBALES: guardarlas es un atributo del
+        // usuario, nunca una razón para ocultarlas o reducir el contador.
+        // El índice de Guardadas se refresca en segundo plano, no bloquea
+        // la representación si Supabase responde lentamente.
+        void window.refreshUserSavedSignalRefs(false);
+        const signals = allSignals;
 
         const progress =
             json.progress || {};
@@ -1743,7 +1759,7 @@ window.updatePreviousSignals = async function() {
         // ------------------------------------------------------------
         if (signals.length === 0) {
 
-            const hiddenInSaved = allSignals.length > 0;
+            const hiddenInSaved = false; // global rows are never removed due to saved status
             signalsList.innerHTML = `
                 <div class="list-group-item bg-dark text-warning text-center py-3">
                     <strong>✅ Análisis completado</strong>
@@ -1834,7 +1850,10 @@ window.updatePreviousSignals = async function() {
             const signalData =
                 _encodeFuturesSignal(sig);
 
-            const saveButtons = inactive
+            const alreadySaved = _isSignalSavedByCurrentUser(sig);
+            const saveButtons = alreadySaved
+                ? '<div class="mt-2"><span class="badge bg-success">🔖 Ya guardada · disponible en Guardadas</span></div>'
+                : inactive
                 ? ''
                 : `
                     <div class="d-flex flex-wrap gap-2 mt-2">
