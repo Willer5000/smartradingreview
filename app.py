@@ -30049,6 +30049,101 @@ def signal_deep_link(signal_id):
     target = '/multiasset' if market == 'multiasset' else ('/futures' if market == 'futures' else '/')
     return redirect(f"{target}?{urlencode(params)}")
 
+def _c36_official_spot_by_id(signal_id, now_utc=None):
+    """Conferir una alerta SPOT oficial sin ejecutar análisis ni crear señales.
+
+    El outbox es una copia persistida de la confirmación cerrada. Solo niveles
+    auténticos; la validez técnica nunca se amplía por abrir un deep link.
+    """
+    now = _parse_utc_iso(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    with _confirmed_signal_outbox_lock:
+        rows = [(str(key), dict(val)) for key, val in _confirmed_signal_outbox.items()]
+    for key, item in rows:
+        if str(item.get('market') or '') != 'spot':
+            continue
+        if str(item.get('state') or '').upper() not in ('SENT','PENDING','FAILED_RETRYABLE'):
+            continue
+        if item.get('_c35_remote_persisted') is False:
+            continue
+        sig = item.get('signal') or {}
+        levs = sig.get('levels') or {}
+        sid = str(sig.get('signal_id') or sig.get('source_signal_id') or levs.get('signal_id') or '')
+        if sid != str(signal_id) or not sid:
+            continue
+        if (sig.get('source_candle_closed') is False or sig.get('publication_eligible') is False
+                or sig.get('is_executable') is False or bool(sig.get('market_data_is_synthetic'))):
+            continue
+        tf = str(sig.get('timeframe') or '')
+        sec = _confirmed_signal_tf_seconds(tf)
+        close = _parse_utc_iso(_confirmed_signal_close_timestamp(sig, tf))
+        if not close or not sec or close > now or (now-close).total_seconds() > 90*86400:
+            continue
+        age = (now-close).total_seconds()
+        until_value = sig.get('valid_until') or levs.get('valid_until')
+        until = _parse_utc_iso(until_value) if until_value else close + timedelta(seconds=sec)
+        if until is None or now >= until:
+            continue
+        dec = sig.get('decision') or {}
+        action = str(dec.get('action') or '').upper() if isinstance(dec, dict) else str(dec).upper()
+        try:
+            confidence = float(dec.get('confidence') or sig.get('confidence') or 0) if isinstance(dec, dict) else float(sig.get('confidence') or 0)
+            entry = float(levs.get('entry') or sig.get('entry') or 0)
+            sl = float(levs.get('stop_loss') or sig.get('stop_loss') or 0)
+            tp = float(levs.get('take_profit') or sig.get('take_profit') or 0)
+        except (ValueError, TypeError):
+            continue
+        if action not in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT') or confidence < 60:
+            continue
+        long = action in ('COMPRA_SPOT','LONG')
+        if not (sl < entry < tp if long else tp < entry < sl):
+            continue
+        lane = 'confirmed' if age < sec else 'vigent'
+        return {
+            'signal_id': sid, 'market': 'spot', 'symbol': sig.get('symbol'),
+            'timeframe': tf, 'action': action, 'confidence': confidence,
+            'entry': entry, 'stop_loss': sl, 'take_profit': tp,
+            'source_candle_close_timestamp': close.isoformat(),
+            'valid_until': until.isoformat(), 'source_authority': 'OFFICIAL_CONFIRMED_OUTBOX',
+            'telegram_delivery_status': str(item.get('state') or '').upper(),
+            'lane': lane, 'display_only': False,
+        }
+    return None
+
+
+@app.route('/api/signals/official/<signal_id>', methods=['GET'])
+def api_c36_official_signal_by_id(signal_id):
+    """Telegram link and web resolve ONE official confirmation via signal_id.
+
+    No strategy, OHLCV, provider or Telegram call. Expired signals return a
+    historical record only, never an active order or a save permission.
+    """
+    try:
+        market = str(request.args.get('market') or '').strip().lower()
+        if market not in ('spot', 'futures', 'multiasset'):
+            return jsonify({'success': False, 'error': 'INVALID_MARKET'}), 400
+        sid = str(signal_id or '').strip()
+        if not sid or len(sid) > 120:
+            return jsonify({'success': False, 'error': 'INVALID_ID'}), 400
+        if market == 'spot':
+            row = _c36_official_spot_by_id(sid)
+            if row:
+                return jsonify({'success': True, 'signal': row,
+                                'lane': row['lane'], 'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
+            return jsonify({'success': False, 'signal_id': sid,
+                            'error': 'NOT_CURRENTLY_CONFIRMED_OR_TECHNICALLY_VALID'}), 404
+        for lane in ('previous', 'active'):
+            for row in _confirmed_web_registry_rows_34_4(market, lane, 55):
+                if str(row.get('signal_id') or '') == sid:
+                    return jsonify({'success': True, 'signal': row,
+                                    'lane': 'confirmed' if lane == 'previous' else 'vigent',
+                                    'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
+        # Explicitly do not revive expired trades from Telegram history.
+        return jsonify({'success': False, 'signal_id': sid,
+                        'error': 'NOT_CURRENTLY_CONFIRMED_OR_TECHNICALLY_VALID'}), 404
+    except Exception as exc:
+        return jsonify({'success': False, 'error': type(exc).__name__}), 503
+
+
 @app.route('/analytics')
 def analytics_page():
     """Página de Análisis Estadístico (Fase C)"""
@@ -31174,6 +31269,66 @@ _HEAVY_ANALYSIS_WAIT_SECONDS = 20 * 60
 _HEAVY_ANALYSIS_STATE_LOCK = threading.Lock()
 _HEAVY_ANALYSIS_OWNER = None
 
+# C36 — observabilidad sin nuevos threads, disco ni requests de terceros.
+_C36_SCHED_METRICS_LOCK = threading.Lock()
+_C36_SCHED_METRICS = {'admitted': 0, 'deferred': 0, 'reasons': {}, 'last_deferred': None}
+_C36_RECLAIM_LOCK = threading.Lock()
+_C36_LAST_RECLAIM = 0.0
+
+
+def _c36_sched_event(owner, status, reason=None):
+    """Contadores acotados para comprobar si un filtro RAM reduce frecuencia."""
+    try:
+        role = str(owner or '').split(':')[0].split('-')[0][:20]
+        code = str(reason or 'NONE')[:40]
+        with _C36_SCHED_METRICS_LOCK:
+            _C36_SCHED_METRICS[status] += 1
+            if status == 'deferred':
+                key = role + ':' + code
+                reasons = _C36_SCHED_METRICS['reasons']
+                if key not in reasons and len(reasons) >= 28:
+                    key = 'OTHER'
+                reasons[key] = reasons.get(key, 0) + 1
+                _C36_SCHED_METRICS['last_deferred'] = {'reason': code, 'owner': str(owner or '')[:90], 'at': time.time()}
+    except Exception:
+        pass
+
+
+def _c36_preflight_reclaim(owner):
+    """El viejo gate RSS difería ANTES de liberar cachés; corregir orden.
+
+    Máximo una purga cada 45 segundos y NUNCA mientras otro análisis posee
+    el slot global. Reduce el riesgo de recargas/OOM y no toca señales.
+    """
+    global _C36_LAST_RECLAIM
+    with _C36_RECLAIM_LOCK:
+        now = time.monotonic()
+        if now - _C36_LAST_RECLAIM < 45.0 or _HEAVY_ANALYSIS_LOCK.locked():
+            return False
+        _C36_LAST_RECLAIM = now
+    _shed_recreatable_memory(reason=f'c36-preflight:{owner}', aggressive=True)
+    return True
+
+
+def _c36_closed_candle_priority(owner):
+    """Priorizar cierres oficiales SIN saltarse cgroup, RSS o exclusión pesada.
+
+    Para Futures consulta la misma elegibilidad de vela que el incremental.
+    Para Spot el scheduler existente sólo llama esta ruta en sus slots.
+    """
+    name = str(owner or '')
+    if name.startswith('spot-scheduled-'):
+        return True
+    prefix = 'futures-incremental:'
+    if not name.startswith(prefix):
+        return False
+    try:
+        symbol, timeframe = name[len(prefix):].rsplit(':', 1)
+        due = globals().get('_futures_combo_due_for_closed_candle')
+        return bool(callable(due) and due(symbol, timeframe))
+    except Exception:
+        return False
+
 # Commit 10.1 — límites operativos deliberadamente por debajo de los ~512 MB
 # de Render Free. Son configurables sin redeploy de código. El HARD limit no
 # mata el proceso: impide comenzar/continuar otro bloque pesado y conserva el
@@ -31250,6 +31405,10 @@ def _free_runtime_note_background_backoff(owner, reason='RESOURCE_PRESSURE', sec
     global _FREE_RUNTIME_BACKGROUND_BACKOFF_UNTIL
     global _FREE_RUNTIME_BACKGROUND_BACKOFF_REASON
     global _FREE_RUNTIME_BACKGROUND_BACKOFF_LOG_AT
+    # C36: an exhausted chart-request must not suspend EVERY close scanner.
+    # UI already retries independently; scheduler retains its physical gates.
+    if str(owner or '').startswith(('spot-ui:', 'futures-ui:', 'multi-ui:', 'multiasset-ui:')):
+        return
     now = time.monotonic()
     ttl = max(30.0, float(seconds or 120.0))
     should_log = False
@@ -31631,6 +31790,10 @@ def _acquire_heavy_analysis(owner, timeout=None):
         commit30_1_priority_owner = bool(_c30_priority_fn(owner)) if callable(_c30_priority_fn) else False
     except Exception:
         commit30_1_priority_owner = False
+    # C36: cierre oficial es crítico para la frecuencia, incluso si la UI está
+    # abierta. Este privilegio omite SOLO prioridad UI/cooldown; nunca RAM.
+    c36_candle_priority = _c36_closed_candle_priority(owner)
+    commit30_1_priority_owner = commit30_1_priority_owner or c36_candle_priority
 
     # RC9.7.14 FREE-runtime: never let background jobs pile up waiting for the
     # only heavy slot. On a 512 MB worker a queue of waiting threads can make
@@ -31657,11 +31820,16 @@ def _acquire_heavy_analysis(owner, timeout=None):
     # "esperando turno" -> cache shed -> no puede iniciar -> repetir. Ahora se
     # difiere limpiamente y se conserva la UI/cachés anteriores.
     pre_rss = _process_rss_mb()
+    if (not interactive_owner and pre_rss is not None
+            and float(pre_rss) >= _free_runtime_background_start_limit(owner)):
+        _c36_preflight_reclaim(owner)
+        pre_rss = _process_rss_mb()
     if (
         not interactive_owner
         and pre_rss is not None
         and float(pre_rss) >= _free_runtime_background_start_limit(owner)
     ):
+        _c36_sched_event(owner, 'deferred', 'RSS_PRESTART')
         _free_runtime_note_background_backoff(
             owner,
             reason=(
@@ -31701,7 +31869,8 @@ def _acquire_heavy_analysis(owner, timeout=None):
                 f"permanentes (baseline={_baseline}); autoridad de concurrencia="
                 "heavy-lock + RSS, no el conteo absoluto."
             )
-    if not interactive_owner and _free_runtime_background_backoff_active():
+    if not interactive_owner and _free_runtime_background_backoff_active() and not commit30_1_priority_owner:
+        _c36_sched_event(owner, 'deferred', 'GLOBAL_BACKOFF')
         return False
 
     if not interactive_owner:
@@ -31773,6 +31942,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
     # headroom for the expected new-job footprint. One heavy lock unchanged.
     _start_budget = _commit346_cgroup_budget(_reserved_mb)
     if not _start_budget['safe']:
+        _c36_sched_event(owner, 'deferred', 'CGROUP_HEADROOM')
         _free_runtime_note_background_backoff(
             owner, f"CGROUP_HEADROOM_34_6:{_start_budget['raw_headroom_mb']}",
             seconds=180.0)
@@ -31786,6 +31956,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
         else float(_MEMORY_JOB_START_LIMIT_MB)
     )
     if rss is not None and rss >= _job_start_limit:
+        _c36_sched_event(owner, 'deferred', 'RSS_START_LIMIT')
         print(
             f"🛑 [MEM] {owner}: no inicia con RSS {rss:.1f}MB; "
             f"límite seguro de arranque={_job_start_limit:.1f}MB. "
@@ -31802,6 +31973,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
         _HEAVY_ANALYSIS_LOCK.release()
         return False
 
+    _c36_sched_event(owner, 'admitted')
     _log_memory_runtime(f'{owner}: inicio')
     return True
 
@@ -31867,24 +32039,37 @@ def resource_watchdog_loop():
     while True:
         try:
             rss = _process_rss_mb()
-            if rss is not None and float(rss) >= _RESOURCE_WATCHDOG_BACKOFF_MB:
+            cgroup_used, cgroup_limit = _commit34_cgroup_mb()
+            # C36: RSS del worker puede ser bajo mientras memory.current crece.
+            # Proteger el contenedor completo y no solamente el heap Python.
+            cgroup_pressure = bool(
+                cgroup_limit is not None and cgroup_used is not None
+                and cgroup_limit - cgroup_used < 135.0
+            )
+            rss_pressure = bool(rss is not None and float(rss) >= _RESOURCE_WATCHDOG_BACKOFF_MB)
+            if rss_pressure or cgroup_pressure:
                 with _HEAVY_ANALYSIS_STATE_LOCK:
                     owner = _HEAVY_ANALYSIS_OWNER
                 _free_runtime_note_background_backoff(
-                    owner or 'resource-watchdog',
-                    reason=f'WATCHDOG_RSS_{float(rss):.1f}MB',
-                    seconds=300.0,
+                    'resource-watchdog',
+                    reason=f'WATCHDOG_RSS_{rss}_CGROUP_{cgroup_used}',
+                    seconds=90.0,
                 )
                 now_mono = time.monotonic()
-                min_shed_gap = (
-                    20.0 if float(rss) >= _RESOURCE_WATCHDOG_EMERGENCY_MB else 90.0
+                emergency = bool(
+                    (rss is not None and float(rss) >= _RESOURCE_WATCHDOG_EMERGENCY_MB)
+                    or (cgroup_limit is not None and cgroup_used is not None
+                        and cgroup_limit - cgroup_used < 80.0)
                 )
+                min_shed_gap = 20.0 if emergency else 90.0
                 if now_mono - _RESOURCE_WATCHDOG_LAST_SHED_AT >= min_shed_gap:
                     _RESOURCE_WATCHDOG_LAST_SHED_AT = now_mono
-                    _shed_recreatable_memory(
-                        reason=f'watchdog:{float(rss):.1f}MB',
-                        aggressive=float(rss) >= _RESOURCE_WATCHDOG_EMERGENCY_MB,
-                    )
+                    # Nunca vaciar cachés auxiliares que un análisis está usando.
+                    if owner is None:
+                        _shed_recreatable_memory(
+                            reason=f'watchdog:rss={rss}:cg={cgroup_used}',
+                            aggressive=emergency,
+                        )
         except Exception as exc:
             logger.warning('resource watchdog: %s', exc)
         time.sleep(_RESOURCE_WATCHDOG_INTERVAL_SECONDS)
@@ -38387,7 +38572,7 @@ def api_futures_analyze():
             'last_closed_display': last_closed_display,
             'data': partial_data,
             'job_state': job_state,
-            'retry_after_ms': 3000,
+            'retry_after_ms': 12000 if job_state in ('DEFERRED','RESOURCE_BACKOFF','BACKOFF','BUSY') else 5000,
             'error': (
                 'Preparando gráficos Futures en segundo plano. '
                 'La página seguirá disponible mientras termina el análisis.'
@@ -47336,6 +47521,10 @@ def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=N
         # evidence; only a positive ACK can rescue that terminal row.
         if state not in ('SENT', 'PENDING', 'FAILED_RETRYABLE') and not acknowledged:
             continue
+        # Una fila PENDING sin persistencia remota no sobreviviría a un OOM.
+        # Solo enseñar el registro oficial duradero o ACK de Telegram.
+        if item.get('_c35_remote_persisted') is False and not acknowledged:
+            continue
         signal = item.get('signal') or {}
         if not isinstance(signal, dict):
             continue
@@ -48779,6 +48968,22 @@ def _ai_learning_slot(now=None):
     return f"{now.strftime('%Y-%m-%d')}T{bucket:02d}"
 
 
+def _c36_allow_web_scientist():
+    """Non-operational LLM research should not destabilize 512 MiB LIVE.
+
+    Incremental signal learning/lifecycle remain enabled. On Free the 6-hour
+    Scientist can run in SmartTradingResearch instead of loading all its
+    scientific dependencies into the real-time web worker. Explicit opt-in
+    AI_SCIENTIST_WEB_ENABLED=1 restores the original behaviour.
+    """
+    override = str(os.environ.get('AI_SCIENTIST_WEB_ENABLED', '')).lower().strip()
+    if override in ('0', 'false', 'no', 'off'):
+        return False
+    if override in ('1', 'true', 'yes', 'on'):
+        return True
+    return not _LOW_MEMORY_MODE
+
+
 def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
     """
     H.2 — Learning Scientist continuo y recuperable.
@@ -48787,6 +48992,9 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
     gratuito configurado de 6 usos/día. q6_job_runs evita duplicar llamadas
     dentro del mismo slot y permite recuperar FAILED/RUNNING abandonados.
     """
+    if not _c36_allow_web_scientist():
+        _ai_learning_runtime_update(status='EXTERNAL_RESEARCH_PRIORITY_C36', last_error=None)
+        return False
     claimed = False
     attempt_utc = datetime.now(timezone.utc).isoformat()
     _ai_learning_runtime_update(
@@ -49005,6 +49213,10 @@ def _ensure_ai_learning_scientist_thread():
     global _AI_SCIENTIST_THREAD_STARTED
     if os.environ.get('DISABLE_SCHEDULER'):
         _ai_learning_runtime_update(status='DISABLED_BY_ENV')
+        return False
+    if not _c36_allow_web_scientist():
+        _ai_learning_runtime_update(status='EXTERNAL_RESEARCH_PRIORITY_C36')
+        print('🛡️ [C36] Scientist pesado fuera de Render 512MiB; learning-worker y señales LIVE siguen activos.', flush=True)
         return False
     with _AI_SCIENTIST_THREAD_LOCK:
         if _AI_SCIENTIST_THREAD_STARTED:
@@ -61687,6 +61899,16 @@ _COMMIT_33_4_4_BOOTSTRAP = _bootstrap_core_33_4_4()
 _APP_PY_RUNTIME_VERSION = 'COMMIT35_CORE_RESOURCE_RELIABILITY_V1'
 print(f"✅ [33.4.6] resource/UI governance sobre núcleo canónico 33.4.4: {_COMMIT_33_4_4_BOOTSTRAP}", flush=True)
 
+def _c36_scheduler_snapshot():
+    with _C36_SCHED_METRICS_LOCK:
+        return {
+            'admitted': _C36_SCHED_METRICS['admitted'],
+            'deferred': _C36_SCHED_METRICS['deferred'],
+            'reasons': dict(_C36_SCHED_METRICS['reasons']),
+            'last_deferred': dict(_C36_SCHED_METRICS['last_deferred'] or {}),
+        }
+
+
 # Commit 35: observabilidad ligera para auditar el presupuesto REAL.
 # No analiza mercados, no consulta Supabase y no devuelve configuraciones secretas.
 @app.route('/api/commit35/resource-health', methods=['GET'])
@@ -61708,6 +61930,7 @@ def api_commit35_resource_health():
             'start_heavy_safe':bool(budget.get('safe')),
             'heavy_job':state.get('heavy_job'),
             'threads':state.get('threads'),
+            'commit36_scheduler':_c36_scheduler_snapshot(),
             'signal_caches':{
                 'futures':len((_futures_analysis_cache.get('data') or {}).get('analysis') or {}),
                 'multiasset':len(_MULTI_ASSET_CACHE.get('analysis') or {}),

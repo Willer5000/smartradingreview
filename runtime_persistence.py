@@ -30,6 +30,35 @@ _RC8_MACRO_WRITE = {'digest': None, 'ts': 0.0}
 _RC8_IDENTICAL_WRITE_SECONDS = 900.0
 _RC83_READ_CACHE = {}
 _RC83_READ_CACHE_TTL = 300.0
+# C36: cache de lectura es una optimización, nunca la fuente de verdad. El
+# diccionario anterior crecía sin límite y duplicaba payloads JSONB del outbox.
+_RC83_READ_CACHE_MAX_ENTRIES = 12
+_RC83_READ_CACHE_MAX_BYTES = 1024 * 1024
+_RC83_READ_CACHE_MAX_ITEM_BYTES = 256 * 1024
+
+
+def _cache_runtime_read_locked(key, value):
+    """O(1) por snapshot normal; límite duro para réplicas JSON en memoria.
+
+    Llamar únicamente bajo _RC8_WRITE_LOCK. Evita retener varias réplicas de
+    payloads extensos (confirmaciones, gráficos, históricos). En los fallos de
+    cache no se pierden datos porque Supabase sigue siendo la autoridad.
+    """
+    if not isinstance(value, dict):
+        return
+    try:
+        estimate = len(json.dumps(value, ensure_ascii=False, default=str))
+    except (TypeError, ValueError, OverflowError, MemoryError):
+        return
+    if estimate > _RC83_READ_CACHE_MAX_ITEM_BYTES:
+        _RC83_READ_CACHE.pop(key, None)
+        return
+    _RC83_READ_CACHE.pop(key, None)
+    _RC83_READ_CACHE[key] = {'ts': time.monotonic(), 'value': value, 'size': estimate}
+    while len(_RC83_READ_CACHE) > _RC83_READ_CACHE_MAX_ENTRIES or sum(
+        row.get('size', 0) for row in _RC83_READ_CACHE.values()
+    ) > _RC83_READ_CACHE_MAX_BYTES:
+        _RC83_READ_CACHE.pop(next(iter(_RC83_READ_CACHE)), None)
 _RC83_MACRO_READ_CACHE = {'ts': 0.0, 'value': []}
 
 
@@ -94,15 +123,12 @@ def save_runtime_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, 
             ).execute()
         with _RC8_WRITE_LOCK:
             _RC8_SNAPSHOT_WRITES[cache_key] = {'digest': digest, 'ts': time.monotonic()}
-            _RC83_READ_CACHE[cache_key] = {
-                'ts': time.monotonic(),
-                'value': {
-                    'payload': dict(payload),
-                    'updated_at': row['updated_at'],
-                    'expires_at': row['expires_at'],
-                    'expired': False,
-                },
-            }
+            _cache_runtime_read_locked(cache_key, {
+                'payload': payload,
+                'updated_at': row['updated_at'],
+                'expires_at': row['expires_at'],
+                'expired': False,
+            })
         cleanup_ephemeral_storage()
         return True
     except Exception as exc:
@@ -117,7 +143,7 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
         cached = _RC83_READ_CACHE.get(cache_key) or {}
         if cached and (time.monotonic() - float(cached.get('ts') or 0.0)) < _RC83_READ_CACHE_TTL:
             value = cached.get('value')
-            if isinstance(value, dict):
+            if isinstance(value, dict) and (allow_expired or not value.get('expired')):
                 return dict(value)
     if db is None or bool(getattr(db, 'provider_restricted', lambda: False)()):
         if require_remote:
@@ -163,7 +189,7 @@ def load_runtime_snapshot(namespace: str, snapshot_key: str, *, allow_expired: b
         except Exception:
             pass
         with _RC8_WRITE_LOCK:
-            _RC83_READ_CACHE[cache_key] = {'ts': time.monotonic(), 'value': dict(value)}
+            _cache_runtime_read_locked(cache_key, value)
         return value
     except Exception as exc:
         print(f"⚠️ [PERSIST] runtime snapshot load {namespace}/{snapshot_key}: {exc}")
