@@ -202,9 +202,11 @@ def test_failed_persistence_blocks_telegram_enqueue():
     assert ns['_confirmed_signal_outbox']['event-a']['state']=='PENDING'
     assert ns['_confirmed_signal_outbox']['event-a']['_c35_remote_persisted'] is False
     ns['_save_confirmed_signal_outbox_to_disk']=lambda:True
-    # A freshly recorded event with remote success becomes deliverable.
-    assert ns['_confirmed_outbox_enqueue']('futures',{},'event-b') is not None
-    assert ns['_confirmed_signal_outbox']['event-b']['_c35_remote_persisted'] is True
+    # Commit 37 strengthens publication durability: the aggregate ACK alone
+    # is insufficient. A signal without an official signal_id MUST remain
+    # blocked until its independent per-ID snapshot can be stored remotely.
+    assert ns['_confirmed_outbox_enqueue']('futures',{},'event-b') is None
+    assert ns['_confirmed_signal_outbox']['event-b']['_c35_remote_persisted'] is False
 
 
 def test_signal_cards_do_not_schedule_analysis():

@@ -30033,21 +30033,12 @@ def multiasset_page():
 
 @app.route('/signal/<signal_id>')
 def signal_deep_link(signal_id):
-    """RC10.2 FINAL — enlace estable a UNA señal, no a la página genérica."""
-    from urllib.parse import urlencode
+    """Independent fast official-signal page; no market analyses in request."""
     market = str(request.args.get('market') or '').strip().lower()
-    symbol = str(request.args.get('symbol') or '').strip().upper().replace('/', '-')
-    timeframe = str(request.args.get('timeframe') or '').strip()
-    saved_signal_id = str(request.args.get('saved_signal_id') or '').strip()
-    params = {'signal_id': str(signal_id)}
-    if symbol:
-        params['symbol'] = symbol
-    if timeframe:
-        params['timeframe'] = timeframe
-    if saved_signal_id:
-        params['saved_signal_id'] = saved_signal_id
-    target = '/multiasset' if market == 'multiasset' else ('/futures' if market == 'futures' else '/')
-    return redirect(f"{target}?{urlencode(params)}")
+    if market not in ('spot','futures','multiasset') or not signal_id or len(signal_id) > 120:
+        return 'Identificador de señal inválido', 400
+    return render_template('official_signal.html', market=market, signal_id=signal_id)
+
 
 def _c36_official_spot_by_id(signal_id, now_utc=None):
     """Conferir una alerta SPOT oficial sin ejecutar análisis ni crear señales.
@@ -30058,6 +30049,15 @@ def _c36_official_spot_by_id(signal_id, now_utc=None):
     now = _parse_utc_iso(now_utc) if now_utc is not None else datetime.now(timezone.utc)
     with _confirmed_signal_outbox_lock:
         rows = [(str(key), dict(val)) for key, val in _confirmed_signal_outbox.items()]
+    # The per-ID durable row survives OOM, lost aggregate snapshots and
+    # rolling deployments. This is an exact DB lookup, not a signal analysis.
+    try:
+        from official_signal_store import get_official
+        remote = get_official(signal_id)
+        if remote and str(remote.get('market') or '').lower() == 'spot':
+            rows.insert(0, (str(remote.get('key') or signal_id), remote))
+    except Exception:
+        pass
     for key, item in rows:
         if str(item.get('market') or '') != 'spot':
             continue
@@ -30103,6 +30103,7 @@ def _c36_official_spot_by_id(signal_id, now_utc=None):
             'timeframe': tf, 'action': action, 'confidence': confidence,
             'entry': entry, 'stop_loss': sl, 'take_profit': tp,
             'source_candle_close_timestamp': close.isoformat(),
+            'source_candle_timestamp': sig.get('source_candle_timestamp'),
             'valid_until': until.isoformat(), 'source_authority': 'OFFICIAL_CONFIRMED_OUTBOX',
             'telegram_delivery_status': str(item.get('state') or '').upper(),
             'lane': lane, 'display_only': False,
@@ -30128,18 +30129,49 @@ def api_c36_official_signal_by_id(signal_id):
             row = _c36_official_spot_by_id(sid)
             if row:
                 return jsonify({'success': True, 'signal': row,
-                                'lane': row['lane'], 'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
+                                'lane': row['lane'], 'save_allowed': True, 'tradable': True, 'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
             return jsonify({'success': False, 'signal_id': sid,
                             'error': 'NOT_CURRENTLY_CONFIRMED_OR_TECHNICALLY_VALID'}), 404
         for lane in ('previous', 'active'):
-            for row in _confirmed_web_registry_rows_34_4(market, lane, 55):
-                if str(row.get('signal_id') or '') == sid:
-                    return jsonify({'success': True, 'signal': row,
-                                    'lane': 'confirmed' if lane == 'previous' else 'vigent',
-                                    'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
-        # Explicitly do not revive expired trades from Telegram history.
+            lookup = globals().get('_find_official_telegram_row_34_4')
+            if callable(lookup):
+                row = lookup(market, sid,
+                             'PREVIOUS_CONFIRMED' if lane == 'previous' else 'ACTIVE_CONFIRMED')
+            else:
+                # Standalone legacy tests / older embedding environments.
+                row = next((r for r in _confirmed_web_registry_rows_34_4(market, lane, 55)
+                            if str(r.get('signal_id') or '') == sid), None)
+            if row:
+                return jsonify({'success': True, 'signal': row,
+                                'save_allowed': True, 'tradable': True,
+                                'lane': 'confirmed' if lane == 'previous' else 'vigent',
+                                'source': 'OFFICIAL_CONFIRMED_OUTBOX'}), 200
+        # An official Telegram record remains readable as HISTORY after the
+        # technical expiry, but is not actionable or manually saveable.
+        try:
+            from official_signal_store import get_official
+            event = get_official(sid)
+        except Exception:
+            event = None
+        if event and str(event.get('market') or '').lower() == market:
+            original = event.get('signal') or {}
+            levels = original.get('levels') or {}
+            decision = original.get('decision') or {}
+            return jsonify({'success': True, 'signal_id': sid, 'lane': 'history',
+                            'save_allowed': False, 'tradable': False,
+                            'signal': {'signal_id': sid, 'market': market,
+                                       'symbol': original.get('symbol'),
+                                       'timeframe': original.get('timeframe'),
+                                       'action': decision.get('action') if isinstance(decision,dict) else decision,
+                                       'confidence': decision.get('confidence') if isinstance(decision,dict) else original.get('confidence'),
+                                       'entry': levels.get('entry'), 'stop_loss': levels.get('stop_loss'),
+                                       'take_profit': levels.get('take_profit'),
+                                       'leverage': levels.get('leverage'),
+                                       'valid_until': original.get('valid_until') or levels.get('valid_until'),
+                                       'source_authority': 'OFFICIAL_EXPIRED_HISTORY'}
+                            }), 200
         return jsonify({'success': False, 'signal_id': sid,
-                        'error': 'NOT_CURRENTLY_CONFIRMED_OR_TECHNICALLY_VALID'}), 404
+                        'error': 'OFFICIAL_RECORD_NOT_FOUND'}), 404
     except Exception as exc:
         return jsonify({'success': False, 'error': type(exc).__name__}), 503
 
@@ -33849,6 +33881,90 @@ def api_spot_signals_active():
         })
 
 
+
+def _c37_spot_official_cards(lane, now_utc=None):
+    """Read-only matching of Spot Telegram confirmations to the Spot web cards.
+
+    Never runs specialists or promotes a provisional/expired operation.
+    The 1D/1W window is based on the *source close*, not the Telegram ACK.
+    """
+    now = _parse_utc_iso(now_utc) if now_utc is not None else datetime.now(timezone.utc)
+    if now is None:
+        return {}
+    with _confirmed_signal_outbox_lock:
+        events = [dict(v) for v in _confirmed_signal_outbox.values()]
+    try:
+        from official_signal_store import recent_official_events
+        seen = {str(e.get('key') or '') for e in events}
+        for item in recent_official_events():
+            if str(item.get('market') or '') != 'spot':
+                continue
+            if str(item.get('key') or '') not in seen:
+                events.append(item)
+                seen.add(str(item.get('key') or ''))
+    except Exception:
+        pass
+    result = {}
+    for item in events:
+        if str(item.get('market') or '').lower() != 'spot':
+            continue
+        if str(item.get('state') or '').upper() not in ('SENT', 'PENDING', 'FAILED_RETRYABLE'):
+            continue
+        if item.get('_c35_remote_persisted') is False:
+            continue
+        signal = item.get('signal') or {}
+        if not isinstance(signal,dict) or signal.get('publication_eligible') is False or signal.get('source_candle_closed') is False or signal.get('is_executable') is False:
+            continue
+        if bool(signal.get('market_data_is_synthetic')):
+            continue
+        tf = str(signal.get('timeframe') or '')
+        seconds = _confirmed_signal_tf_seconds(tf)
+        if tf not in ('4h','12h','1D','1W') or not seconds:
+            continue
+        close = _parse_utc_iso(_confirmed_signal_close_timestamp(signal, tf))
+        if not close or close > now:
+            continue
+        age = (now-close).total_seconds()
+        is_fresh = age < seconds
+        if (lane == 'confirmed') != is_fresh:
+            continue
+        levels = signal.get('levels') or {}
+        until = _parse_utc_iso(signal.get('valid_until') or levels.get('valid_until'))
+        if until is None:
+            if not is_fresh:
+                continue  # Missing original technical TTL cannot authorize Vigentes.
+            until = close + timedelta(seconds=seconds)
+        if now >= until:
+            continue
+        decision = signal.get('decision') or {}
+        action = str(decision.get('action') or '').upper() if isinstance(decision,dict) else str(decision).upper()
+        try:
+            confidence = float(decision.get('confidence') or 0) if isinstance(decision,dict) else float(signal.get('confidence') or 0)
+            entry,sl,tp = (float(levels.get(k) or 0) for k in ('entry','stop_loss','take_profit'))
+        except (TypeError,ValueError):
+            continue
+        if confidence < 60 or action not in ('COMPRA_SPOT','VENTA_SPOT','LONG','SHORT'):
+            continue
+        bullish = action in ('COMPRA_SPOT','LONG')
+        if not (sl < entry < tp if bullish else tp < entry < sl):
+            continue
+        sid = str(signal.get('signal_id') or signal.get('source_signal_id') or levels.get('signal_id') or '')
+        if not sid:
+            continue
+        result['official-'+sid] = {
+            'signal_id': sid, 'symbol': signal.get('symbol'), 'timeframe': tf,
+            'decision': action, 'confidence': confidence, 'entry': entry,
+            'stop_loss': sl, 'take_profit': tp, 'activa': 1,
+            'candle_timestamp': signal.get('source_candle_timestamp'),
+            'source_candle_close_timestamp': close.isoformat(),
+            'valid_until': until.isoformat(),
+            'tiempo_restante': max(0, int((until-now).total_seconds())),
+            'source_authority': 'OFFICIAL_CONFIRMED_OUTBOX',
+            'telegram_delivery_status': str(item.get('state') or '').upper(),
+        }
+    return result
+
+
 @app.route('/api/spot/signals/vigent')
 def api_spot_signals_vigent():
     """Frozen older Spot confirmations that still retain original validity."""
@@ -33872,6 +33988,8 @@ def api_spot_signals_vigent():
                 for key, row in visible_cache.items()
                 if _spot_signal_snapshot_identity(row) in representative_ids
             }
+            for key, row in _c37_spot_official_cards('vigent').items():
+                visible_cache.setdefault(key, row)
             return jsonify({
                 'success': True,
                 'processing': False,
@@ -33883,6 +34001,7 @@ def api_spot_signals_vigent():
             })
 
         _trigger_spot_fast_restore()
+        official_vigent = _c37_spot_official_cards('vigent')
         if (
             not _LOW_MEMORY_MODE
             and not _PREV_SIGNALS_COMPUTING['running']
@@ -33894,10 +34013,10 @@ def api_spot_signals_vigent():
 
         return jsonify({
             'success': True,
-            'processing': True,
-            'total': 0,
-            'data': {},
-            'message': 'Preparando señales vigentes Spot en segundo plano.',
+            'processing': not bool(official_vigent),
+            'total': len(official_vigent),
+            'data': official_vigent,
+            'message': 'Señales oficiales recuperadas; el resto del snapshot sigue en segundo plano.',
             'timestamp': datetime.now(bolivia_tz).isoformat(),
         })
     except Exception as exc:
@@ -33952,6 +34071,8 @@ def api_previous_signals():
                     and _spot_signal_snapshot_identity(row) in representative_ids
                 )
             }
+            for key, row in _c37_spot_official_cards('confirmed').items():
+                frontend_cache.setdefault(key, row)
             return jsonify({
                 'success': True,
                 'data': frontend_cache,
@@ -33967,6 +34088,7 @@ def api_previous_signals():
         # LOW_MEMORY_MODE ya no significa "esperar 20 minutos sin intentar
         # nada": la lectura compacta de Supabase es segura y barata.
         _trigger_spot_fast_restore()
+        official_confirmed = _c37_spot_official_cards('confirmed')
         if (
             not _LOW_MEMORY_MODE
             and not _PREV_SIGNALS_COMPUTING['running']
@@ -33977,10 +34099,10 @@ def api_previous_signals():
             print("🪶 [SPOT] Sin caché RAM: fast restore solicitado; cálculo completo queda fuera del request web")
         return jsonify({
             'success': True,
-            'processing': True,
+            'processing': not bool(official_confirmed),
             'processing_age_seconds': _spot_previous_processing_age(),
-            'data': {},
-            'message': 'Preparando el primer snapshot Spot en segundo plano.',
+            'data': official_confirmed,
+            'message': 'Señales oficiales persistidas; el resto del snapshot está en segundo plano.',
             'timestamp': datetime.now(bolivia_tz).isoformat()
         })
     except Exception as e:
@@ -44371,10 +44493,14 @@ def api_futures_signals_active():
                 'decision_audit': _futures_decision_audit_for_api(record)
             })
 
+        # A web representative is one per cell, but each DISTINCT Telegram
+        # confirmation is an official event. Deduplicate the local snapshot
+        # first; then merge all official event IDs (never suppress a second
+        # confirmed Telegram signal merely for sharing symbol/timeframe).
+        active_signals = _dedupe_representative_signals(active_signals)
         _registry_merge = globals().get('_merge_official_telegram_rows_34_4')
         if callable(_registry_merge):
             active_signals = _registry_merge(active_signals, 'futures', 'active', min_conf)
-        active_signals = _dedupe_representative_signals(active_signals)
         if active_signals:
             warming_up = False
         active_signals.sort(
@@ -46805,6 +46931,13 @@ def _save_confirmed_signal_outbox_to_disk():
 def _confirmed_outbox_enqueue(market, signal, key):
     now = time.time()
     compact = _compact_confirmed_outbox_signal(market, signal)
+    if not compact.get('signal_id'):
+        # Deterministic ID for an already-official CONFIRMATION event only.
+        # Without it, historical send paths produced unopenable Telegram
+        # links and could not store the new per-ID durable record. This does
+        # NOT promote an analysis-only hypothesis or invent trading levels.
+        import hashlib
+        compact['signal_id'] = 'official-' + hashlib.sha256(str(key).encode('utf-8')).hexdigest()[:24]
     with _confirmed_signal_outbox_lock:
         prior_ref = _confirmed_signal_outbox.get(key)
         prior = dict(prior_ref or {})
@@ -46838,6 +46971,12 @@ def _confirmed_outbox_enqueue(market, signal, key):
         }
         _confirmed_signal_outbox[key] = item
     saved = _save_confirmed_signal_outbox_to_disk()
+    if saved:
+        try:
+            from official_signal_store import persist_official
+            saved = bool(persist_official(item))
+        except Exception:
+            saved = False
     with _confirmed_signal_outbox_lock:
         if key in _confirmed_signal_outbox:
             _confirmed_signal_outbox[key]['_c35_remote_persisted'] = bool(saved)
@@ -46937,8 +47076,13 @@ def _attempt_confirmed_outbox_event_inner(key):
     if now < float(item.get('next_retry_at') or 0.0):
         return False
     if not bool(item.get('_c35_remote_persisted')):
-        if not _save_confirmed_signal_outbox_to_disk():
-            print('⚠️ [C35] Telegram diferido: outbox sin persistencia remota',flush=True)
+        try:
+            from official_signal_store import persist_official
+            persisted = bool(_save_confirmed_signal_outbox_to_disk()) and bool(persist_official(item))
+        except Exception:
+            persisted = False
+        if not persisted:
+            print('⚠️ [OFFICIAL] Telegram diferido: señal aún sin persistencia individual remota', flush=True)
             return False
         with _confirmed_signal_outbox_lock:
             if key in _confirmed_signal_outbox:
@@ -46982,6 +47126,14 @@ def _attempt_confirmed_outbox_event_inner(key):
             if event_key in _confirmed_signal_outbox:
                 _confirmed_signal_outbox[event_key].update(state='SENT', updated_at=now, last_error=None)
         _save_confirmed_signal_outbox_to_disk()
+        try:
+            from official_signal_store import persist_official
+            with _confirmed_signal_outbox_lock:
+                sent_copy = dict(_confirmed_signal_outbox.get(event_key) or {})
+            if sent_copy:
+                persist_official(sent_copy)
+        except Exception:
+            pass  # positive Telegram ACK already recorded in durable dedup
         return True
 
     with _confirmed_signal_outbox_lock:
@@ -47490,7 +47642,7 @@ def _confirmed_signal_preferences_allow(market, timeframe):
     return bool(users)
 
 
-def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=None):
+def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=None, direct_events=None):
     """Official queued/sent confirmations rendered without needing current analysis.
 
     Transport and UI read the SAME existing durable outbox (Supabase restored
@@ -47505,6 +47657,26 @@ def _confirmed_web_registry_rows_34_4(market, lane, min_confidence=55, now_utc=N
         return []
     with _confirmed_signal_outbox_lock:
         events = [(str(key), dict(row)) for key, row in _confirmed_signal_outbox.items()]
+    if direct_events:
+        for row in direct_events:
+            if isinstance(row, dict):
+                events.append((str(row.get('key') or ''), row))
+    # Aggregate runtime snapshot can be overwritten by a concurrent Render
+    # deployment. Individual signal rows are independent durable records.
+    # Load index at most once per 120s for ALL three markets (<=120 rows).
+    try:
+        from official_signal_store import recent_official_events
+        durable = recent_official_events()
+        existing = {key for key, _ in events}
+        for item in durable:
+            if str(item.get('market') or '').lower() != market:
+                continue
+            key = str(item.get('key') or '')
+            if key not in existing:
+                events.append((key, item))
+                existing.add(key)
+    except Exception:
+        pass
     with _confirmed_signal_alerts_lock:
         delivered = set(_confirmed_signal_alerts_sent)
     results = []
@@ -47715,8 +47887,24 @@ def _find_official_telegram_row_34_4(market, source_id, source_context):
     sid = str(source_id or '')
     if not sid:
         return None
-    return next((row for row in _confirmed_web_registry_rows_34_4(market, lane, 55)
-                 if str(row.get('signal_id') or '') == sid), None)
+    found = next((row for row in _confirmed_web_registry_rows_34_4(market, lane, 55)
+                  if str(row.get('signal_id') or '') == sid), None)
+    if found:
+        return found
+    # Independent exact-ID recovery: cache the official event only if the
+    # same validated lane contains it. No invented entry/expiry or strategy.
+    try:
+        from official_signal_store import get_official
+        event = get_official(sid)
+        if event and str(event.get('market') or '') == market:
+            # One-off validation without appending a potentially unbounded
+            # history of remote ID lookups to the resident outbox dictionary.
+            return next((row for row in _confirmed_web_registry_rows_34_4(
+                             market, lane, 55, direct_events=[event])
+                         if str(row.get('signal_id') or '') == sid), None)
+    except Exception:
+        pass
+    return None
 
 
 def _send_confirmed_signal_telegram(market, signal):
@@ -56073,6 +56261,14 @@ def futures_standard_alert_loop():
         try:
             # 17.5.10: delivery retry is independent from analysis completion.
             _retry_confirmed_signal_outbox(limit=3)
+            # Commit 37: refresh bounded per-ID official index on this ALREADY
+            # existing worker, never on frontend requests, so web/Telegram
+            # parity does not cause 502/HTTP blocking or an additional daemon.
+            try:
+                from official_signal_store import recent_official_events
+                recent_official_events(refresh=True)
+            except Exception as _index_err:
+                print(f'⚠️ [OFFICIAL] index refresh: {type(_index_err).__name__}', flush=True)
             # Commit 12: piggyback Multi-Activo on this existing daemon. No
             # additional worker/thread is created; scanner is TTL-cached.
             _multiasset_background_tick()

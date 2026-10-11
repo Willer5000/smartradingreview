@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Señal oficial · SmartTradingReview</title>
+  <style>
+    :root{color-scheme:dark}body{font:15px system-ui,-apple-system,'Segoe UI',sans-serif;background:#0b1019;color:#eff4ff;margin:0;padding:20px}
+    main{max-width:720px;margin:24px auto;padding:25px;background:#151e2b;border:1px solid #34475a;border-radius:14px}
+    h1{font-size:1.4rem}a{color:#71b5ff}section{background:#101825;margin:18px 0;padding:16px;border-radius:9px}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.cell{background:#17263a;padding:10px;border-radius:6px;overflow-wrap:anywhere}
+    .label{display:block;color:#9baec6;font-size:12px;margin-bottom:5px}.val{font-weight:700;font-size:1.1rem}
+    button{background:#168d65;border:0;border-radius:7px;color:white;padding:12px 20px;cursor:pointer;font-weight:bold}
+    button:disabled{background:#586578;cursor:not-allowed}input{width:130px;max-width:95%;background:#101722;color:white;border:1px solid #607289;border-radius:5px;padding:9px}
+    .warn{color:#ffd080}.ok{color:#98e8bb}.muted{color:#aebbc8}#status{line-height:1.6}
+  </style>
+</head>
+<body>
+<main>
+ <h1>📈 SmartTradingReview · Señal oficial</h1>
+ <p class="muted">Consulta independiente del análisis pesado. Los niveles son los originales de la confirmación; nunca se recalculan al abrir el enlace.</p>
+ <p id="status" role="status">Consultando el registro oficial…</p>
+ <section id="details" hidden>
+  <h2 id="heading"></h2><div class="grid" id="fields"></div>
+  <p id="timing" class="warn"></p>
+ </section>
+ <section id="save" hidden>
+  <h3>Guardar una confirmación vigente</h3>
+  <p class="muted">Es necesario haber iniciado sesión. Guardar no ejecuta una orden de bolsa. No se permiten nuevas operaciones sobre señales vencidas.</p>
+  <label>Inversión USDT <input id="investment" type="number" min="1" value="10" step="any"></label>
+  <p><button id="savebtn" type="button">🔖 Guardar señal</button></p>
+  <p id="saveStatus" role="status"></p>
+ </section>
+ <p id="nav"></p>
+</main>
+<script>
+(function(){'use strict';
+const id={{ signal_id|tojson }}, market={{ market|tojson }};
+const $=id=>document.getElementById(id);
+const url='/api/signals/official/'+encodeURIComponent(id)+'?market='+encodeURIComponent(market);
+const set=(el,text)=>{el.textContent=String(text===undefined||text===null?'—':text)};
+const num=x=>{let v=Number(x);return Number.isFinite(v)?v.toLocaleString('es-AR',{maximumFractionDigits:8}):'—'};
+let signal=null, allowed=false;
+set($('nav'),'');
+const a=document.createElement('a');a.href=market==='futures'?'/futures':market==='multiasset'?'/multiasset':'/';a.textContent='← Volver al mercado '+market.toUpperCase();$('nav').appendChild(a);
+function field(label,value){let el=document.createElement('div');el.className='cell';let l=document.createElement('span');l.className='label';set(l,label);let v=document.createElement('span');v.className='val';set(v,value);el.append(l,v);$('fields').appendChild(el)}
+async function run(){
+ try{
+  const controller=new AbortController();const timer=setTimeout(()=>controller.abort(),10000);
+  let res;try{res=await fetch(url,{cache:'no-store',credentials:'same-origin',signal:controller.signal})}finally{clearTimeout(timer)}
+  const data=await res.json();if(!data.success){throw Error(data.error||'Sin registro oficial disponible')}
+  signal=data.signal||{};allowed=Boolean(data.save_allowed) && data.lane!=='history';
+  set($('status'),data.lane==='confirmed'?'✅ Nueva confirmación vigente':data.lane==='vigent'?'🟡 Confirmación anterior técnicamente vigente':'⌛ Señal expirada: consulta histórica, no operativa');
+  if(!allowed)$('status').className='warn';else $('status').className='ok';
+  set($('heading'),`${signal.symbol||'—'} · ${signal.timeframe||'—'} · ${signal.action||'—'}`);
+  const fields=[['Mercado',market],['Confianza',(signal.confidence??'—')+'%'],['Entry',num(signal.entry)],['Stop Loss',num(signal.stop_loss)],['Take Profit',num(signal.take_profit)],['Apalancamiento',signal.leverage?signal.leverage+'x':'—'],['ID de señal',signal.signal_id||id]];
+  fields.forEach(x=>field(...x));set($('timing'),'Vigencia técnica original: '+(signal.valid_until||'no disponible'));
+  $('details').hidden=false;
+  // Spot uses its own trade/portfolio save flow; never pass Spot through futures API.
+  $('save').hidden=!allowed||market==='spot';
+ }catch(e){set($('status'),'⚠️ No se pudo comprobar la señal oficial: '+(e?.message||e));$('status').className='warn'}
+}
+$('savebtn').addEventListener('click',async()=>{
+ if(!signal||!allowed||market==='spot')return;
+ const amt=Number($('investment').value);if(!(amt>0)){set($('saveStatus'),'Introduce una inversión positiva.');return}
+ $('savebtn').disabled=true;set($('saveStatus'),'Guardando desde el registro oficial…');
+ try{
+  const payload={market,symbol:signal.symbol,timeframe:signal.timeframe,
+   action:signal.action,confidence:signal.confidence,
+   entry:signal.entry,stop_loss:signal.stop_loss,take_profit:signal.take_profit,
+   original_entry:signal.entry,original_stop_loss:signal.stop_loss,
+   original_take_profit:signal.take_profit,original_leverage:signal.leverage,
+   leverage:signal.leverage,investment_usdt:amt,
+   candle_timestamp:signal.source_candle_timestamp||signal.source_candle_close_timestamp,
+   source_valid_until:signal.valid_until,source_signal_id:signal.signal_id||id,
+   source_context:signal.source_context||(signal.lane==='vigent'?'ACTIVE_CONFIRMED':'PREVIOUS_CONFIRMED'),
+   execution_origin:'SYSTEM_EXECUTABLE',system_executable:true,
+   risk_class:signal.risk_class||'PREMIUM',already_in_position:false};
+  const resp=await fetch('/api/saved_signals',{method:'POST',credentials:'same-origin',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const result=await resp.json();if(!resp.ok||result.success===false)throw Error(result.error||'Error HTTP '+resp.status);
+  set($('saveStatus'),'✅ Señal guardada correctamente. Puedes consultarla en el panel de Guardadas.');
+ }catch(e){set($('saveStatus'),'⚠️ No se pudo guardar: '+(e?.message||e));$('savebtn').disabled=false}
+});run();
+})();
+</script>
+</body></html>

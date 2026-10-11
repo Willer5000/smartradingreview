@@ -155,9 +155,12 @@ class TelegramWebParity(unittest.TestCase):
             'valid_until':(close+timedelta(hours=4)).isoformat()}}
         self.assertFalse(fn(item, self.now.timestamp()))
         item['signal']['valid_until']=(close+timedelta(minutes=30)).isoformat()
-        self.assertTrue(fn(item, self.now.timestamp()))
-        item['state']='FAILED_RETRYABLE'
+        # Commit34.5 retained sent events for 24h after technical expiration
+        # for non-tradable audit, rather than deleting them immediately.
         self.assertFalse(fn(item, self.now.timestamp()))
+        self.assertTrue(fn(item, self.now.timestamp()+25*3600))
+        item['state']='FAILED_RETRYABLE'
+        self.assertFalse(fn(item, self.now.timestamp()+25*3600))
 
     def test_multi_official_cache_has_save_button_authority(self):
         g=namespace('_multiasset_signal_row')

@@ -76,6 +76,9 @@ class ActiveApiTests(unittest.TestCase):
             'jsonify':lambda payload:payload,
             'pd':pd, 'datetime':datetime, 'bolivia_tz':timezone.utc,
             '_get_or_refresh_futures_analysis':lambda:cache,
+            # Commit35 read-only UI contract replaces the historical
+            # heavy refresh entry point. This mock must follow production.
+            '_get_futures_analysis_snapshot_read_only':lambda:cache,
             '_build_futures_analysis_visibility':lambda *a,**kw:{'summary':{},'candidates':[]},
             '_futures_manual_risk_profile':lambda row:{'allowed':False},
             '_futures_frontend_representative_ids':lambda cache:{'s1'} if representative else set(),

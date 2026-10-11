@@ -29,6 +29,7 @@ class EndpointContractTest(unittest.TestCase):
             '_MULTI_ASSET_CACHE':{'lock':__import__('threading').Lock(),'analysis':{}},
             '_multiasset_directional_diagnostics_17511':lambda analyses:[],
             '_public_pipeline_health_175103':lambda analyses:{},
+            '_confirmed_web_recent_history_34_5':lambda market:[],
             '_multiasset_is_executable':lambda result:bool(result.get('official')),
             '_multiasset_signal_temporal_state':lambda result:result.get('temporal',{}),
             '_multiasset_signal_row':lambda result,src:{'signal_id':result['signal_id'],'confidence':87,'source_context':src},
