@@ -31525,6 +31525,35 @@ def _commit346_inactive_file_mb():
     return 0.0
 
 
+# COMMIT36R — observation only: no new worker, allocations or signal changes.
+def _commit36r_memory_breakdown():
+    """Read Linux cgroup counters to distinguish Python RSS from file cache.
+
+    `memory.current` includes page cache, kernel, sockets and other processes.
+    No part of this function makes an admission/publication decision.
+    """
+    details = {}
+    path = '/sys/fs/cgroup/memory.stat'
+    try:
+        with open(path, 'r', encoding='ascii') as fh:
+            for line in fh:
+                key, _, raw = line.partition(' ')
+                if key in {'anon', 'file', 'shmem', 'inactive_file',
+                           'active_file', 'slab', 'sock', 'kernel_stack'}:
+                    details[key + '_mb'] = round(int(raw.strip()) / 1048576.0, 1)
+    except (OSError, ValueError):
+        pass
+    try:
+        with open('/sys/fs/cgroup/memory.events', 'r', encoding='ascii') as fh:
+            for line in fh:
+                key, _, raw = line.partition(' ')
+                if key in {'oom', 'oom_kill', 'high'}:
+                    details['events_' + key] = int(raw.strip())
+    except (OSError, ValueError):
+        pass
+    return details
+
+
 def _commit346_cgroup_budget(reserve_mb=96.0):
     """Check hard physical headroom AND conservatively reclaimable page-cache.
 
@@ -62123,6 +62152,7 @@ def api_commit35_resource_health():
             'raw_headroom_mb':budget.get('raw_headroom_mb'),
             'effective_headroom_mb':budget.get('effective_headroom_mb'),
             'inactive_file_mb':budget.get('inactive_file_mb'),
+            'cgroup_breakdown':_commit36r_memory_breakdown(),
             'start_heavy_safe':bool(budget.get('safe')),
             'heavy_job':state.get('heavy_job'),
             'threads':state.get('threads'),

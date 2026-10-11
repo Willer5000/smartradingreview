@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from contextlib import closing
 import threading
 import time
 import hashlib
@@ -64,8 +65,15 @@ def _conn() -> sqlite3.Connection:
     if directory:
         os.makedirs(directory, exist_ok=True)
     con = sqlite3.connect(_DB_PATH, timeout=1.5, check_same_thread=False)
-    con.execute("PRAGMA journal_mode=WAL")
+    # SQLite's connection context manager commits/rolls back but does NOT
+    # close the handle. Callers explicitly close via contextlib.closing.
+    # Keep WAL bounded: recurring JSONB snapshots otherwise accumulate WAL
+    # file-cache pages charged against Render's 512-MiB memory cgroup.
+    if not _INIT:
+        con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA wal_autocheckpoint=64")
+    con.execute("PRAGMA journal_size_limit=2097152")
     if not _INIT:
         with _LOCK:
             if not _INIT:
@@ -107,7 +115,7 @@ def save_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, Any], *,
     now = _utc_now()
     expires = now + timedelta(seconds=max(300, int(ttl_seconds or 21600)))
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             con.execute(
                 """INSERT INTO runtime_snapshots(namespace,snapshot_key,payload,updated_at,expires_at)
                    VALUES(?,?,?,?,?)
@@ -132,7 +140,7 @@ def save_snapshot(namespace: str, snapshot_key: str, payload: Dict[str, Any], *,
 
 def load_snapshot(namespace: str, snapshot_key: str, *, allow_expired: bool = False) -> Optional[Dict[str, Any]]:
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             row = con.execute(
                 "SELECT payload,updated_at,expires_at FROM runtime_snapshots WHERE namespace=? AND snapshot_key=? LIMIT 1",
                 (str(namespace)[:64], str(snapshot_key)[:128]),
@@ -172,7 +180,7 @@ def enqueue_rest(method: str, table: str, *, payload: Any = None, params: Option
     key = _op_key(method, table, payload, params)
     now = _utc_now().isoformat()
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             con.execute(
                 """INSERT OR IGNORE INTO rest_outbox(op_key,method,table_name,payload,params,prefer,created_at,attempts)
                    VALUES(?,?,?,?,?,?,?,0)""",
@@ -193,7 +201,7 @@ def enqueue_rest(method: str, table: str, *, payload: Any = None, params: Option
 def pending_outbox(limit: int = 100) -> List[Dict[str, Any]]:
     limit = max(1, min(500, int(limit or 100)))
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             rows = con.execute(
                 "SELECT op_key,method,table_name,payload,params,prefer,created_at,attempts,last_error FROM rest_outbox ORDER BY created_at ASC LIMIT ?",
                 (limit,),
@@ -213,7 +221,7 @@ def pending_outbox(limit: int = 100) -> List[Dict[str, Any]]:
 
 def mark_outbox_done(op_key: str) -> None:
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             con.execute("DELETE FROM rest_outbox WHERE op_key=?", (str(op_key),))
             con.commit()
     except Exception:
@@ -222,7 +230,7 @@ def mark_outbox_done(op_key: str) -> None:
 
 def mark_outbox_error(op_key: str, error: Any) -> None:
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             con.execute(
                 "UPDATE rest_outbox SET attempts=attempts+1,last_error=? WHERE op_key=?",
                 (str(error)[:300], str(op_key)),
@@ -235,7 +243,7 @@ def mark_outbox_error(op_key: str, error: Any) -> None:
 def status() -> Dict[str, Any]:
     snapshots = outbox = 0
     try:
-        with _LOCK, _conn() as con:
+        with _LOCK, closing(_conn()) as con, con:
             snapshots = int(con.execute("SELECT COUNT(*) FROM runtime_snapshots").fetchone()[0])
             outbox = int(con.execute("SELECT COUNT(*) FROM rest_outbox").fetchone()[0])
     except Exception:
