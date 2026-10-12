@@ -3904,10 +3904,33 @@ async function(detailsEl) {
             return;
         }
 
-        let html = '';
+        // C37.2 UI-only: los cinco cierres más recientes conservan la ficha
+        // gráfica BAJO DEMANDA. Los anteriores son resúmenes literales.
+        // No se altera el registro Supabase, los KPIs ni las operaciones activas.
+        const closedSorted = [...closed].sort((a, b) => {
+            const stamp = row => Date.parse(row.closed_at || row.updated_at || row.created_at || '') || 0;
+            return stamp(b) - stamp(a);
+        });
+        const detailedHistoryLimit = 5;
+        let html = `<div class="list-group-item bg-dark text-muted small">
+            Las ${Math.min(closedSorted.length, detailedHistoryLimit)} operaciones cerradas más recientes
+            permiten abrir su gráfico. Las anteriores se muestran en modo resumen;
+            todas continúan contabilizadas en los KPIs de Win Rate y PnL.
+        </div>`;
 
-        closed.forEach(
-            s => {
+        closedSorted.forEach(
+            (s, index) => {
+                const withChart = index < detailedHistoryLimit;
+                const safeNumber = (v) => {
+                    if (v === null || v === undefined || String(v).trim() === '') return '—';
+                    const n = Number(v);
+                    return Number.isFinite(n) ? futEscapeHtml(String(v)) : '—';
+                };
+                const summary = `<div class="small text-muted mt-1">
+                    Entry: <strong>${safeNumber(s.entry)}</strong> ·
+                    TP: <strong>${safeNumber(s.take_profit)}</strong> ·
+                    SL: <strong>${safeNumber(s.stop_loss)}</strong>
+                </div>`;
 
                 const emoji =
                     s.action === 'LONG'
@@ -3945,20 +3968,16 @@ async function(detailsEl) {
                         : '';                
                 
                 html += `
-                    <a
-                        href="#"
+                    ${withChart ? `<a
+                        href="#"` : `<div`
+                    }
                         class="
                             list-group-item
-                            list-group-item-action
+                            ${withChart ? 'list-group-item-action' : ''}
                             bg-dark
                             text-white
                         "
-                        onclick="
-                            event.preventDefault();
-                            window.openSavedSignalDetail(
-                                '${s.id}'
-                            );
-                        "
+                        ${withChart ? `onclick="event.preventDefault(); window.openSavedSignalDetail('${String(s.id || '').replace(/[^a-zA-Z0-9-]/g, '')}');"` : ''}
                     >
                         <div
                             class="
@@ -4022,9 +4041,11 @@ async function(detailsEl) {
                             </div>
                         </div>
 
+                        ${summary}
+                        ${withChart ? '<div class="small text-info mt-1">📈 Ver gráfico y ficha técnica</div>' : '<div class="small text-secondary mt-1">Resumen histórico · sin gráfico</div>'}
                         ${expiryMessage}
 
-                    </a>
+                    ${withChart ? '</a>' : '</div>'}
                 `;
             }
         );
