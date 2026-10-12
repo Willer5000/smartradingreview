@@ -3049,7 +3049,7 @@ function _h3ReleaseAnalysisLock(label) {
 }
 
 window.runCompleteAnalysis = function() {
-    if (document.hidden && window.IS_FUTURES_PAGE) {
+    if (document.hidden) {
         console.debug('⏸️ [33.4.6] análisis interactivo omitido: pestaña oculta.');
         return;
     }
@@ -10714,16 +10714,10 @@ window.updateActiveSignals = function updateActiveSignals() {
             }
 
             if (data.processing) {
-                // COMMIT36R: ACTIVE Spot is a provisional preview, not a
-                // confirmed/tradable signal. Re-polling every 5 s during
-                // cgroup pressure cannot make a heavy analysis finish sooner;
-                // it multiplies requests and memory-shed work on Render.
-                // Official Confirmadas/Vigentes and Telegram use independent
-                // refresh paths and are intentionally untouched.
                 const scheduled = _h3SpotPollSchedule(
                     'active',
                     () => window.updateActiveSignals(),
-                    20000
+                    5000
                 );
 
                 // Si ya existe un snapshot visible, jamás borrarlo por un refresh.
@@ -10831,7 +10825,7 @@ window.updateActiveSignals = function updateActiveSignals() {
         })
         .catch(error => {
             console.error('Error cargando señales activas:', error);
-            const scheduled = _h3SpotPollSchedule('active', () => window.updateActiveSignals(), 25000);
+            const scheduled = _h3SpotPollSchedule('active', () => window.updateActiveSignals(), 8000);
             if (!window.spotActiveSignalsLoaded) {
                 signalsList.innerHTML = `
                     <div class="list-group-item bg-dark text-warning text-center py-3">

@@ -31525,35 +31525,6 @@ def _commit346_inactive_file_mb():
     return 0.0
 
 
-# COMMIT36R — observation only: no new worker, allocations or signal changes.
-def _commit36r_memory_breakdown():
-    """Read Linux cgroup counters to distinguish Python RSS from file cache.
-
-    `memory.current` includes page cache, kernel, sockets and other processes.
-    No part of this function makes an admission/publication decision.
-    """
-    details = {}
-    path = '/sys/fs/cgroup/memory.stat'
-    try:
-        with open(path, 'r', encoding='ascii') as fh:
-            for line in fh:
-                key, _, raw = line.partition(' ')
-                if key in {'anon', 'file', 'shmem', 'inactive_file',
-                           'active_file', 'slab', 'sock', 'kernel_stack'}:
-                    details[key + '_mb'] = round(int(raw.strip()) / 1048576.0, 1)
-    except (OSError, ValueError):
-        pass
-    try:
-        with open('/sys/fs/cgroup/memory.events', 'r', encoding='ascii') as fh:
-            for line in fh:
-                key, _, raw = line.partition(' ')
-                if key in {'oom', 'oom_kill', 'high'}:
-                    details['events_' + key] = int(raw.strip())
-    except (OSError, ValueError):
-        pass
-    return details
-
-
 def _commit346_cgroup_budget(reserve_mb=96.0):
     """Check hard physical headroom AND conservatively reclaimable page-cache.
 
@@ -32217,11 +32188,12 @@ def _run_spot_analysis_singleflight(symbol, timeframe, owner, wait_seconds=18.0)
 _SPOT_INTRABAR_PREVIEW_CACHE = {}
 _SPOT_INTRABAR_PREVIEW_CACHE_LOCK = threading.Lock()
 _SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 4
+# C37: panel exploratorio; no es authority de vela cerrada.
 _SPOT_INTRABAR_PREVIEW_TTLS = {
-    '4h': 90,
-    '12h': 150,
-    '1D': 240,
-    '1W': 300,
+    '4h': 12 * 60,
+    '12h': 20 * 60,
+    '1D': 30 * 60,
+    '1W': 60 * 60,
 }
 
 # RC9.7.17 — la barra de Activas no debe depender de que el usuario pulse
@@ -35180,8 +35152,60 @@ def api_saved_signals_delete(signal_id):
 # OHLCV/DataFrame fetches every three minutes.
 _GUARDIAN_MARKET_CACHE_LOCK = threading.Lock()
 _GUARDIAN_MARKET_CACHE = {}
-_GUARDIAN_MARKET_CACHE_TTL_SECONDS = 90
+_GUARDIAN_MARKET_CACHE_TTL_SECONDS = 4 * 60
 _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS = 10 * 60
+# C37: prices are a separate lightweight channel; independent from candles.
+_GUARDIAN_MARK_PRICE_CACHE = {}
+_GUARDIAN_MARK_PRICE_LOCK = threading.Lock()
+_GUARDIAN_MARK_PRICE_TTL_SECONDS = max(10, min(90, int(os.getenv('GUARDIAN_MARK_PRICE_TTL_SECONDS', '25'))))
+
+
+def _guardian_recent_mark_price(symbol):
+    """Single-flight-ish bounded lightweight Futures/Multi ticker lookup.
+
+    It NEVER fetches OHLCV or calls analysis specialists, and is an optional
+    overlay onto a valid candle snapshot. No invented mark-price fallback.
+    """
+    key = str(symbol or '').strip().upper().replace('/', '-')
+    now = time.monotonic()
+    with _GUARDIAN_MARK_PRICE_LOCK:
+        item = _GUARDIAN_MARK_PRICE_CACHE.get(key)
+        if item and now - item[0] < _GUARDIAN_MARK_PRICE_TTL_SECONDS:
+            return item[1]
+    try:
+        fs = _configured_futures_module()
+        contract = (getattr(fs, 'FUTURES_CONTRACT_SYMBOLS', {}) or {}).get(key)
+        if not contract:
+            from multiasset_system import MULTIASSET_CONTRACT_SYMBOLS
+            contract = MULTIASSET_CONTRACT_SYMBOLS.get(key)
+        if not contract:
+            return None
+        resp = fs._get_futures_http_session().get(
+            fs.KUCOIN_FUTURES_MARK_PRICE_URL.format(symbol=contract), timeout=3,
+        )
+        resp.raise_for_status()
+        payload = resp.json() or {}
+        price = float(((payload.get('data') or {}).get('value')) or 0)
+        if str(payload.get('code')) != '200000' or not math.isfinite(price) or price <= 0:
+            return None
+        with _GUARDIAN_MARK_PRICE_LOCK:
+            _GUARDIAN_MARK_PRICE_CACHE[key] = (time.monotonic(), price)
+            if len(_GUARDIAN_MARK_PRICE_CACHE) > 40:
+                oldest = min(_GUARDIAN_MARK_PRICE_CACHE, key=lambda k: _GUARDIAN_MARK_PRICE_CACHE[k][0])
+                _GUARDIAN_MARK_PRICE_CACHE.pop(oldest, None)
+        return price
+    except Exception:
+        return None
+
+
+def _guardian_with_recent_price(symbol, snapshot):
+    """Refresh only live price; preserve unmodified closed candles for Guardian."""
+    result = dict(snapshot)
+    mark = _guardian_recent_mark_price(symbol)
+    result['price_is_live'] = mark is not None
+    if mark is not None:
+        result['current_price'] = mark
+    return result
 
 def _guardian_prepare_futures_market_data(futures_market, symbol, timeframe):
     """Compact closed-candle + live-price snapshot for Guardian.
@@ -35197,13 +35221,24 @@ def _guardian_prepare_futures_market_data(futures_market, symbol, timeframe):
     cached_age = now_mono - float(cached.get('_cached_at') or 0.0) if cached else 10**9
     if cached and cached_age <= _GUARDIAN_MARKET_CACHE_TTL_SECONDS:
         cached.pop('_cached_at', None)
-        return cached
+        return _guardian_with_recent_price(symbol, cached)
+
+    # C37: nunca levantar otro DataFrame de Guardian a la vez que el análisis
+    # oficial usa el único slot pesado. Se reutiliza estructura válida y se
+    # refresca sólo el mark price, sin bloquear cierre/Telegram.
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        other_heavy_running = _HEAVY_ANALYSIS_OWNER is not None
+    if other_heavy_running:
+        if cached and cached_age <= _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS:
+            cached.pop('_cached_at', None)
+            return _guardian_with_recent_price(symbol, cached)
+        return None
 
     rss = _process_rss_mb()
     if rss is not None and rss >= _MEMORY_JOB_START_LIMIT_MB:
         if cached and cached_age <= _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS:
             cached.pop('_cached_at', None)
-            return cached
+            return _guardian_with_recent_price(symbol, cached)
         print(
             f"⏸️ [GUARDIAN] {symbol} {timeframe}: ciclo diferido por RSS {rss:.1f}MB"
         )
@@ -35243,11 +35278,11 @@ def _guardian_prepare_futures_market_data(futures_market, symbol, timeframe):
                 )
                 for old_key, _ in oldest[:-10]:
                     _GUARDIAN_MARKET_CACHE.pop(old_key, None)
-        return compact
+        return _guardian_with_recent_price(symbol, compact)
     except Exception as exc:
         if cached and cached_age <= _GUARDIAN_MARKET_CACHE_STALE_MAX_SECONDS:
             cached.pop('_cached_at', None)
-            return cached
+            return _guardian_with_recent_price(symbol, cached)
         print(f"⚠️ [GUARDIAN] snapshot {symbol} {timeframe}: {str(exc)[:120]}")
         return None
 
@@ -35501,6 +35536,7 @@ def api_futures_position_guardian():
 
                         'current_price':
                             current_price,
+                        'price_is_live': bool(market_snapshot.get('price_is_live')),
 
                         'guardian':
                             advice
@@ -38390,7 +38426,7 @@ def api_multiasset_position_guardian():
                 advice=portfolio_guardian.evaluate_futures_position(signal=sig,current_price=snapshot['current_price'],candles=snapshot['candles'],macro_context=macro)
             else:
                 advice={'action':'WAIT_ENTRY','severity':'NONE','reason':'Guardian se activa cuando Entry queda realmente tocado.'}
-            positions.append({'signal_id':sig.get('id'),'symbol':symbol,'timeframe':tf,'action':sig.get('action'),'entry':sig.get('entry'),'stop_loss':sig.get('stop_loss'),'take_profit':sig.get('take_profit'),'current_price':snapshot['current_price'],'guardian':advice,'market':'multiasset'})
+            positions.append({'signal_id':sig.get('id'),'symbol':symbol,'timeframe':tf,'action':sig.get('action'),'entry':sig.get('entry'),'stop_loss':sig.get('stop_loss'),'take_profit':sig.get('take_profit'),'current_price':snapshot['current_price'],'price_is_live':bool(snapshot.get('price_is_live')),'guardian':advice,'market':'multiasset'})
         return jsonify({'success':True,'user':user,'positions':positions,'count':len(positions)})
     except Exception as exc:
         return jsonify({'success':False,'positions':[],'error':str(exc)[:180]}),500
@@ -39351,16 +39387,18 @@ _FUTURES_INTRABAR_ACTIVE_CACHE = {}
 _FUTURES_INTRABAR_DIAGNOSTIC_CACHE = {}
 _FUTURES_INTRABAR_ACTIVE_LOCK = threading.Lock()
 _FUTURES_INTRABAR_ACTIVE_TTL_SECONDS = max(180, int(os.environ.get(
-    'FUTURES_INTRABAR_ACTIVE_TTL_SECONDS', '420'
+    'FUTURES_INTRABAR_ACTIVE_TTL_SECONDS', '3600'
 ) or 420))
 _FUTURES_INTRABAR_RUNTIME_CACHE = {}
+# C37: caché exploratoria proporcional a temporalidad, no polling de
+# señales confirmadas ni cambios a valid_until o cierre oficial.
 _FUTURES_INTRABAR_REFRESH_SECONDS = {
-    '30m': 90,
-    '1h': 120,
-    '2h': 180,
-    '4h': 240,
-    '12h': 300,
-    '1D': 300,
+    '30m': 3 * 60,
+    '1h': 5 * 60,
+    '2h': 8 * 60,
+    '4h': 12 * 60,
+    '12h': 20 * 60,
+    '1D': 30 * 60,
 }
 
 
@@ -39746,9 +39784,12 @@ _INTERACTIVE_PAGE_PATHS = {
 def _hotfix16_1_navigation_priority():
     try:
         path = str(request.path or '')
-        if path in _INTERACTIVE_PAGE_PATHS:
-            _mark_system_interactive_priority(seconds=25)
-            print(f"🖥️ [UI PRIORITY] navegación {path}: pausa background 25s")
+        # C37: crawlers/reader bots must NEVER starve scheduled closed candles.
+        ua = str(request.headers.get('User-Agent') or '').lower()
+        if path in _INTERACTIVE_PAGE_PATHS and not any(
+            bot in ua for bot in ('bot', 'crawler', 'spider', 'read-aloud', 'headless')
+        ):
+            _mark_system_interactive_priority(seconds=6)
     except Exception:
         # Fail-open: nunca romper una petición por el mecanismo de prioridad.
         pass
@@ -39768,10 +39809,11 @@ def _get_futures_ui_cached(symbol, timeframe):
             return None
         age = now - float(item.get('ts') or 0)
         item_tf = str(item.get('timeframe') or str(key).split('|')[-1])
-        ttl = (
-            _FAST_FUTURES_UI_CACHE_TTL_SECONDS
-            if item_tf in _FAST_FUTURES_UI_POINTS
-            else _FUTURES_UI_CACHE_TTL_SECONDS
+        # C37: los gráficos siguen completos; el recálculo exploratorio
+        # heavy ocurre según TF y no cada navegación/cambio de pestaña.
+        ttl = max(
+            _FUTURES_UI_CACHE_TTL_SECONDS,
+            int(_FUTURES_INTRABAR_REFRESH_SECONDS.get(item_tf, 300)),
         )
         if age > ttl:
             _FUTURES_UI_CACHE['items'].pop(key, None)
@@ -45092,9 +45134,6 @@ def api_futures_signals_previous():
         
             'signals':
                 previous_signals,
-            # Read-only audit of actually SENT confirmations. Expired signals
-            # stay visible as history, NEVER actionable or re-confirmed.
-            'recent_official_history': _confirmed_web_recent_history_34_5('futures'),
         
             'progress': {
                 'total':
@@ -47853,22 +47892,7 @@ def _confirmed_web_recent_history_34_5(market, now_utc=None, max_rows=12):
     if now is None:
         return []
     with _confirmed_signal_outbox_lock:
-        events_by_key = {str(k): dict(v) for k,v in _confirmed_signal_outbox.items()}
-    # Recover an expired-but-SENT Telegram alert after an OOM or outbox pruning.
-    # The official DB index is memory-only here: no remote read on HTTP GET.
-    try:
-        from official_signal_store import recent_official_events
-        for event in recent_official_events():
-            if not isinstance(event, dict) or str(event.get('market') or '').lower() != market:
-                continue
-            key = str(event.get('key') or '')
-            current = events_by_key.get(key)
-            if current is None or (str(event.get('state') or '').upper() == 'SENT'
-                                   and str(current.get('state') or '').upper() != 'SENT'):
-                events_by_key[key] = event
-    except Exception:
-        pass
-    events = list(events_by_key.items())
+        events = [(str(k), dict(v)) for k,v in _confirmed_signal_outbox.items()]
     with _confirmed_signal_alerts_lock:
         delivered = set(_confirmed_signal_alerts_sent)
     rows = []
@@ -49227,6 +49251,9 @@ def _run_ai_learning_daily(q6_slot=None, trigger_source='daily'):
     gratuito configurado de 6 usos/día. q6_job_runs evita duplicar llamadas
     dentro del mismo slot y permite recuperar FAILED/RUNNING abandonados.
     """
+    if globals().get('_LIVE_ONLY_RUNTIME', True):
+        _ai_learning_runtime_update(status='DISABLED_LIVE_ONLY_C37', last_error=None)
+        return False
     if not _c36_allow_web_scientist():
         _ai_learning_runtime_update(status='EXTERNAL_RESEARCH_PRIORITY_C36', last_error=None)
         return False
@@ -49366,6 +49393,8 @@ def _q6_run_daily_review():
     under the single heavy lock duplicated work and could starve every Futures
     request for >200 s. The daily slot now coordinates Scientist/recovery only.
     """
+    if globals().get('_LIVE_ONLY_RUNTIME', True):
+        return  # C37: no learning claim/query on the production Render worker.
     if not _Q6_DAILY_LOCK.acquire(blocking=False):
         return
 
@@ -49446,6 +49475,9 @@ def ai_learning_scientist_watchdog_loop():
 def _ensure_ai_learning_scientist_thread():
     """Start the Scientist exactly once, independently of the bulk bootstrap."""
     global _AI_SCIENTIST_THREAD_STARTED
+    if globals().get('_LIVE_ONLY_RUNTIME', True):
+        _ai_learning_runtime_update(status='DISABLED_LIVE_ONLY_C37')
+        return False
     if os.environ.get('DISABLE_SCHEDULER'):
         _ai_learning_runtime_update(status='DISABLED_BY_ENV')
         return False
@@ -49478,6 +49510,8 @@ def _ensure_ai_learning_scientist_thread():
 
 def _kick_ai_learning_scientist_async(trigger_source='status-self-heal'):
     """Best-effort one-shot wake-up. claim_daily_job guarantees idempotency."""
+    if globals().get('_LIVE_ONLY_RUNTIME', True):
+        return False
     def _runner():
         try:
             _run_ai_learning_daily(q6_slot=None, trigger_source=trigger_source)
@@ -49823,7 +49857,8 @@ def ejecutar_analisis_completo(timeframe):
 # sobrevivir al reciclado normal del worker de Gunicorn.
 # ============================================================================
 
-GUARDIAN_TELEGRAM_CHECK_INTERVAL = 180       # 3 minutos
+GUARDIAN_TELEGRAM_CHECK_INTERVAL = max(30, min(180, int(os.getenv('GUARDIAN_CHECK_INTERVAL_SECONDS', '45'))))
+# C37: el ciclo vigila posiciones guardadas, NO emite nuevas confirmaciones.
 GUARDIAN_TELEGRAM_MIN_INTERVAL = 45 * 60     # 45 min entre gestiones no urgentes
 GUARDIAN_TELEGRAM_RETENTION = 7 * 24 * 3600  # 7 días
 
@@ -54053,6 +54088,7 @@ def monitor_guardian_telegram_loop():
     )
 
     while True:
+        urgent_guardian = False
 
         try:
 
@@ -54183,6 +54219,28 @@ def monitor_guardian_telegram_loop():
 
                         current_price = market_snapshot['current_price']
                         candles = market_snapshot['candles']
+
+                        # C37: proximidad al SL/TP únicamente ajusta el
+                        # próximo muestreo ligero; no altera el Guardian ni
+                        # publica señales nuevas. Si el precio no es nuevo
+                        # no inferimos cercanía usando un valor viejo.
+                        if market_snapshot.get('price_is_live'):
+                            for candidate in group:
+                                try:
+                                    ep = float(candidate.get('entry') or 0)
+                                    sl = float(candidate.get('stop_loss') or 0)
+                                    tp = float(candidate.get('take_profit') or 0)
+                                    px = float(current_price)
+                                    risk = abs(ep - sl)
+                                    if risk <= 0 or px <= 0:
+                                        continue
+                                    dist_sl = abs(px - sl)
+                                    dist_tp = abs(px - tp) if tp > 0 else float('inf')
+                                    if min(dist_sl, dist_tp) <= risk * 0.35:
+                                        urgent_guardian = True
+                                        break
+                                except (TypeError, ValueError, OverflowError):
+                                    pass
 
                         for sig in group:
 
@@ -54803,9 +54861,9 @@ def monitor_guardian_telegram_loop():
                 f"{e}"
             )
 
-        time.sleep(
-            GUARDIAN_TELEGRAM_CHECK_INTERVAL
-        )
+        # C37: 15 s sólo si existe una posición cercana al SL/TP. Sin
+        # posiciones urgentes, ciclo de 45 s; no se agrega un worker.
+        time.sleep(15 if urgent_guardian else GUARDIAN_TELEGRAM_CHECK_INTERVAL)
 
 # ============================================================================
 # COMMIT 31 — SPOT GUARDIAN PROACTIVO
@@ -55695,6 +55753,8 @@ def ejecutar_review_diario(q6_slot=None):
     - Recalcula estadísticas
     - Aplica optimizaciones de almacenamiento
     """
+    if globals().get('_LIVE_ONLY_RUNTIME', True):
+        return False  # Manual review histórico permanece disponible fuera de LIVE.
     try:
         print(f"\n{'#'*60}")
         print(f"# 🎓 EJECUTANDO REVIEWTRADER DIARIO - {datetime.now(bolivia_tz).strftime('%Y-%m-%d %H:%M:%S')}")
@@ -55932,7 +55992,11 @@ _BACKGROUND_LOCK = threading.Lock()
 # ============================================================================
 # LEARNING WORKER — evalúa periódicamente las señales pendientes
 # ============================================================================
-LEARNING_WORKER_INTERVAL = 30 * 60  # 30 minutos entre evaluaciones (antes 15min - reduce carga)
+# C37: Modelo LIVE-ONLY: suspende SOLO aprendizaje/investigación en Render.
+# No desactiva guardian, cierre de velas, lifecycle, Telegram ni asesor IA.
+# Para restaurar aprendizaje en un servidor separado: LIVE_ONLY_RUNTIME=0.
+_LIVE_ONLY_RUNTIME = str(os.getenv('LIVE_ONLY_RUNTIME', '1')).strip().lower() not in ('0','false','no','off')
+LEARNING_WORKER_INTERVAL = 30 * 60  # kept for optional standalone research runtime
 
 
 def learning_worker_loop():
@@ -56303,16 +56367,6 @@ def futures_standard_alert_loop():
     confirmation path.  No second Futures Entry/TP/SL Telegram event is emitted.
     """
     print('🎯 FUTURES lifecycle: shadow monitor activo · Telegram CONFIRMADA-only')
-    # Rebuild the compact, read-only official index at startup. On an OOM the
-    # aggregate outbox may be missing; waiting two minutes for the first loop
-    # previously made valid Telegram confirmations temporarily disappear.
-    # The same existing worker performs one bounded Supabase read (no new
-    # thread, strategy, or frontend-blocking network call).
-    try:
-        from official_signal_store import recent_official_events
-        recent_official_events(refresh=True)
-    except Exception as _index_boot_err:
-        print(f'⚠️ [OFFICIAL] startup index deferred: {type(_index_boot_err).__name__}', flush=True)
     time.sleep(120)
     while True:
         try:
@@ -58630,26 +58684,18 @@ def _start_background_threads():
     except Exception as e:
         print(f"⚠️ Error iniciando monitor_entries: {e}")
     
-    # 3. Learning worker: evalúa signals pendientes (TP/SL/Expired) cada 30 min
-    #    Antes SOLO se ejecutaba una vez al día en run_full_review, dejando
-    #    miles de signals en pending. Ahora las tablas de stats se llenan
-    #    conforme llegan resultados de operaciones.
-    try:
-        t3 = threading.Thread(target=learning_worker_loop, name='learning-worker', daemon=True)
-        t3.start()
-        print(
-            "✅ Thread learning_worker iniciado "
-            "(evalúa pending cada 30 min)"
-        )
-    except Exception as e:
-        print(f"⚠️ Error iniciando learning_worker: {e}")
-
-    # J.1: Scientist has its own idempotent starter and does not depend on
-    # the rest of the background bundle.
-    try:
-        _ensure_ai_learning_scientist_thread()
-    except Exception as e:
-        print(f"⚠️ Error iniciando AI Learning Scientist: {e}")
+    # C37: NO arrancar ReviewTrader learning/autopilot/investigación en
+    # LIVE-ONLY. La valoración de posiciones LIVE continúa en el ciclo
+    # saved_futures_lifecycle y en el Guardian. No se cambian señales.
+    if _LIVE_ONLY_RUNTIME:
+        print('🪶 [C37 LIVE] LearningWorker, autopilot y Scientist desactivados; señales/lifecycle/Guardian activos.')
+    else:
+        try:
+            t3 = threading.Thread(target=learning_worker_loop, name='learning-worker', daemon=True)
+            t3.start()
+            _ensure_ai_learning_scientist_thread()
+        except Exception as e:
+            print(f'⚠️ Error iniciando research opcional: {e}')
 
     # ==============================================================
     # 36N — SAVED FUTURES LIFECYCLE
@@ -62180,7 +62226,6 @@ def api_commit35_resource_health():
             'raw_headroom_mb':budget.get('raw_headroom_mb'),
             'effective_headroom_mb':budget.get('effective_headroom_mb'),
             'inactive_file_mb':budget.get('inactive_file_mb'),
-            'cgroup_breakdown':_commit36r_memory_breakdown(),
             'start_heavy_safe':bool(budget.get('safe')),
             'heavy_job':state.get('heavy_job'),
             'threads':state.get('threads'),

@@ -48,33 +48,6 @@ def _snapshot_payload(item: dict) -> dict:
     }}
 
 
-
-def _merge_index_rows(primary: list[dict], secondary: list[dict]) -> list[dict]:
-    """Keep unique, recently committed IDs when the DB index refresh races a write.
-
-    Runs on <= 240 small compact official events, no network or market data.
-    Ten-day TTL is still enforced by the remote runtime snapshot; this local
-    cache cannot make an expired setup tradable (web lifecycle validates it).
-    """
-    newest = {}
-    oldest_allowed = time.time() - TTL_SECONDS
-    for row in list(primary) + list(secondary):
-        if not isinstance(row, dict):
-            continue
-        sid = _sid(row)
-        if not sid:
-            continue
-        try:
-            updated = float(row.get('updated_at') or row.get('created_at') or 0)
-        except (TypeError, ValueError):
-            continue
-        if updated < oldest_allowed:
-            continue
-        existing = newest.get(sid)
-        if existing is None or updated > float(existing.get('updated_at') or existing.get('created_at') or 0):
-            newest[sid] = row
-    return sorted(newest.values(), key=lambda row: float(row.get('updated_at') or row.get('created_at') or 0), reverse=True)[:_INDEX_LIMIT]
-
 def persist_official(item: dict) -> bool:
     """Durable once-per-signal upsert; must succeed *before* Telegram delivery.
 
@@ -89,18 +62,8 @@ def persist_official(item: dict) -> bool:
         return False
     try:
         from runtime_persistence import save_runtime_snapshot
-        saved = bool(save_runtime_snapshot(NAMESPACE, sid, _snapshot_payload(item),
+        return bool(save_runtime_snapshot(NAMESPACE, sid, _snapshot_payload(item),
                                           ttl_seconds=TTL_SECONDS, require_remote=True))
-        if saved:
-            # A freshly committed OFFICIAL signal must immediately be visible
-            # in web readers on this process.  No query or new worker needed.
-            # The background DB index refresh can still discover other workers.
-            event = _snapshot_payload(item)['event']
-            global _INDEX_ROWS
-            with _INDEX_LOCK:
-                previous = [r for r in _INDEX_ROWS if _sid(r) != sid]
-                _INDEX_ROWS = _merge_index_rows([event], previous)
-        return saved
     except Exception as exc:
         print(f'⚠️ [OFFICIAL DURABILITY] save {sid}: {type(exc).__name__}', flush=True)
         return False
@@ -165,8 +128,8 @@ def recent_official_events(*, refresh: bool = False) -> list[dict]:
                     and str(event.get('market') or '') in ('spot','futures','multiasset')):
                 valid.append(event)
         with _INDEX_LOCK:
-            _INDEX_ROWS = _merge_index_rows(valid, _INDEX_ROWS)
-            return list(_INDEX_ROWS)
+            _INDEX_ROWS = valid[:_INDEX_LIMIT]
+        return list(valid)
     except Exception as exc:
         print(f'⚠️ [OFFICIAL DURABILITY] index: {type(exc).__name__}', flush=True)
         with _INDEX_LOCK:

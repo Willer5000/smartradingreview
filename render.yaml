@@ -40,6 +40,14 @@ services:
       # Native app.py memory authority.  Commit21.1 no longer overwrites these.
       - key: LOW_MEMORY_MODE
         value: "1"
+      # C37 LIVE: suspende sólo learning/autopilot/investigación automáticos.
+      # Consejo IA, Asistente IA, señales oficiales, Guardian y gráficos siguen.
+      - key: LIVE_ONLY_RUNTIME
+        value: "1"
+      - key: GUARDIAN_CHECK_INTERVAL_SECONDS
+        value: "45"
+      - key: GUARDIAN_MARK_PRICE_TTL_SECONDS
+        value: "25"
       - key: MEMORY_SOFT_LIMIT_MB
         value: "310"
       - key: MEMORY_HARD_LIMIT_MB
