@@ -5656,34 +5656,86 @@ window.confirmEditSavedSignal = async function() {
 // ============ Cerrar señal manualmente ============
 window.closeSavedSignalManual = async function() {
     const sig = window._currentSavedSignal;
-    if (!sig) return;
-    
+    if (!sig || !sig.id) return;
+    if (window.__CLOSE_SAVED_SIGNAL_IN_PROGRESS__) return;
+
     const confirmed = confirm(
         sig.entry_touched
-            ? '¿Cerrar la operación manualmente? Se calcula PnL con el precio actual.'
-            : '⚠️ El precio aún no ha tocado el entry. Al cerrar NO cuenta para winrate ni PnL. ¿Continuar?'
+            ? '¿Registrar el cierre MANUAL de esta operación? Se calculará el PnL con un precio real consultado al mercado.'
+            : '⚠️ El Entry aún no fue tocado. El cierre no contará para winrate ni PnL. ¿Continuar?'
     );
     if (!confirmed) return;
-    
+
+    const btn = document.getElementById('btn-ss-close-manual');
+    window.__CLOSE_SAVED_SIGNAL_IN_PROGRESS__ = true;
+    if (btn) btn.disabled = true;
     try {
-        const res = await _futFetchBounded(`/api/saved_signals/${sig.id}/close`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({}),  // el backend obtiene precio actual
-        });
-        const json = await res.json();
-        if (json.success) {
-            showToast('✅ Señal cerrada', 'success');
-            const modal = bootstrap.Modal.getInstance(document.getElementById('savedSignalDetailModal'));
+        const postClose = async (body) => {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 16000);
+            try {
+                const res = await fetch(`/api/saved_signals/${encodeURIComponent(sig.id)}/close`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    credentials: 'same-origin',
+                    signal: controller.signal,
+                    body: JSON.stringify(body),
+                });
+                const json = await res.json();
+                return {res, json};
+            } finally {
+                clearTimeout(timeout);
+            }
+        };
+
+        let {res, json} = await postClose({});
+        if (!json.success && json.needs_manual_price === true) {
+            // Únicamente ante indisponibilidad REAL de KuCoin. No se usa un
+            // precio ficticio ni la última vela del gráfico sin consentimiento.
+            const input = prompt(
+                'No se pudo consultar el precio actual del contrato.\n' +
+                'Para registrar el cierre, indica el PRECIO REAL que observas en el exchange.\n' +
+                'Cancelar mantiene la operación abierta:',
+                ''
+            );
+            if (input === null) return;
+            const typed = Number(String(input).trim().replace(',', '.'));
+            if (!Number.isFinite(typed) || typed <= 0) {
+                showToast('Precio inválido. La operación sigue abierta.', 'warning');
+                return;
+            }
+            if (!confirm(`Confirmar precio de salida DECLARADO: ${typed} para ${sig.symbol}?\nEste cierre se registra en el sistema, NO envía órdenes al exchange.`)) return;
+            ({res, json} = await postClose({
+                current_price: typed,
+                manual_price_acknowledged: true,
+            }));
+        }
+
+        if (json.success === true) {
+            // La lectura de Guardadas puede haber sido cacheada durante la
+            // actualización del modal. Invalidar solo esas lecturas.
+            if (window.__FUT_READ_CACHE__) {
+                for (const key of Array.from(window.__FUT_READ_CACHE__.keys())) {
+                    if (String(key).includes('/api/saved_signals')) window.__FUT_READ_CACHE__.delete(key);
+                }
+            }
+            showToast(json.already_closed ? '✅ Operación ya estaba cerrada' : '✅ Cierre registrado en Guardadas', 'success');
+            const modalEl = document.getElementById('savedSignalDetailModal');
+            const modal = modalEl && window.bootstrap?.Modal?.getInstance(modalEl);
             if (modal) modal.hide();
-            window.updateSavedSignalsList();
+            window._currentSavedSignal = null;
+            await window.updateSavedSignalsList();
         } else {
-            showToast('Error: ' + (json.error || ''), 'danger');
+            showToast('No se cerró la operación: ' + (json.error || `HTTP ${res.status}`), 'danger');
         }
     } catch (e) {
-        showToast('Error: ' + e.message, 'danger');
+        showToast('No se pudo confirmar el cierre. Comprueba el estado antes de reintentar: ' + (e.message || e), 'danger');
+    } finally {
+        window.__CLOSE_SAVED_SIGNAL_IN_PROGRESS__ = false;
+        if (btn) btn.disabled = false;
     }
 };
+
 
 // ============ Eliminar señal guardada ============
 window.deleteSavedSignal = async function() {

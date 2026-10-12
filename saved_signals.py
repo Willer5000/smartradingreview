@@ -5587,9 +5587,20 @@ def close_saved_signal_manual(signal_id: str, current_price: float) -> Optional[
             return (db.client.table('saved_signals')
                     .update(updates)
                     .eq('id', signal_id)
+                    .in_('status', ['active', 'entry_touched'])
                     .execute())
         r = db._with_retry(_op)
         result = r.data[0] if r and r.data else None
+        if result is None:
+            # Another request/lifecycle may have finished this signal first.
+            latest = get_saved_signal(signal_id)
+            if latest and latest.get('status') not in ('active', 'entry_touched'):
+                return latest
+            return None
+        # UI lists are user-scoped and cached up to 45s; a confirmed manual
+        # close must be reflected immediately in the active/closed panels.
+        with _SAVED_LIST_CACHE_LOCK:
+            _SAVED_LIST_CACHE.clear()
         if result and entry_touched:
             try:
                 from user_execution_learning import invalidate_global_execution_cache

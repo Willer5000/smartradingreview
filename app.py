@@ -35006,114 +35006,129 @@ def api_saved_signals_update(signal_id):
         return jsonify({'success': False, 'error': str(e)[:200]}), 200
 
 
+def _saved_close_price_observed_38(signal):
+    """Precio real de derivados para cierre MANUAL de Saved Futures/Multi.
+
+    No ejecuta especialistas, gráficos, análisis ni cálculos de trading.
+    Se prioriza el mark price de KuCoin (común para Guardian y cierre). Si no
+    está disponible, pide una ventana OHLCV CORTA al motor del mercado correcto.
+    Nunca se usa el motor Futures Crypto para los contratos Multi-Activo.
+    """
+    symbol = str((signal or {}).get('symbol') or '').strip().upper().replace('/', '-')
+    timeframe = str((signal or {}).get('timeframe') or '1h').strip()
+    if not symbol:
+        return None, 'NO_SYMBOL'
+
+    # La identidad del mercado se determina por el contrato, no por el campo
+    # system_type: algunos guardados históricos Multi usan 'futures'.
+    try:
+        from multiasset_system import MULTIASSET_CONTRACT_SYMBOLS
+        from futures_system import FUTURES_CONTRACT_SYMBOLS
+        if symbol in MULTIASSET_CONTRACT_SYMBOLS:
+            market = 'multiasset'
+        elif symbol in FUTURES_CONTRACT_SYMBOLS:
+            market = 'futures'
+        else:
+            return None, 'UNSUPPORTED_CONTRACT'
+    except Exception as exc:
+        return None, 'CONTRACT_REGISTRY_UNAVAILABLE:' + type(exc).__name__
+
+    # Precios ligeros de Guardian: sin DataFrames y con TTL max 90 segundos.
+    # Se acepta como instantánea observada, no como precio de ejecución real
+    # en un exchange. Una operación aquí es un registro de seguimiento.
+    try:
+        observed = _guardian_recent_mark_price(symbol)
+        price = float(observed) if observed is not None else 0.0
+        if math.isfinite(price) and price > 0:
+            return price, 'KUCOIN_PERPETUAL_MARK_' + market.upper()
+    except Exception:
+        pass
+
+    # La consulta corta evita descargar los >100 candles del análisis pesado.
+    # Solo se usa al pulsar Cerrar, nunca se ejecuta en un polling.
+    try:
+        engine = (_get_multiasset_system() if market == 'multiasset'
+                  else _get_futures_system())
+        if engine is None:
+            return None, 'MARKET_ENGINE_UNAVAILABLE:' + market
+        df = engine.get_kucoin_data_recent(symbol, timeframe, max_candles=48)
+        if df is not None and not df.empty:
+            price = float(df['close'].iloc[-1])
+            if math.isfinite(price) and price > 0:
+                return price, 'KUCOIN_PERPETUAL_RECENT_CANDLE_' + market.upper()
+    except Exception as exc:
+        print(f'⚠️ [CLOSE38] Precio {market}/{symbol}/{timeframe}: {type(exc).__name__}: {str(exc)[:100]}')
+    return None, 'LIVE_PRICE_UNAVAILABLE:' + market
+
+
 @app.route('/api/saved_signals/<signal_id>/close', methods=['POST'])
 def api_saved_signals_close(signal_id):
-    """Cierra manualmente una señal con el precio actual del par.
-    
-    Body JSON opcional: {'current_price': X}. Si no se pasa, se consulta a KuCoin.
+    """Cierre MANUAL del registro guardado; NO envía órdenes al exchange.
+
+    El precio se lee del contrato USDT-M correspondiente, tanto Futures como
+    Multi. Si la red falla, permite indicar explícitamente un precio observado
+    por el usuario, sin inventar precios ni reanalizar el mercado.
     """
     try:
         from saved_signals import get_saved_signal, close_saved_signal_manual
         user = _authenticated_user()
-
         if not user:
-            return jsonify({
-                'success': False,
-                'authenticated': False,
-                'error': 'Debes iniciar sesión.'
-            }), 401
+            return jsonify({'success': False, 'authenticated': False,
+                            'error': 'Debes iniciar sesión.'}), 401
 
         sig = get_saved_signal(signal_id)
-
         if not sig or sig.get('user_name') != user:
-            return jsonify({
-                'success': False,
-                'error': 'No encontrada'
-            }), 404
-        
-        data = request.get_json() or {}
-        current_price = data.get('current_price')
-        
-        # Si no viene precio, consultarlo directamente
-        # desde FUTURES PERPETUAL real.
-        if (
-            current_price is None
-            or float(
-                current_price
-            ) <= 0
-        ):
+            return jsonify({'success': False, 'error': 'No encontrada'}), 404
 
+        # Cierre idempotente: reintentos tras problemas de red nunca vuelven
+        # a calcular PnL ni cambian una operación ya terminada.
+        if sig.get('status') not in ('active', 'entry_touched'):
+            return jsonify({'success': True, 'already_closed': True,
+                            'signal': sig, 'message': 'Operación ya finalizada'}), 200
+
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'success': False, 'error': 'JSON inválido'}), 400
+
+        source = None
+        supplied = data.get('current_price')
+        if supplied is not None:
+            # Compatibilidad con clientes antiguos. El usuario debe confirmar
+            # en la UI el precio indicado; es un precio DECLARADO, no de KuCoin.
             try:
-
-                futures_market = (
-                    _get_futures_system()
-                )
-
-                if futures_market is None:
-
-                    return jsonify({
-                        'success':
-                            False,
-
-                        'error':
-                            (
-                                'Mercado Futures '
-                                'no disponible'
-                            )
-                    }), 200
-
-                df = (
-                    futures_market
-                    .get_kucoin_data(
-                        sig['symbol'],
-                        sig['timeframe']
-                    )
-                )
-
-                if (
-                    df is not None
-                    and len(df) > 0
-                ):
-
-                    current_price = float(
-                        df[
-                            'close'
-                        ].iloc[-1]
-                    )
-
-                else:
-
-                    return jsonify({
-                        'success':
-                            False,
-
-                        'error':
-                            (
-                                'No se pudo obtener '
-                                'precio Futures'
-                            )
-                    }), 200
-
-            except Exception as e:
-
+                current_price = float(supplied)
+            except (ValueError, TypeError):
+                return jsonify({'success': False, 'error': 'Precio de cierre inválido'}), 400
+            if not math.isfinite(current_price) or current_price <= 0:
+                return jsonify({'success': False, 'error': 'Precio de cierre inválido'}), 400
+            source = 'USER_DECLARED_PRICE'
+        else:
+            current_price, source = _saved_close_price_observed_38(sig)
+            if current_price is None:
                 return jsonify({
-                    'success':
-                        False,
+                    'success': False, 'needs_manual_price': True,
+                    'price_source': source,
+                    'error': ('No se pudo consultar el precio real del contrato. '
+                              'Introduce el precio de salida observado para '
+                              'registrar el cierre manual, o vuelve a intentar.')
+                }), 503
 
-                    'error':
-                        (
-                            'Precio Futures '
-                            f'no disponible: {e}'
-                        )
-                }), 200
-        
         result = close_saved_signal_manual(signal_id, float(current_price))
         if not result:
-            return jsonify({'success': False, 'error': 'No se pudo cerrar'}), 200
-        return jsonify({'success': True, 'signal': result})
-    except Exception as e:
-        print(f"❌ api_saved_signals_close: {e}")
-        return jsonify({'success': False, 'error': str(e)[:200]}), 200
+            print(f'⚠️ [CLOSE38] Persistencia falló para saved_signal_id={signal_id}')
+            return jsonify({'success': False,
+                            'error': 'No se pudo persistir el cierre en Supabase. La operación sigue abierta.'}), 503
+
+        print(f'✅ [CLOSE38] user={user} saved_signal_id={signal_id} '
+              f'symbol={sig.get("symbol")} price_source={source} '
+              f'closed_status={result.get("status")}')
+        return jsonify({'success': True, 'signal': result,
+                        'price_source': source,
+                        'already_closed': result.get('status') != 'closed_manual'}), 200
+    except Exception as exc:
+        print(f'❌ [CLOSE38] api_saved_signals_close: {type(exc).__name__}: {str(exc)[:160]}')
+        return jsonify({'success': False,
+                        'error': 'Error al registrar el cierre; intenta de nuevo.'}), 500
 
 
 @app.route('/api/saved_signals/<signal_id>', methods=['DELETE'])
