@@ -47234,6 +47234,64 @@ def _attempt_confirmed_outbox_event_inner(key):
     _save_confirmed_signal_outbox_to_disk()
     return False
 
+def _discord_confirmed_delivery_optional(key):
+    """Canal independiente: SOLO eventos CONFIRMADOS oficiales y persistidos.
+
+    Usa el outbox EXISTENTE (sin hilos ni recálculos). No modifica el estado
+    Telegram y no causa ningún reenvío de señales Vigentes.
+    """
+    try:
+        from discord_confirmed import enabled, deliver
+        if not enabled():
+            return False
+        now = time.time()
+        with _confirmed_signal_outbox_lock:
+            item = dict(_confirmed_signal_outbox.get(key) or {})
+        if not item or item.get('discord_state') == 'SENT':
+            return False
+        if now < float(item.get('discord_retry_at') or 0):
+            return False
+        if str(item.get('state') or '').upper() in ('INVALID', 'EXPIRED_OR_SUPERSEDED'):
+            return False
+        # No reenviar señales anteriores ni Vigentes: requisito de confirmación
+        # NUEVA dentro de la ventana de su propia vela fuente.
+        market = str(item.get('market') or '').lower()
+        signal = dict(item.get('signal') or {})
+        if not _confirmed_delivery_valid_17_5_11(market, signal):
+            return False
+        if not bool(item.get('_c35_remote_persisted')):
+            try:
+                from official_signal_store import persist_official
+                if not (bool(_save_confirmed_signal_outbox_to_disk()) and bool(persist_official(item))):
+                    return False
+                with _confirmed_signal_outbox_lock:
+                    if key in _confirmed_signal_outbox:
+                        _confirmed_signal_outbox[key]['_c35_remote_persisted'] = True
+            except Exception:
+                return False
+        msg = _build_confirmed_signal_telegram_message(market, signal)
+        ok, delay, err = deliver(msg)
+        with _confirmed_signal_outbox_lock:
+            existing = _confirmed_signal_outbox.get(key)
+            if existing is None:
+                return False
+            if ok:
+                existing.update(discord_state='SENT', discord_sent_at=now,
+                                discord_retry_at=0.0, discord_last_error=None)
+            else:
+                attempts = min(12, int(existing.get('discord_attempts') or 0) + 1)
+                backoff = min(3600.0, 30.0 * (2 ** min(6, attempts - 1)))
+                existing.update(discord_state='FAILED_RETRYABLE',
+                                discord_attempts=attempts,
+                                discord_retry_at=now + max(backoff, float(delay or 0)),
+                                discord_last_error=str(err)[:70])
+        _save_confirmed_signal_outbox_to_disk()
+        return ok
+    except Exception as exc:
+        print('⚠️ Discord confirmado no entregado:', exc.__class__.__name__, flush=True)
+        return False
+
+
 def _retry_confirmed_signal_outbox(limit=3):
     # Recover after a Supabase outage during boot. This runs in the EXISTING
     # notification loop, never inside cards GET and never creates a daemon.
@@ -47251,6 +47309,21 @@ def _retry_confirmed_signal_outbox(limit=3):
                 keys.append((float((item or {}).get('created_at') or now), key))
     for _, key in sorted(keys)[:max(1, int(limit or 3))]:
         _attempt_confirmed_outbox_event(key)
+    # Discord es independiente de Telegram: revisar PENDING y SENT, sin
+    # volver a emitir vigentes. Se ejecuta en el loop de avisos ya existente.
+    try:
+        from discord_confirmed import enabled
+        if enabled():
+            with _confirmed_signal_outbox_lock:
+                discord_keys = [k for k, event in _confirmed_signal_outbox.items()
+                                if str(event.get('discord_state') or '').upper() != 'SENT'
+                                and str(event.get('state') or '').upper() not in
+                                ('INVALID', 'EXPIRED_OR_SUPERSEDED')
+                                and now >= float(event.get('discord_retry_at') or 0)]
+            for discord_key in discord_keys[:max(1, min(5, int(limit or 3)))]:
+                _discord_confirmed_delivery_optional(discord_key)
+    except Exception as exc:
+        print('⚠️ Discord loop:', exc.__class__.__name__, flush=True)
 
 
 def _load_confirmed_signal_alerts_from_disk():
@@ -49871,6 +49944,35 @@ def ejecutar_analisis_completo(timeframe):
 # La deduplicación se persiste como snapshot acotado en Supabase para
 # sobrevivir al reciclado normal del worker de Gunicorn.
 # ============================================================================
+
+def _discord_guardian_notify(user, market, subject, action, bucket,
+                             *, signal=None, advice=None, current_price=None,
+                             tgp_result=None, timeframe=None):
+    """Opt-in Discord Guardian; no trading, Telegram state, new worker or OHLCV.
+
+    Separate dedup (Supabase) and transport. Users must be explicitly selected
+    with DISCORD_GUARDIAN_USERS because Discord channels may be shared.
+    """
+    try:
+        if not _telegram_user_has_market_permission(user, market):
+            return False
+        from discord_guardian import (queue, format_spot_guardian,
+                                      format_futures_guardian)
+        if str(market).lower() == 'spot':
+            msg = format_spot_guardian(user, tgp_result or {}, timeframe)
+            effective_action = ('RISK_WATCH' if action == 'HOLD' and
+                                bool(((tgp_result or {}).get('market_risk_watch') or {}).get('alert'))
+                                else action)
+        else:
+            msg = format_futures_guardian(user, market, signal or {}, advice or {},
+                                          current_price, action)
+            effective_action = action
+        return queue(user, market, subject, effective_action, bucket, msg,
+                     ttl_seconds=180 if effective_action == 'EXIT' else 1200)
+    except Exception as exc:
+        print(f'⚠️ [DISCORD GUARDIAN] {type(exc).__name__}', flush=True)
+        return False
+
 
 GUARDIAN_TELEGRAM_CHECK_INTERVAL = max(30, min(180, int(os.getenv('GUARDIAN_CHECK_INTERVAL_SECONDS', '45'))))
 # C37: el ciclo vigila posiciones guardadas, NO emite nuevas confirmaciones.
@@ -54223,8 +54325,20 @@ def monitor_guardian_telegram_loop():
 
                     try:
 
+                        # C40 Discord: share the existing Guardian evaluation
+                        # path, but use the correct contract engine for MULTI.
+                        # This does not create an extra task or scan a market.
+                        try:
+                            from multiasset_system import MULTIASSET_SYMBOLS
+                            _is_multi_guardian = str(symbol).upper().replace('/', '-') in MULTIASSET_SYMBOLS
+                        except Exception:
+                            _is_multi_guardian = False
+                        _guardian_engine = (_get_multiasset_system() if _is_multi_guardian
+                                            else futures_market)
+                        if not _guardian_engine:
+                            continue
                         market_snapshot = _guardian_prepare_futures_market_data(
-                            futures_market,
+                            _guardian_engine,
                             symbol,
                             timeframe,
                         )
@@ -54777,6 +54891,17 @@ def monitor_guardian_telegram_loop():
                                 )
                             )
 
+                            # Discord Guardian independent of Telegram ACK/
+                            # throttle. Only an actionable decision reached by
+                            # the ORIGINAL Guardian logic gets published.
+                            _discord_guardian_notify(
+                                user=user,
+                                market='multiasset' if _is_multi_guardian else 'futures',
+                                subject=signal_id, action=event_action,
+                                bucket=bucket, signal=sig, advice=advice,
+                                current_price=current_price,
+                            )
+
                             reservation = (
                                 _guardian_alert_can_send(
                                     user=user,
@@ -54875,6 +55000,14 @@ def monitor_guardian_telegram_loop():
                 "❌ monitor_guardian_telegram_loop: "
                 f"{e}"
             )
+
+        # C40: reintentos Discord acotados desde el MISMO Guardian worker.
+        # Enviar Discord no depende de que Telegram esté conectado.
+        try:
+            from discord_guardian import drain
+            drain(max_items=2)
+        except Exception:
+            pass
 
         # C37: 15 s sólo si existe una posición cercana al SL/TP. Sin
         # posiciones urgentes, ciclo de 45 s; no se agrega un worker.
@@ -55646,6 +55779,14 @@ def _run_proactive_spot_guardian(
                     state=state,
                     veto=False
                 )
+
+            # Proactive portfolio advice to Discord (separate opt-in/dedup).
+            # Does not wait for Telegram ACK; HOLD only when material risk.
+            _discord_guardian_notify(
+                user=user, market='spot', subject=spot_subject,
+                action=action, bucket=str(spot_window),
+                tgp_result=tgp_result, timeframe=timeframe,
+            )
 
             reservation = (
                 _guardian_alert_can_send(
@@ -61982,7 +62123,22 @@ def send_tgp_telegram_alert(tgp_result, user, symbol, timeframe, prices):
     """
     try:
         import requests
-        
+
+        # Discord is independent of Telegram credentials and delivery.
+        # The TGP caller already applied should_send_tgp_alert().
+        try:
+            _tgp_action = str((tgp_result or {}).get('action') or 'HOLD').upper()
+            _tgp_state = str((tgp_result or {}).get('state') or '')
+            _tgp_subject = _tgp_public_subject(tgp_result or {}, state=_tgp_state,
+                                               veto=bool((tgp_result or {}).get('veto')))
+            _discord_guardian_notify(
+                user=user, market='spot', subject=_tgp_subject,
+                action=_tgp_action, bucket=str(int(time.time() // (6 * 3600))),
+                tgp_result=tgp_result, timeframe=timeframe,
+            )
+        except Exception:
+            pass
+
         bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
         chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
         
