@@ -1,6 +1,7 @@
 """Discord Guardian: independent best-effort delivery, no background thread.
 
-Only explicit new actionable Guardian decisions are enqueued. A small durable
+Only explicit new actionable Guardian decisions and saved-signal EXPIRATIONS
+are enqueued. A small durable
 outbox survives restarts, is retried from an existing Guardian worker, and
 never changes Telegram state or the user's trading position.
 """
@@ -104,7 +105,10 @@ def queue(user, market, subject, action, bucket, message, *, ttl_seconds=900):
             return False
         _EVENTS[key] = {
             'status': 'PENDING', 'created_at': now,
-            'expires_at': now + min(3600, max(90, int(ttl_seconds))),
+            # Expiraciones personales pueden reintentarse durante 24 h.
+            # Guardian normal conserva su TTL previo (< 1 hora).
+            'expires_at': now + min(86400 if action == 'EXPIRED' else 3600,
+                                    max(90, int(ttl_seconds))),
             'retry_after': 0.0, 'attempts': 0,
             'message': str(message)[:1750], '_persisted': False,
         }

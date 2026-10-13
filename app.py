@@ -23955,6 +23955,14 @@ class TradingExpertSystem:
             'ENTRY' if 'ENTRY' in str(message).upper() else
             'SPOT_OR_SYSTEM'
         )
+        # C40.1: espejo de otras alertas Telegram (ENTRY, MACRO, sistema),
+        # separado del outbox de CONFIRMADAS y de Guardian. No altera los ACK
+        # ni la lógica de trading; los errores Discord nunca bloquean Telegram.
+        try:
+            from discord_telegram_mirror import enqueue_from_telegram
+            enqueue_from_telegram(message, category=category)
+        except Exception as discord_exc:
+            print('⚠️ [DISCORD MIRROR] ' + type(discord_exc).__name__, flush=True)
         try:
             if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
                 _telegram_health_update(False, category, 'NOT_CONFIGURED')
@@ -48858,6 +48866,22 @@ def _send_saved_futures_lifecycle_notifications(expired_events=None):
             continue
 
         market, message = _saved_expiry_short_message(user, sig)
+
+        # C40.1: señal guardada EXPIRADA por propietario, no confirmación
+        # nueva. Colocarla en outbox personal independiente ANTES del intento
+        # Telegram. El evento se deduplica por id de señal guardada, incluso
+        # tras reiniciar Render; no afecta el ACK de Telegram ni Supabase saved.
+        try:
+            from discord_guardian import queue as discord_private_queue
+            discord_private_queue(
+                user, market, signal_id, 'EXPIRED', signal_id,
+                message, ttl_seconds=24 * 3600,
+            )
+        except Exception as discord_exc:
+            print('⚠️ [DISCORD EXPIRY] ' + type(discord_exc).__name__, flush=True)
+
+        # Preferencias Telegram no controlan Discord: éste utiliza su
+        # autorización privada independiente DISCORD_GUARDIAN_USERS.
         if not _telegram_user_has_market_permission(user, market):
             continue
 
@@ -55006,6 +55030,14 @@ def monitor_guardian_telegram_loop():
         try:
             from discord_guardian import drain
             drain(max_items=2)
+        except Exception:
+            pass
+        # C40.1: mismo worker, sin thread ni polling de señales adicionales.
+        # Se envían/reintentan alertas Telegram no cubiertas por Confirmadas
+        # y Guardian (por ejemplo ENTRY o MACRO).
+        try:
+            from discord_telegram_mirror import drain as drain_telegram_mirror
+            drain_telegram_mirror(max_items=2)
         except Exception:
             pass
 
