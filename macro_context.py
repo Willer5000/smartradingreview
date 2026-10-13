@@ -906,11 +906,24 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         })
     ticker_items = ticker_items[:10]
 
+    # C38: optional on-demand interpretation of already verified news.
+    # Never blocks the technical pipeline or changes macro authority.
+    try:
+        from scientist_support_c38 import macro_overlay
+        _c38_scientist = macro_overlay({
+            'headlines': active_news[:12], 'upcoming_events': upcoming[:10],
+            'risk_level': risk_level, 'directional_bias': directional_bias,
+            'futures_posture': futures_posture,
+        })
+    except Exception:
+        _c38_scientist = {'status':'UNAVAILABLE', 'authority':'ADVISORY_ONLY'}
+
     return {
         "enabled": MACRO_CONTEXT_ENABLED,
         "mode": "CONTEXT_ONLY",
         "authority": "NONE",
         "trader_macro_reads_context": True,
+        "scientist_interpretation": _c38_scientist,
         "production_change": False,
         "risk_level": risk_level,
         "current_risk_level": risk_level,

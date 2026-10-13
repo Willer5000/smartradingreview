@@ -4937,6 +4937,20 @@ def _local_operational_fallback(context, market, question=None, reason=''):
 # PUNTO ÚNICO DE ENTRADA
 # ============================================================================
 
+def _c38_scientist_rescue_advice(context, market, question=None):
+    """Use separately-budgeted learning credential ONLY if operational AI fails.
+
+    Never runs the Scientist background worker. Failure is silent and leaves
+    the existing deterministic local fallback untouched.
+    """
+    try:
+        from scientist_support_c38 import backup_advice
+        return backup_advice(context, market, question)
+    except Exception as exc:
+        logger.info('C38 secondary advice not available: %s', type(exc).__name__)
+        return None
+
+
 def run_ai_advisor(
     user_name,
     usage_type,
@@ -5018,6 +5032,19 @@ def run_ai_advisor(
                     user_name
                 )
         }
+
+    # C38: share already cached MACRO news with AI advice/chat, not trading.
+    if isinstance(context, dict):
+        context = dict(context)
+        if not isinstance(context.get('macro_context'), dict) or not context.get('macro_context'):
+            try:
+                from macro_context import get_macro_context_snapshot
+                _c38_macro = get_macro_context_snapshot(fetch_if_stale=False) or {}
+                context['macro_context'] = {k: _c38_macro.get(k) for k in (
+                    'risk_level', 'directional_bias', 'futures_posture',
+                    'headlines', 'upcoming_events', 'scientist_interpretation')}
+            except Exception:
+                pass
 
     # El proveedor/modelo forma parte de la identidad del
     # aprendizaje para no reutilizar un caché antiguo de Groq
@@ -5145,13 +5172,15 @@ def run_ai_advisor(
             and usage_type in {"AUTO", "MANUAL"}
             and context_type in {"HOURLY_MARKET_ADVICE", "MANUAL_CHAT"}
         ):
+            _c38_backup = _c38_scientist_rescue_advice(context, market, question)
             return {
                 "success": True,
                 "cached": False,
                 "quota_limited": True,
-                "degraded_mode": True,
+                "degraded_mode": not bool(_c38_backup),
+                "secondary_provider": bool(_c38_backup),
                 "reason": reason,
-                "data": _local_operational_fallback(
+                "data": _c38_backup or _local_operational_fallback(
                     context,
                     market,
                     question,
@@ -5205,7 +5234,7 @@ def run_ai_advisor(
                     "degraded_mode": True,
                     "retry_after_seconds": backoff_remaining,
                     "reason": reason_text,
-                    "data": _local_operational_fallback(context, market, question, reason_text),
+                    "data": _c38_scientist_rescue_advice(context, market, question) or _local_operational_fallback(context, market, question, reason_text),
                     "quota": quota
                 }
             return {
@@ -5403,7 +5432,7 @@ def run_ai_advisor(
                 "provider_limited": True,
                 "degraded_mode": True,
                 "reason": error_reason,
-                "data": _local_operational_fallback(context, market, question, error_reason),
+                "data": _c38_scientist_rescue_advice(context, market, question) or _local_operational_fallback(context, market, question, error_reason),
                 "quota": get_ai_quota_status(user_name)
             }
         return {
