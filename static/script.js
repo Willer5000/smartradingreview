@@ -4986,7 +4986,8 @@ window.updateLiveVisualIndicators = function(payload) {
     // oficial se recalcula por el backend en el ciclo principal, no aquí.
     const renderers = [
         ['ftm', 'ftm-chart', updateFTMChart],
-        ['liquidation-heatmap', 'liquidation-heatmap-chart', updateLiquidationHeatmap],
+        // C39: liquidation bins are anchored to completed analysis; 30s open-candle updates
+        // must not rebuild or erase the expensive heatmap.
         ['whale', 'whale-chart', updateWhaleChart],
         ['rsi_maverick', 'rsi-maverick-chart', updateRSIMaverickChart],
         ['ichimoku', 'ichimoku-chart', updateIchimokuChart],
@@ -5000,7 +5001,7 @@ window.updateLiveVisualIndicators = function(payload) {
         ['bollinger', 'bollinger-chart', updateBollingerChart],
         ['atr', 'atr-chart', updateATRChart],
         ['volume-profile', 'volume-profile-chart', updateVolumeProfileChart],
-        ['fvg-ob', 'fvg-ob-chart', updateFVGAOBChart],
+        // C39: FVG/OB visual zones are refreshed by completed/light OHLCV, not every price tick.
         ['williams-cci', 'williams-cci-chart', updateWilliamsCCIChart],
         ['mfi-force', 'mfi-force-chart', updateMFIForceChart],
         ['fibonacci', 'fibonacci-chart', updateFibonacciChart],
@@ -5038,6 +5039,110 @@ window.updateLiveCandleOverlay = function(payload) {
     window.updateLiveVisualIndicators(payload);
 };
 
+// C39 — Visual-only layer retention. Does not modify signal publication, Guardian, or trading authority.
+// Real liquidation bins are retained per market/symbol/timeframe, but are NEVER
+// manufactured from OHLCV. Technical FVG/OB may be estimated only for display.
+const _C39_VISUAL_STORE_PREFIX = 'str.c39.vis.';
+const _C39_VISUAL_MAX_AGE = 24 * 3600 * 1000; // Older snapshots are not displayed.
+function _c39VisualCell(data) {
+    const market = window.IS_MULTI_ASSET_PAGE ? 'multiasset' : (window.IS_FUTURES_PAGE ? 'futures' : 'spot');
+    const sym = String(data?.symbol || data?.data?.symbol || document.getElementById('symbol-select')?.value || '').toUpperCase().replace('/', '-');
+    const tf = String(data?.timeframe || data?.data?.timeframe || document.getElementById('interval-select')?.value || '');
+    const uiSym = String(document.getElementById('symbol-select')?.value || sym).toUpperCase().replace('/', '-');
+    const uiTf = String(document.getElementById('interval-select')?.value || tf);
+    return sym && tf && sym === uiSym && tf === uiTf ? `${market}|${sym}|${tf}` : null;
+}
+function _c39VisualSnapshot(type, data, value) {
+    const cell = _c39VisualCell(data);
+    if (!cell || !value || typeof value !== 'object') return null;
+    const key = _C39_VISUAL_STORE_PREFIX + type + '|' + cell;
+    try {
+        if (type === 'liquidation' &&
+            (!Array.isArray(value.active_bins) && !Array.isArray(value.frozen_bins))) return null;
+        if (type === 'liquidation' &&
+            !(value.active_bins?.length || value.frozen_bins?.length)) return null;
+        if (type === 'structure' &&
+            !(value.fair_value_gaps?.length || value.order_blocks?.length || value.liquidity_sweeps?.length || value.stop_hunts?.length)) return null;
+        const safe = type === 'liquidation' ? {
+            ...value,
+            active_bins: (value.active_bins || []).slice(-80),
+            frozen_bins: (value.frozen_bins || []).slice(-60),
+        } : {
+            ...value,
+            fair_value_gaps: (value.fair_value_gaps || value.fvg || []).slice(-20),
+            order_blocks: (value.order_blocks || []).slice(-20),
+            liquidity_sweeps: (value.liquidity_sweeps || []).slice(-20),
+            stop_hunts: (value.stop_hunts || []).slice(-15),
+        };
+        const item = {at: Date.now(), value: safe};
+        const encoded = JSON.stringify(item);
+        if (encoded.length > 95000) return null; // Browser storage quota protection.
+        sessionStorage.setItem(key, encoded);
+        // Bounded browser storage: retain at most eight selected visual layers
+        // (normally four cells), without touching the operational backend cache.
+        const oldKeys=[];
+        for (let j=0;j<sessionStorage.length;j++) {
+            const k=sessionStorage.key(j);
+            if (!k?.startsWith(_C39_VISUAL_STORE_PREFIX)) continue;
+            try { oldKeys.push({key:k,at:Number(JSON.parse(sessionStorage.getItem(k) || '{}').at || 0)}); }
+            catch (_) { oldKeys.push({key:k,at:0}); }
+        }
+        oldKeys.sort((a,b)=>b.at-a.at);
+        oldKeys.slice(8).forEach(row=>sessionStorage.removeItem(row.key));
+        return {value:safe,at:item.at,archived:false};
+    } catch (_) { return {value,at:Date.now(),archived:false}; }
+}
+function _c39ReadVisualSnapshot(type, data) {
+    const cell = _c39VisualCell(data);
+    if (!cell) return null;
+    try {
+        const raw = sessionStorage.getItem(_C39_VISUAL_STORE_PREFIX + type + '|' + cell);
+        if (!raw) return null;
+        const item = JSON.parse(raw);
+        if (!item?.at || Date.now() - item.at > _C39_VISUAL_MAX_AGE || item.at > Date.now() + 60000) return null;
+        return {value:item.value,at:item.at,archived:true};
+    } catch (_) { return null; }
+}
+function _c39VisualNote(chartId, label) {
+    const el = document.getElementById(chartId);
+    if (!el) return;
+    let note = document.getElementById(chartId + '-c39-note');
+    if (!note) {
+        note = document.createElement('div');
+        note.id = chartId + '-c39-note';
+        note.setAttribute('role','status');
+        note.style.cssText = 'font-size:11px;color:#ebbd64;padding:4px 8px;';
+        el.insertAdjacentElement('afterend', note);
+    }
+    note.textContent = label || '';
+    note.hidden = !label;
+}
+function _c39LightOHLCVStructure(data) {
+    const d = data?.df;
+    const o=d?.open, h=d?.high, l=d?.low, c=d?.close;
+    if (![o,h,l,c].every(x=>Array.isArray(x) && x.length>=20 && x.length===c.length)) return null;
+    const n=Math.min(c.length,200), first=c.length-n;
+    const g=[], ob=[], sweeps=[];
+    for(let i=first+6;i<c.length;i++) {
+        const H=Number(h[i]), L=Number(l[i]), O=Number(o[i]), C=Number(c[i]);
+        if(![H,L,O,C].every(Number.isFinite)) continue;
+        if (Number(l[i]) > Number(h[i-2])) g.push({type:'bullish',gap_bottom:Number(h[i-2]),gap_top:Number(l[i]),index:i});
+        if (Number(h[i]) < Number(l[i-2])) g.push({type:'bearish',gap_bottom:Number(h[i]),gap_top:Number(l[i-2]),index:i});
+        const recentH=Math.max(...h.slice(i-6,i).map(Number)), recentL=Math.min(...l.slice(i-6,i).map(Number));
+        if (H > recentH && C < recentH) sweeps.push({type:'bearish',sweep_level:recentH,index:i});
+        if (L < recentL && C > recentL) sweeps.push({type:'bullish',sweep_level:recentL,index:i});
+        const body=Math.abs(C-O), priorBody=Math.abs(Number(c[i-1])-Number(o[i-1]));
+        const spread=Math.max(H-L,Math.abs(C)*1e-7);
+        if (body > spread*.6 && priorBody>0 && (C>O)!==(Number(c[i-1])>Number(o[i-1]))) {
+            const lo=Math.min(Number(o[i-1]),Number(c[i-1]));
+            const hi=Math.max(Number(o[i-1]),Number(c[i-1]));
+            if(Number.isFinite(lo)&&Number.isFinite(hi)&&hi>lo) ob.push({type:C>O?'bullish':'bearish',price_range:[lo,hi],index:i-1});
+        }
+    }
+    return {source:'C39_OHLCV_PRESENTATION_ONLY',display_only:true,trading_authority:false,
+        fair_value_gaps:g.slice(-12),order_blocks:ob.slice(-12),liquidity_sweeps:sweeps.slice(-12),stop_hunts:[]};
+}
+
 function updateFVGAOBChart(data) {
     console.log('🟣🟣🟣 EJECUTANDO updateFVGAOBChart');
     
@@ -5046,10 +5151,8 @@ function updateFVGAOBChart(data) {
         console.log('❌ No se encontró el div fvg-ob-chart');
         return;
     }
-    
-    // Limpiar gráfico anterior
-    Plotly.purge('fvg-ob-chart');
-    chartDiv.innerHTML = '';
+    // Out-of-order async responses must never paint a different market cell.
+    if (!_c39VisualCell(data)) return;
     
     if (!data || !data.df) {
         console.log('❌ No hay datos de df');
@@ -5057,13 +5160,37 @@ function updateFVGAOBChart(data) {
         return;
     }
     
-    if (!data.structure) {
-        console.log('❌ No hay estructura en los datos');
-        chartDiv.innerHTML = '<div class="alert alert-warning text-center">No hay datos de estructura</div>';
+    // Never purge a real previous chart just because a READ-ONLY OHLCV
+    // response lacks heavyweight structure. Restore the genuine same-cell layer;
+    // otherwise compute a clearly marked presentation-only structure from OHLCV.
+    let structureLayer = data.structure;
+    let layerNote = '';
+    if (structureLayer && (structureLayer.fair_value_gaps?.length || structureLayer.order_blocks?.length ||
+                           structureLayer.liquidity_sweeps?.length || structureLayer.stop_hunts?.length)) {
+        _c39VisualSnapshot('structure',data,structureLayer);
+    } else {
+        const last = _c39ReadVisualSnapshot('structure',data);
+        if (last) {
+            structureLayer=last.value;
+            layerNote='Estructura histórica ('+new Date(last.at).toLocaleString()+'); no es una lectura en vivo.';
+        } else {
+            structureLayer=_c39LightOHLCVStructure(data);
+            layerNote='Estructura visual derivada de OHLCV real; no sustituye a los especialistas ni confirma operaciones.';
+        }
+    }
+    if (!structureLayer) {
+        if (chartDiv.dataset.c39Cell !== _c39VisualCell(data)) {
+            try { Plotly.purge(chartDiv); } catch (_) {}
+            chartDiv.innerHTML='<div class="alert alert-warning text-center">OHLCV insuficiente para estructura.</div>';
+        }
         return;
     }
-    
-    console.log('📊 Estructura recibida:', data.structure);
+    data={...data,structure:structureLayer};
+    _c39VisualNote('fvg-ob-chart',layerNote);
+    // A successful incoming render is now ready to replace the prior chart.
+    try { Plotly.purge('fvg-ob-chart'); } catch (_) {}
+    chartDiv.innerHTML='';
+    chartDiv.dataset.c39Cell=_c39VisualCell(data)||'';
     
     // ============ DEBUG: Verificar qué datos llegan ============
     console.log('🔍 DEBUG - Revisando estructura:');
@@ -8900,12 +9027,33 @@ function updateLiquidationHeatmap(data) {
     const chartDiv = document.getElementById('liquidation-heatmap-chart');
     if (!chartDiv || !window.Plotly) return;
 
-    const liquidation = data?.liquidation || data?.data?.liquidation;
+    // C39: the read-only visual lane usually returns OHLCV without heavyweight
+    // liquidation bins. Do not turn an existing genuine map into a blank card.
     const df = data?.df || data?.data?.df;
-    if (!liquidation || !df || !Array.isArray(df.time) || !df.time.length) {
-        chartDiv.innerHTML = '<div class="text-center py-4"><p class="text-muted">Sin datos suficientes para el mapa de calor</p></div>';
+    const actual=data?.liquidation || data?.data?.liquidation;
+    let liquidation=actual;
+    let note='';
+    if (actual && (actual.active_bins?.length || actual.frozen_bins?.length)) {
+        _c39VisualSnapshot('liquidation',data,actual);
+    } else {
+        const previous=_c39ReadVisualSnapshot('liquidation',data);
+        if (previous) {
+            liquidation=previous.value;
+            note='MAPA HISTÓRICO de '+new Date(previous.at).toLocaleString()+'. No representa posiciones actuales ni debe utilizarse para entradas.';
+        }
+    }
+    const cell=_c39VisualCell(data);
+    if (!liquidation || !df || !Array.isArray(df.time) || df.time.length < 8 || !cell) {
+        if (chartDiv.dataset.c39Cell !== cell || !Array.isArray(chartDiv.data) || !chartDiv.data.length) {
+            try { Plotly.purge(chartDiv); } catch (_) {}
+            chartDiv.innerHTML = '<div class="text-center py-4"><p class="text-muted">Sin mapa de liquidaciones real disponible para esta celda. Se actualizará cuando el análisis complete sus datos.</p></div>';
+            chartDiv.dataset.c39Cell=cell||'';
+        }
+        _c39VisualNote('liquidation-heatmap-chart', 'Sin datos de liquidaciones nuevos; no se estiman posiciones de terceros con OHLCV.');
         return;
     }
+    chartDiv.dataset.c39Cell=cell;
+    _c39VisualNote('liquidation-heatmap-chart',note);
 
     const activeBins = Array.isArray(liquidation.active_bins) ? liquidation.active_bins : [];
     const frozenBins = Array.isArray(liquidation.frozen_bins) ? liquidation.frozen_bins : [];

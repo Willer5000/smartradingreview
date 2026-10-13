@@ -12,6 +12,21 @@
   let pending = false;
   let vendorPromise = null;
   const TIMEOUT = 8500;
+  function missingVisualLayers() {
+    return [['fvg-ob','fvg-ob-chart'],['liquidation-heatmap','liquidation-heatmap-chart']]
+      .filter(([key,id]) => {
+        const element = document.getElementById(id);
+        if (!element || (window.ChartWorkspace?.shouldRender && !window.ChartWorkspace.shouldRender(key))) return false;
+        return !Array.isArray(element.data) || !element.data.length;
+      }).map(x=>x[0]);
+  }
+  function recoverLayers(data,req) {
+    if(!valid(data,req) || typeof window.renderIndicatorChart !== 'function') return;
+    for (const id of missingVisualLayers()) {
+      try { preserveTechnicalDecision(() => window.renderIndicatorChart(id,data)); }
+      catch(error) { console.debug('C39 isolated layer:',id,error?.message||error); }
+    }
+  }
 
   function plotlyReady() { return Boolean(window.Plotly && typeof window.Plotly.newPlot === 'function'); }
   function ensurePlotly() {
@@ -92,14 +107,23 @@
     }
     if (currentEpoch !== epoch || selection().key !== req.key || document.hidden) return false;
     const chart = document.getElementById('candle-chart');
-    if (!chart || chartReady(chart)) return true;
+    if (!chart) return false;
+    // A candle chart can be healthy while separate liquidation/FVG panels are blank.
+    // Recover their presentation layers without calling the heavy signal engine.
+    recoverLayers(data,req);
+    if (chartReady(chart)) return true;
     // Prefer the original trading chart renderer. It may compute indicators
     // from genuine OHLCV locally, without running backend specialists.
+    // C39: a pure OHLCV fallback must NOT call updateAllCharts: doing so
+    // reinitialised the liquidation/FVG panels with missing rich layers.
+    // Draw selected-cell candles only; other OHLCV indicators follow below.
     try {
-      preserveTechnicalDecision(() => window.updateAllCharts?.(data));
+      if (market === 'multiasset' && window.MultiAssetDisplayCore3342?.render)
+        window.MultiAssetDisplayCore3342.render(data);
+      else preserveTechnicalDecision(() => window.updateCandleChart?.(data));
       await new Promise(resolve => setTimeout(resolve, 180));
     } catch (err) {
-      console.debug('C38 isolated chart fallback:',err?.message || err);
+      console.debug('C39 isolated candle fallback:',err?.message || err);
     }
     if (!chartReady(chart)) {
       try {
@@ -156,7 +180,7 @@
   async function tick(force=false) {
     if (document.hidden || pending) return;
     const chart = document.getElementById('candle-chart');
-    if (!chart || chartReady(chart)) return;
+    if (!chart || (chartReady(chart) && !missingVisualLayers().length)) return;
     const req=selection();
     const state=states.get(req.key)||{tries:0,next:0};
     if (!force && Date.now()<state.next) return;
@@ -173,7 +197,10 @@
       const data = local || await requestVisual(req,controller);
       if (currentEpoch!==epoch || selection().key!==req.key) return;
       if (data && await draw(req,data,currentEpoch)) {
-        states.set(req.key,{tries:0,next:Date.now()+120000});
+        const remaining=missingVisualLayers();
+        const tries=remaining.length ? state.tries+1 : 0;
+        // Missing provider-only liquidity must not cause infinite HTTP polling.
+        states.set(req.key,{tries,next:Date.now()+(remaining.length ? Math.min(600000,tries*120000) : 120000)});
         return;
       }
       state.tries++;
@@ -200,7 +227,7 @@
     // Only a passive check, never a heavy endpoint.
     const interval=setInterval(()=>{
       if (document.hidden) return;
-      if (chartReady(candle)) return;
+      if (chartReady(candle) && !missingVisualLayers().length) return;
       tick(false);
     },20000);
     ['symbol-select','interval-select'].forEach(id=>document.getElementById(id)?.addEventListener('change',invalidate));
