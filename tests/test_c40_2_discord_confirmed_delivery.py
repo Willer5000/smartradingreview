@@ -96,13 +96,17 @@ class DiscordC402Test(unittest.TestCase):
 
     def test_no_old_telegram_confirmations_replayed_on_deploy(self):
         self.box['old_without_discord_marker'] = self.event(discord_state=None)
-        self.box['old_with_marker'] = self.event(age=1800)
+        self.box['old_with_marker'] = self.event(age=3 * 3600)
         self.assertEqual(self.namespace['_retry_discord_confirmed_only'](), 0)
         self.module.deliver.assert_not_called()
 
-    def test_telegram_failure_does_not_block_discord_when_signal_valid(self):
+    def test_telegram_failure_never_creates_discord_only_confirmation(self):
         self.box['btc'] = self.event(telegram_state='FAILED_RETRYABLE')
         self.valid.return_value = True
+        self.assertEqual(self.namespace['_retry_discord_confirmed_only'](), 0)
+        self.module.deliver.assert_not_called()
+        # The exact same event becomes eligible once Telegram ACKs it.
+        self.box['btc']['state'] = 'SENT'
         self.assertEqual(self.namespace['_retry_discord_confirmed_only'](), 1)
         self.module.deliver.assert_called_once()
 

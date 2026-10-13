@@ -47200,6 +47200,12 @@ def _attempt_confirmed_outbox_event_inner(key):
                     _confirmed_signal_outbox[event_key]['state'] = 'SENT'
                     _confirmed_signal_outbox[event_key]['updated_at'] = now
             _save_confirmed_signal_outbox_to_disk()
+            # Telegram delivery was already recorded; retry Discord only
+            # when the exact same event still has an unsent Discord marker.
+            try:
+                _deliver_discord_confirmed_for_key(event_key)
+            except Exception:
+                pass
             return True
 
     if not _confirmed_delivery_valid_17_5_11(market, signal):
@@ -47226,6 +47232,15 @@ def _attempt_confirmed_outbox_event_inner(key):
             if event_key in _confirmed_signal_outbox:
                 _confirmed_signal_outbox[event_key].update(state='SENT', updated_at=now, last_error=None)
         _save_confirmed_signal_outbox_to_disk()
+        # C40.3 ROOT: Telegram's positive ACK is the authoritative dispatch
+        # point. The previous Discord sender ran only after 120/150 s warmups
+        # and potentially heavy lifecycle/Guardian scans; pending signals
+        # could age out without any Discord attempt. Direct delivery is capped
+        # at 4 s; errors never change the Telegram ACK or trading state.
+        try:
+            _deliver_discord_confirmed_for_key(event_key)
+        except Exception as exc:
+            print('⚠️ [DISCORD CONFIRMED] post-ACK ' + type(exc).__name__, flush=True)
         try:
             from official_signal_store import persist_official
             with _confirmed_signal_outbox_lock:
@@ -47274,15 +47289,18 @@ def _discord_confirmed_delivery_optional(key):
             return False
         market = str(item.get('market') or '').lower()
         signal = dict(item.get('signal') or {})
-        # Telegram 'SENT' is durable proof that this *same* official event
-        # already passed the production publication safety gate. Otherwise,
-        # validate the official payload while its original close is fresh.
-        # A hard transport age limit prevents delayed/restarted deliveries
-        # from presenting a historic event as a fresh confirmation.
-        age = now - float(item.get('created_at') or 0)
-        if age < -120 or age > 20 * 60:
+        # Publish the SAME event that was positively acknowledged by
+        # Telegram. Dynamic safety/expiry filters should never re-veto an
+        # already published confirmation: no market analysis is rerun here.
+        # Conversely, do NOT generate Discord-only confirmations when the
+        # Telegram transport failed or publication has not completed.
+        if telegram_state != 'SENT':
             return False
-        if telegram_state != 'SENT' and not _confirmed_delivery_valid_17_5_11(market, signal):
+        age = now - float(item.get('created_at') or 0)
+        # Only explicitly enrolled events (discord_state=PENDING) qualify.
+        # Recover short Render/Discord outages, but never announce days-old
+        # trading setups as fresh entries. Older snapshots have no marker.
+        if age < -120 or age > 2 * 60 * 60:
             return False
         if not bool(item.get('_c35_remote_persisted')):
             try:
@@ -47295,6 +47313,9 @@ def _discord_confirmed_delivery_optional(key):
             except Exception:
                 return False
         msg = _build_confirmed_signal_telegram_message(market, signal)
+        if age > 10 * 60:
+            msg = ('🕓 ENTREGA DIFERIDA: confirmación publicada previamente. '
+                   'Comprueba su vigencia actual antes de operar.\n\n' + msg)
         ok, delay, err = deliver(msg)
         with _confirmed_signal_outbox_lock:
             existing = _confirmed_signal_outbox.get(key)
@@ -47328,6 +47349,29 @@ def _discord_confirmed_delivery_optional(key):
 _confirmed_discord_delivery_lock = threading.Lock()
 
 
+def _deliver_discord_confirmed_for_key(key):
+    """C40.3: direct post-ACK mirror, same lock as the background retry.
+
+    Once Telegram has acknowledged THIS official event, don't depend on
+    Guardian/Futures monitoring cycles. A busy drainer is harmless: the
+    persisted PENDING event will be retried by the existing workers.
+    """
+    try:
+        from discord_confirmed import enabled
+        if not enabled():
+            print('⚠️ [DISCORD CONFIRMED] WEBHOOK_NOT_CONFIGURED', flush=True)
+            return False
+    except Exception as exc:
+        print('⚠️ [DISCORD CONFIRMED] WEBHOOK_CHECK ' + type(exc).__name__, flush=True)
+        return False
+    if not _confirmed_discord_delivery_lock.acquire(blocking=False):
+        return False
+    try:
+        return bool(_discord_confirmed_delivery_optional(key))
+    finally:
+        _confirmed_discord_delivery_lock.release()
+
+
 def _retry_discord_confirmed_only(limit=2):
     try:
         from discord_confirmed import enabled
@@ -47349,10 +47393,9 @@ def _retry_discord_confirmed_only(limit=2):
                 keys = [k for k, event in _confirmed_signal_outbox.items()
                         if str(event.get('discord_state') or '').upper() in
                            ('PENDING', 'FAILED_RETRYABLE')
-                        and str(event.get('state') or '').upper() not in
-                            ('INVALID', 'EXPIRED_OR_SUPERSEDED')
+                        and str(event.get('state') or '').upper() == 'SENT'
                         and now >= float(event.get('discord_retry_at') or 0)
-                        and 0 <= now - float(event.get('created_at') or 0) <= 1200]
+                        and -120 <= now - float(event.get('created_at') or 0) <= 7200]
                 keys.sort(key=lambda key: float(
                     (_confirmed_signal_outbox.get(key) or {}).get('created_at') or 0))
             count = 0
@@ -54285,6 +54328,24 @@ def monitor_guardian_telegram_loop():
     while True:
         urgent_guardian = False
 
+        # C40.3 ROOT: dispatch lightweight notifications BEFORE any Futures
+        # system availability checks or potentially long Guardian scans.
+        # Previously, `futures_market is None: continue` skipped ALL drains.
+        try:
+            _retry_discord_confirmed_only(limit=2)
+        except Exception as exc:
+            print('⚠️ [DISCORD CONFIRMED] Guardian drain ' + type(exc).__name__, flush=True)
+        try:
+            from discord_guardian import drain
+            drain(max_items=2)
+        except Exception:
+            pass
+        try:
+            from discord_telegram_mirror import drain as drain_telegram_mirror
+            drain_telegram_mirror(max_items=2)
+        except Exception:
+            pass
+
         try:
 
             from saved_signals import (
@@ -55078,30 +55139,6 @@ def monitor_guardian_telegram_loop():
                 "❌ monitor_guardian_telegram_loop: "
                 f"{e}"
             )
-
-        # C40.2: confirmations have their own official outbox. Dispatch them
-        # through Guardian's existing lightweight cycle so Futures/Multi/Spot
-        # do not depend on the overloaded Futures lifecycle worker.
-        try:
-            _retry_discord_confirmed_only(limit=2)
-        except Exception as exc:
-            print('⚠️ [DISCORD CONFIRMED] Guardian drain ' + type(exc).__name__, flush=True)
-
-        # C40: reintentos Discord acotados desde el MISMO Guardian worker.
-        # Enviar Discord no depende de que Telegram esté conectado.
-        try:
-            from discord_guardian import drain
-            drain(max_items=2)
-        except Exception:
-            pass
-        # C40.1: mismo worker, sin thread ni polling de señales adicionales.
-        # Se envían/reintentan alertas Telegram no cubiertas por Confirmadas
-        # y Guardian (por ejemplo ENTRY o MACRO).
-        try:
-            from discord_telegram_mirror import drain as drain_telegram_mirror
-            drain_telegram_mirror(max_items=2)
-        except Exception:
-            pass
 
         # C37: 15 s sólo si existe una posición cercana al SL/TP. Sin
         # posiciones urgentes, ciclo de 45 s; no se agrega un worker.
