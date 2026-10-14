@@ -223,6 +223,12 @@ _HIGH_TERMS = (
     "oil spike", "oil surge", "crude jumps", "brent above", "wti above",
     "treasury yields breach", "treasury yields rise", "10-year yields",
     "rate hike", "rates hike", "clarity act", "crypto bill", "exchange suspends withdrawals",
+    # C42: supply shocks/Chinese stimulus/exchange disruptions were classified
+    # as MEDIUM/LOW by topic rules even when consequences were substantive.
+    "opec cuts", "oil supply cut", "oil supply disruption", "hormuz closed",
+    "lng terminal shutdown", "gas supply disruption", "gas pipeline attacked",
+    "copper mine shutdown", "copper supply disruption", "china stimulus package",
+    "china pmi contracts", "exchange withdrawals halted", "exchange hacked",
 )
 
 
@@ -918,44 +924,68 @@ def _format_event_ticker(event: Dict, now: datetime) -> str:
 
 
 def _build_alert_candidates(events: List[Dict], news: List[Dict], now: datetime) -> List[Dict]:
+    """C42: pre-event windows plus important recent headlines, with original URLs.
+
+    No calendar event asserts a published economic result. DATE_ONLY events
+    are excluded from countdown alerts because the actual hour is unknown.
+    """
     alerts: List[Dict] = []
     for event in events:
         hours = _event_hours_until(event, now)
         if hours is None or hours < 0:
             continue
+        if str(event.get('risk_level') or '').upper() not in ('HIGH', 'CRITICAL'):
+            continue
+        precision = str(event.get('time_precision') or 'EXACT').upper()
         window = None
-        precision = str(event.get("time_precision") or "EXACT").upper()
-        if 23.5 <= hours <= 24.5:
-            window = "24H"
-        elif precision == "EXACT" and 2.7 <= hours <= 3.3:
-            window = "3H"
-        elif precision == "EXACT" and 0.35 <= hours <= 0.65:
-            window = "30M"
+        if precision != 'EXACT':
+            # FOMC meeting date known but announcement hour unknown. A date-
+            # only heads-up may be sent; never invent a precise 3h/30m clock.
+            window = 'DAY_AHEAD' if 18 <= hours <= 30 else None
+        elif 23.0 <= hours <= 24.25:
+            window = '24H'
+        elif 2.5 <= hours <= 3.25:
+            window = '3H'
+        elif 0 < hours <= 0.75:
+            window = '30M'
         if window:
             alerts.append({
-                "key": f"{event.get('id')}:{window}",
-                "level": event.get("risk_level", "HIGH"),
-                "text": _format_event_ticker(event, now),
-                "source": event.get("source"),
-                "url": event.get("url"),
+                'key': f"{event.get('id')}:{window}",
+                'kind': 'SCHEDULED_EVENT',
+                'evidence_id': event.get('id'),
+                'window': window,
+                'level': event.get('risk_level', 'HIGH'),
+                'title': event.get('title_es'),
+                'text': _format_event_ticker(event, now),
+                'source': event.get('source'),
+                'url': event.get('url'),
             })
 
-    for item in news[:8]:
-        published = _safe_dt(item.get("published_at"))
+    material_categories = {
+        'GEOPOLITICAL', 'MARKET_STRESS', 'CRYPTO_EXCHANGE',
+        'MONETARY_POLICY', 'INFLATION', 'LABOR', 'ENERGY_INFLATION',
+        'NATURAL_GAS', 'TRADE_POLICY', 'CHINA_MACRO', 'INDUSTRIAL_METALS',
+        'RATES_BONDS', 'CRYPTO_POLICY', 'CRYPTO_LEGISLATION',
+    }
+    for item in news[:12]:
+        published = _safe_dt(item.get('published_at'))
         age_minutes = ((now - published).total_seconds() / 60.0) if published else 9999
-        level = str(item.get("risk_level") or "LOW").upper()
-        bias = str(item.get("risk_bias") or "NEUTRAL").upper()
-        is_material = level == "CRITICAL" or (level == "HIGH" and bias == "RISK_OFF")
-        if is_material and 0 <= age_minutes <= 45:
+        level = str(item.get('risk_level') or 'LOW').upper()
+        bias = str(item.get('risk_bias') or 'NEUTRAL').upper()
+        categories = {str(cat.get('code') or '') for cat in (item.get('categories') or [])
+                      if isinstance(cat, dict)}
+        is_material = (level == 'CRITICAL' or
+                       (level == 'HIGH' and (bias == 'RISK_OFF' or categories & material_categories)))
+        if is_material and 0 <= age_minutes <= 45 and item.get('url'):
             alerts.append({
-                "key": f"{item.get('id')}:BREAKING",
-                "level": level,
-                "text": (
-                    "Noticia macro crítica" if level == "CRITICAL"
-                    else "Riesgo macro elevado"
-                ) + f" · {item.get('title_es')}",
-                "source": item.get("source"),
-                "url": item.get("url"),
+                'key': f"{item.get('id')}:BREAKING",
+                'kind': 'HEADLINE',
+                'evidence_id': item.get('id'),
+                'level': level,
+                'title': item.get('title_es'),
+                'text': str(item.get('title_es') or 'Noticia relevante'),
+                'source': item.get('source'),
+                'url': item.get('url'),
             })
     return alerts
 
@@ -1117,8 +1147,8 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         })
     if not ticker_items and not usable:
         ticker_items.append({'id':'C41-UNKNOWN','type':'STATUS','level':'UNKNOWN',
-            'text':'TraderMacro sin datos fundamentales verificados; consultando fuentes (riesgo NO evaluado).',
-            'source':'Radar C41','url':''})
+            'text':'Fuentes económicas temporalmente no disponibles; evaluación de riesgo pendiente.',
+            'source':'Fuentes públicas','url':''})
     ticker_items = ticker_items[:10]
 
     # C38: optional on-demand interpretation of already verified news.
@@ -1169,7 +1199,8 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "upcoming_events": upcoming[:10],
         "headlines": active_news[:12],
         "ticker_items": ticker_items,
-        "telegram_alert_candidates": _build_alert_candidates(upcoming, active_news, now),
+        "telegram_alert_candidates": [],  # C42: no alerts to Telegram
+        "discord_alert_candidates": _build_alert_candidates(upcoming, active_news, now),
         "generated_at": _iso_utc(now),
         "display_timezone": DISPLAY_TZ_NAME,
         "sources": [

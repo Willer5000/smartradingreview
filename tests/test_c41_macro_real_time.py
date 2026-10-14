@@ -90,7 +90,7 @@ def test_c41_no_data_is_unknown_not_low():
     assert snap['risk_level'] == 'UNKNOWN'
     assert snap['data_status'] == 'NO_VERIFIED_DATA'
     assert 'market_impacts' in snap and len(snap['market_impacts']) == len(impact.MARKETS)
-    assert 'NO evaluado' in snap['ticker_items'][0]['text']
+    assert 'riesgo pendiente' in snap['ticker_items'][0]['text']
 
 
 def test_c41_news_timestamp_expiry_and_offline_cached_read():

@@ -56685,7 +56685,20 @@ def futures_standard_alert_loop():
                 from macro_context import schedule_macro_refresh_if_due
                 schedule_macro_refresh_if_due()
             except Exception as macro_tick_error:
-                print(f'⚠️ [MACRO C41] async tick: {type(macro_tick_error).__name__}', flush=True)
+                print(f'⚠️ [MACRO] async tick: {type(macro_tick_error).__name__}', flush=True)
+            # C42: leverage the EXISTING Futures monitor. No Telegram, new daemon
+            # or new data fetch: snapshots are cached; webhook timeout bounded.
+            try:
+                from discord_macro_alerts import enabled as macro_discord_enabled, dispatch_macro_alerts
+                if macro_discord_enabled():
+                    from macro_context import get_macro_context_snapshot
+                    dispatch_macro_alerts(
+                        get_macro_context_snapshot(fetch_if_stale=False),
+                        already_sent=_macro_alert_already_sent,
+                        mark_sent=_mark_macro_alert_sent,
+                    )
+            except Exception as macro_discord_error:
+                print(f'⚠️ [MACRO DISCORD] {type(macro_discord_error).__name__}', flush=True)
             # 17.5.10: delivery retry is independent from analysis completion.
             _retry_confirmed_signal_outbox(limit=3)
             # Commit 37: refresh bounded per-ID official index on this ALREADY
@@ -58910,37 +58923,13 @@ def _mark_macro_alert_sent(alert_key: str, text: str) -> None:
 
 
 def macro_context_alert_loop():
-    enabled = str(os.getenv('MACRO_TELEGRAM_ALERTS_ENABLED', 'true')).lower()
-    if enabled not in ('1', 'true', 'yes', 'on', 'si', 'sí'):
-        print('⏭️ Macro Telegram deshabilitado')
-        return
-    time.sleep(180)
-    while True:
-        try:
-            from macro_context import refresh_macro_context
-            snapshot = refresh_macro_context(force=False) or {}
-            posture = str(snapshot.get('futures_posture') or 'NORMAL')
-            for alert in snapshot.get('telegram_alert_candidates', []) or []:
-                alert_key = str(alert.get('key') or '')
-                if not alert_key or _macro_alert_already_sent(alert_key):
-                    continue
-                level = str(alert.get('level') or 'HIGH').upper()
-                text = str(alert.get('text') or 'Evento macro relevante')
-                source = str(alert.get('source') or 'Fuente pública')
-                message = (
-                    f"🧭 ALERTA MACRO · {level}\n"
-                    f"{text}\n"
-                    f"Futures: {posture}\n"
-                    f"Fuente: {source}\n"
-                    "Contexto informativo: no es una orden ni modifica Safety/Entry/SL/TP."
-                )
-                sent = expert_system.send_telegram_alert(message, None)
-                if sent:
-                    _mark_macro_alert_sent(alert_key, text)
-                    print(f'✅ Macro Telegram: {alert_key}')
-        except Exception as error:
-            print(f'⚠️ macro_context_alert_loop: {error}')
-        time.sleep(_MACRO_ALERT_LOOP_INTERVAL)
+    """Legacy entry point intentionally retired in C42.
+
+    Fundamental/economic alerts are Discord-only. Trading and Guardian
+    Telegram notifications remain untouched. The dispatcher runs in the
+    existing futures_standard_alert_loop, even in Render Free.
+    """
+    return None
 
 
 def _start_background_threads():
@@ -59079,21 +59068,8 @@ def _start_background_threads():
             "⚠️ Error iniciando Guardian Telegram: "
             f"{e}"
         )    
-    # 5. Macro Context. On Render Free it stays cache/on-demand and is
-    # refreshed by existing analysis paths; no permanent daemon is necessary.
-    if str(os.environ.get('FREE_PLAN_LOCKDOWN', '1')).strip().lower() in ('1','true','yes','on'):
-        print("🪶 [C29] macro-context sin daemon permanente en Free; contexto cache/on-demand")
-    else:
-        try:
-            t_macro = threading.Thread(
-                target=macro_context_alert_loop,
-                name='macro-context',
-                daemon=True
-            )
-            t_macro.start()
-            print("✅ Thread macro-context iniciado")
-        except Exception as e:
-            print(f"⚠️ Error iniciando macro-context: {e}")
+    # C42: no macro notifier daemon on ANY plan. Alerts are Discord-only
+    # and piggyback on the existing Futures lifecycle monitor.
 
     # RC8.4 — notifier Futures normal. Sólo publica setups que ya pasaron
     # el Publication Gate; no comparte preferencias con scalping.

@@ -12481,9 +12481,9 @@ function _macroRiskLabel(level) {
         MEDIUM: 'MEDIO',
         HIGH: 'ALTO',
         CRITICAL: 'CRÍTICO',
-        UNKNOWN: 'SIN DATO',
+        UNKNOWN: 'PENDIENTE',
     };
-    return labels[String(level || 'UNKNOWN').toUpperCase()] || 'SIN DATO';
+    return labels[String(level || 'UNKNOWN').toUpperCase()] || 'PENDIENTE';
 }
 
 function _macroRiskClass(level) {
@@ -12500,14 +12500,14 @@ function _macroRenderBadge(snapshot) {
     const next = String(snapshot?.next_event_risk_level || '').toUpperCase();
     const hours = Number(snapshot?.next_event_hours);
     badge.className = `macro-risk-badge ${_macroRiskClass(current)}`;
-    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> MACRO AHORA · ${_macroRiskLabel(current)}`;
+    let label = `<i class="fas fa-globe-americas" aria-hidden="true"></i> ACTUALIDAD ECONÓMICA · ${_macroRiskLabel(current)}`;
     if (next && next !== 'UNKNOWN') label += ` <span class="opacity-75">| PRÓXIMO · ${_macroRiskLabel(next)}</span>`;
     badge.innerHTML = label;
     const nextEvent = snapshot?.next_high_impact_event || {};
     badge.title = nextEvent?.title_es
         ? `Riesgo actual: ${_macroRiskLabel(current)}. Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
         : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
-    if (snapshot?.data_status !== 'FRESH') badge.title += ' Cobertura: ' + String(snapshot?.data_status || 'NO_VERIFIED_DATA');
+    if (snapshot?.data_status !== 'FRESH') badge.title += ' Algunas fuentes aún no han podido actualizarse.';
 }
 
 function _macroMoney(value) {
@@ -12526,15 +12526,15 @@ function _macroRenderFlow(snapshot) {
     if (!el) return;
     const flow = snapshot?.exchange_flow || {};
     if (!flow.available) {
-        el.textContent = 'CEX · sin dato';
-        el.title = flow.error ? `Flujo CEX no disponible: ${String(flow.error).slice(0,120)}` : 'Flujo CEX no disponible';
+        el.textContent = 'Exchanges · información pendiente';
+        el.title = 'No hay datos recientes disponibles sobre movimientos de exchanges.';
         return;
     }
     const d24 = _macroMoney(flow.aggregate_inflow_24h_usd);
     const d7 = _macroMoney(flow.aggregate_inflow_7d_usd);
     const vol = String(flow.volatility_risk || 'UNKNOWN').toUpperCase();
-    const volEs = {LOW:'BAJO',MEDIUM:'MEDIO',HIGH:'ALTO',UNKNOWN:'SIN DATO'}[vol] || vol;
-    el.textContent = `CEX 24h ${d24} · 7d ${d7} · VOL ${volEs}`;
+    const volEs = {LOW:'BAJO',MEDIUM:'MEDIO',HIGH:'ALTO',UNKNOWN:'PENDIENTE'}[vol] || vol;
+    el.textContent = `Exchanges · 24 h ${d24} · 7 días ${d7} · volatilidad ${volEs}`;
     el.title = `${flow.label_es || 'Flujo CEX'} · ${flow.note_es || 'Contexto de reservas/flujo; no equivale a compra/venta propia del exchange.'}`;
 }
 
@@ -12588,14 +12588,14 @@ function _macroNormalizeItems(snapshot) {
     const errors = Array.isArray(snapshot?.errors) ? snapshot.errors : [];
     if (errors.length) {
         return [{
-            text: 'Radar macro temporalmente sin una fuente · trading continúa normalmente.',
-            source: 'Fail-open',
+            text: 'Información económica pendiente de actualización.',
+            source: 'Fuentes públicas',
             level: 'UNKNOWN',
             url: '',
         }];
     }
     return [{
-        text: 'Radar macro activo · sin eventos o titulares relevantes por el momento.',
+        text: 'Sin noticias económicas destacadas verificadas por el momento.',
         source: 'Fuentes públicas',
         level: snapshot?.risk_level || 'LOW',
         url: '',
@@ -12606,13 +12606,19 @@ function _macroRenderImpacts(snapshot) {
     const target = document.getElementById('macro-impact-list');
     if (!target) return;
     target.replaceChildren(); // textContent only: headlines/LLM text are untrusted
-    const status = String(snapshot?.data_status || 'NO_VERIFIED_DATA');
     const top = document.createElement('div');
     top.className = 'macro-impact-summary';
     const headlineCount = Number(snapshot?.fresh_headlines || 0);
-    const last = snapshot?.news_last_success_utc || 'sin éxito verificado';
-    top.textContent = `Fuentes · ${status} · noticias recientes: ${headlineCount} · último refresco de noticias: ${last}. `
-        + 'Impactos condicionales: no constituyen señales ni órdenes.';
+    const last = snapshot?.news_last_success_utc;
+    let updateInfo = 'actualización pendiente';
+    if (last && !Number.isNaN(new Date(last).getTime())) {
+        updateInfo = 'actualizado el ' + new Date(last).toLocaleString('es-BO', {
+            timeZone: 'America/La_Paz', day: '2-digit', month: '2-digit',
+            hour: '2-digit', minute: '2-digit'
+        }) + ' (hora Bolivia)';
+    }
+    top.textContent = `Información económica · ${headlineCount} noticias recientes · ${updateInfo}. `
+        + 'Efectos posibles, sujetos a confirmación; no constituyen señales.';
     target.appendChild(top);
     const rows = snapshot?.market_impacts || {};
     const badge = { BENEFICIA:'↗ Beneficio potencial', PERJUDICA:'↘ Perjuicio potencial',
@@ -12624,16 +12630,16 @@ function _macroRenderImpacts(snapshot) {
         const title = document.createElement('strong');
         title.textContent = `${item.label || key} · ${badge[item.impact] || 'No concluyente'}`;
         const note = document.createElement('small');
-        note.textContent = `${item.why || ''} · fuentes #${(item.evidence_ids || []).length}`;
+        note.textContent = `${item.why || ''} · ${((item.evidence_ids || []).length ? 'con referencias' : 'pendiente de más información')}`;
         card.append(title, note);
         target.appendChild(card);
     }
     const science = snapshot?.scientist_interpretation || {};
     const ai = document.createElement('div');
     ai.className = 'macro-impact-summary';
-    ai.textContent = `IA científica (${science.status || 'NO DISPONIBLE'}; ${science.authority || 'ADVISORY_ONLY'}): `
-        + (science.status === 'READY' ? String(science.summary || 'Interpretación disponible')
-           : 'interpretación no disponible o pendiente; los impactos verificables siguen operativos.');
+    ai.textContent = 'Análisis complementario con IA científica: ' +
+        (science.status === 'READY' ? String(science.summary || 'Análisis disponible.')
+           : 'sin interpretación adicional por el momento; se muestran los efectos posibles basados en las fuentes.');
     target.appendChild(ai);
     // The optional LLM is never used to alter the official trading decision.
     if (science.status === 'READY' && science.asset_impacts) {
@@ -12673,7 +12679,7 @@ async function refreshMacroContext(force = false) {
                 risk_level: 'UNKNOWN',
                 errors: ['AUTH_REQUIRED'],
                 ticker_items: [{
-                    text: 'Radar macro disponible al iniciar sesión.',
+                    text: 'Las noticias económicas están disponibles al iniciar sesión.',
                     source: 'Sistema',
                     url: '',
                 }],
@@ -12700,8 +12706,8 @@ async function refreshMacroContext(force = false) {
                 risk_level: 'UNKNOWN',
                 errors: ['NETWORK_ERROR'],
                 ticker_items: [{
-                    text: 'Radar macro sin conexión temporal · el motor de trading continúa independiente.',
-                    source: 'Fail-open',
+                    text: 'Las noticias económicas no se pueden actualizar por el momento.',
+                    source: 'Fuentes públicas',
                     url: '',
                 }],
             });
