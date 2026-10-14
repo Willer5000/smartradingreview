@@ -45,9 +45,9 @@ MACRO_CONTEXT_ENABLED = str(os.getenv("MACRO_CONTEXT_ENABLED", "true")).strip().
 }
 MACRO_NEWS_CACHE_SECONDS = max(300, min(3600, int(os.getenv("MACRO_NEWS_CACHE_SECONDS", "900"))))
 MACRO_CALENDAR_CACHE_SECONDS = max(1800, min(43200, int(os.getenv("MACRO_CALENDAR_CACHE_SECONDS", "21600"))))
-MACRO_NEWS_MAX_ARTICLES = max(5, min(24, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "12"))))
-MACRO_HEADLINE_MAX_AGE_HOURS = max(6, min(48, int(os.getenv("MACRO_HEADLINE_MAX_AGE_HOURS", "24"))))
-MACRO_HTTP_TIMEOUT = max(3, min(15, int(os.getenv("MACRO_HTTP_TIMEOUT", "3"))))
+MACRO_NEWS_MAX_ARTICLES = max(8, min(24, int(os.getenv("MACRO_NEWS_MAX_ARTICLES", "16"))))
+MACRO_HEADLINE_MAX_AGE_HOURS = max(6, min(24, int(os.getenv("MACRO_HEADLINE_MAX_AGE_HOURS", "24"))))
+MACRO_HTTP_TIMEOUT = max(3, min(10, int(os.getenv("MACRO_HTTP_TIMEOUT", "5"))))
 
 GDELT_DOC_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 BLS_ICS_URL = "https://www.bls.gov/schedule/news_release/bls.ics"
@@ -58,18 +58,21 @@ FOMC_CALENDAR_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars
 FED_MONETARY_RSS_URL = "https://www.federalreserve.gov/feeds/press_monetary.xml"
 CFTC_GENERAL_RSS_URL = "https://www.cftc.gov/RSS/RSSGP/rssgp.xml"
 SEC_PRESS_RSS_URL = "https://www.sec.gov/news/pressreleases.rss"
+EIA_ENERGY_RSS_URL = "https://www.eia.gov/rss/todayinenergy.xml"
 
 UTC = timezone.utc
 try:
-    DISPLAY_TZ_NAME = str(os.getenv("MACRO_DISPLAY_TIMEZONE", "America/Argentina/Buenos_Aires")).strip()
+    DISPLAY_TZ_NAME = str(os.getenv("MACRO_DISPLAY_TIMEZONE", "America/La_Paz")).strip()
     DISPLAY_TZ = ZoneInfo(DISPLAY_TZ_NAME)
 except Exception:
-    DISPLAY_TZ_NAME = "America/Argentina/Buenos_Aires"
+    DISPLAY_TZ_NAME = "America/La_Paz"
     DISPLAY_TZ = ZoneInfo(DISPLAY_TZ_NAME)
 NY_TZ = ZoneInfo("America/New_York")
 
 _LOCK = threading.Lock()
 _DB_HYDRATED = False
+_REFRESH_SCHEDULE_LOCK = threading.Lock()
+_REFRESH_IN_FLIGHT = False
 _CACHE: Dict[str, object] = {
     "news_fetched_at": 0.0,
     "calendar_fetched_at": 0.0,
@@ -77,6 +80,13 @@ _CACHE: Dict[str, object] = {
     "calendar": [],
     "errors": [],
     "news_last_success_utc": None,
+    "calendar_last_success_utc": None,
+    "news_successful_sources": [],
+    "calendar_successful_sources": [],
+    "news_last_attempt_utc": None,
+    "news_errors": [],
+    "calendar_errors": [],
+    "calendar_last_attempt_utc": None,
 }
 
 
@@ -181,6 +191,21 @@ _CATEGORY_RULES: List[Tuple[str, str, Tuple[str, ...], int]] = [
         "clarity act", "crypto bill", "digital asset bill", "senate crypto",
         "senado", "cftc", "sec ", "stablecoin bill", "market structure bill",
     ), 18),
+    ("CHINA_MACRO", "Economía de China", (
+        "china stimulus", "chinese economy", "china pmi", "chinese demand", "star 50", "china economy",
+        "estímulo chino", "economía china", "china growth", "china slowdown",
+    ), 18),
+    ("INDUSTRIAL_METALS", "Minerales / metales industriales", (
+        "copper", "cobre", "copper mine", "critical minerals", "rare earths", "tierras raras",
+        "silver prices", "precio de la plata", "industrial metal", "lithium", "litio",
+    ), 16),
+    ("NATURAL_GAS", "Gas y GNL", (
+        "natural gas", "natgas", "lng", "gasoducto", "gas pipeline", "gas supply", "gas natural",
+    ), 18),
+    ("CRYPTO_EXCHANGE", "Exchange y liquidez cripto", (
+        "binance", "coinbase", "kraken", "bybit", "kucoin", "exchange hack", "stablecoin depeg",
+        "exchange insolvency", "crypto liquidations", "crypto withdrawals",
+    ), 22),
     ("GOLD", "Oro y refugio", (
         "gold", "oro ", "bullion", "safe haven", "refugio",
     ), 10),
@@ -189,14 +214,15 @@ _CATEGORY_RULES: List[Tuple[str, str, Tuple[str, ...], int]] = [
 _CRITICAL_TERMS = (
     "emergency rate", "reunión de emergencia", "bank run", "corrida bancaria",
     "default", "impago soberano", "ataque nuclear", "nuclear attack",
-    "exchange hack", "hackeo de exchange", "capital controls", "controles de capital",
+    "exchange hack", "hackeo de exchange", "exchange insolvency", "stablecoin depeg",
+    "usdt depeg", "tether loses peg", "capital controls", "controles de capital",
 )
 _HIGH_TERMS = (
     "fomc", "federal reserve", "cpi", "inflación", "inflation", "nonfarm", "payroll",
     "sanctions", "sanciones", "tariff", "arancel", "war", "guerra", "sec bitcoin",
     "oil spike", "oil surge", "crude jumps", "brent above", "wti above",
     "treasury yields breach", "treasury yields rise", "10-year yields",
-    "rate hike", "rates hike", "clarity act", "crypto bill",
+    "rate hike", "rates hike", "clarity act", "crypto bill", "exchange suspends withdrawals",
 )
 
 
@@ -279,61 +305,58 @@ def classify_macro_headline(title: str, source: str = "") -> Dict:
     }
 
 
+# C41: dos consultas por ciclo (núcleo + vertical rotativa) para no dedicar
+# todos los titulares a un único tema ni disparar el uso gratuito de GDELT.
+_GDELT_CORE_QUERY = ('("Federal Reserve" OR FOMC OR "CPI" OR inflation OR "rate cut" '
+                     'OR "Treasury yields" OR oil OR crude OR sanctions OR war OR tariffs)')
+_GDELT_VERTICALS = (
+    '("bitcoin" OR "crypto exchange" OR "stablecoin" OR "ETF" OR "exchange hack" OR "token" OR "liquidations")',
+    '("China economy" OR "China stimulus" OR "STAR 50" OR "copper" OR "silver" OR "gold" OR "minerals")',
+    '("natural gas" OR "LNG" OR "OPEC" OR "oil supply" OR "gas pipeline" OR "Middle East")',
+)
+
+
 def _fetch_gdelt_news() -> List[Dict]:
-    # RC6: GDELT sigue siendo el radar amplio, pero ya no limita la búsqueda a
-    # titulares en español. Los shocks relevantes para BTC (petróleo, yields,
-    # regulación estadounidense) suelen aparecer primero en inglés.
-    query = (
-        '(bitcoin OR crypto OR criptomonedas OR "Federal Reserve" OR FOMC OR inflation OR inflación '
-        'OR CPI OR "interest rates" OR "tasas de interés" OR gold OR oro OR sanctions OR sanciones '
-        'OR tariffs OR aranceles OR war OR guerra OR "banking crisis" OR "crisis bancaria" '
-        'OR oil OR crude OR Brent OR WTI OR "Treasury yields" OR "bond yields" '
-        'OR Senate OR "Clarity Act" OR SEC OR CFTC OR regulation OR legislación)'
-    )
-    params = {
-        "query": query,
-        "mode": "artlist",
-        "maxrecords": MACRO_NEWS_MAX_ARTICLES,
-        "timespan": "12h",
-        "sort": "datedesc",
-        "format": "json",
-    }
-    response = requests.get(
-        GDELT_DOC_URL,
-        params=params,
-        timeout=MACRO_HTTP_TIMEOUT,
-        headers={"User-Agent": "CryptoTraderAnalystPro/1.0 macro-context"},
-    )
-    response.raise_for_status()
-    payload = response.json() if response.content else {}
-    articles = payload.get("articles") or []
-
+    # La vertical gira cada refresh de quince minutos; ningún bucle masivo.
+    rotation = int(time.time() // MACRO_NEWS_CACHE_SECONDS) % len(_GDELT_VERTICALS)
+    queries = (_GDELT_CORE_QUERY, _GDELT_VERTICALS[rotation])
     rows: List[Dict] = []
-    seen = set()
-    for article in articles:
-        title = _normalize_title(article.get("title"))
-        url = str(article.get("url") or "").strip()
-        if not title or not url:
-            continue
-        key = re.sub(r"\W+", "", title.lower())[:160]
-        if key in seen:
-            continue
-        seen.add(key)
-        published = _safe_dt(article.get("seendate") or article.get("date"))
-        source = str(article.get("domain") or article.get("sourcecountry") or "GDELT").strip()
-        classification = classify_macro_headline(title, source)
-        rows.append({
-            "id": _stable_id(title, url),
-            "kind": "HEADLINE",
-            "title_es": title,
-            "source": source or "GDELT",
-            "url": url,
-            "published_at": _iso_utc(published) if published else None,
-            **classification,
-        })
-
-    rows.sort(key=lambda item: (item.get("risk_score", 0), item.get("published_at") or ""), reverse=True)
-    return rows[:MACRO_NEWS_MAX_ARTICLES]
+    failures = []
+    for query in queries:
+        try:
+            response = requests.get(
+                GDELT_DOC_URL,
+                params={"query": query, "mode":"artlist", "maxrecords": 30,
+                        "timespan":"24h", "sort":"datedesc", "format":"json"},
+                timeout=MACRO_HTTP_TIMEOUT,
+                headers={"User-Agent":"SmartTradingReview/1.0 MacroResearch"},
+            )
+            response.raise_for_status()
+            payload = response.json() if response.content else {}
+            if not isinstance(payload, dict):
+                raise ValueError('GDELT did not return a JSON object')
+            for article in (payload.get('articles') or []):
+                title = _normalize_title(article.get('title'))
+                url = str(article.get('url') or '').strip()
+                published = _safe_dt(article.get('seendate') or article.get('date'))
+                if not title or not url or not published:
+                    continue
+                age = (_utc_now() - published).total_seconds()
+                if not 0 <= age <= MACRO_HEADLINE_MAX_AGE_HOURS * 3600:
+                    continue
+                source = str(article.get('domain') or 'GDELT').strip()[:65]
+                classification = classify_macro_headline(title, source)
+                rows.append({'id':_stable_id(title, url), 'kind':'HEADLINE',
+                             'title_es':title, 'source':source, 'url':url,
+                             'published_at':_iso_utc(published), **classification})
+        except Exception as exc:
+            failures.append(f'{type(exc).__name__}: {str(exc)[:60]}')
+    if failures and not rows:
+        raise RuntimeError('GDELT queries failed: ' + ' | '.join(failures))
+    # Cap resources even on a verbose source.
+    unique = {r['id']:r for r in rows}
+    return sorted(unique.values(), key=lambda x:(x['risk_score'], x['published_at']),
+                  reverse=True)[:MACRO_NEWS_MAX_ARTICLES]
 
 
 def _rss_published_dt(value: object) -> Optional[datetime]:
@@ -383,7 +406,11 @@ def _fetch_rss_feed(url: str, source: str, limit: int = 8) -> List[Dict]:
         published = _rss_published_dt(
             values.get("pubdate") or values.get("published") or values.get("updated")
         )
+        if not published or not 0 <= (_utc_now() - published).total_seconds() <= MACRO_HEADLINE_MAX_AGE_HOURS * 3600:
+            continue
         classification = classify_macro_headline(title, source)
+        if classification['categories'][0].get('code') == 'GENERAL_MACRO':
+            continue
         rows.append({
             "id": _stable_id(source, title, url_value),
             "kind": "HEADLINE",
@@ -399,17 +426,22 @@ def _fetch_rss_feed(url: str, source: str, limit: int = 8) -> List[Dict]:
 
 
 def _fetch_official_policy_news() -> List[Dict]:
+    """Official sources; fetch failures are independently logged."""
     rows: List[Dict] = []
-    feeds = (
-        (FED_MONETARY_RSS_URL, "Federal Reserve RSS"),
-        (CFTC_GENERAL_RSS_URL, "CFTC RSS"),
-        (SEC_PRESS_RSS_URL, "SEC RSS"),
-    )
-    for url, source in feeds:
+    succeeded = 0
+    for url, source in (
+        (FED_MONETARY_RSS_URL, 'Federal Reserve RSS'),
+        (CFTC_GENERAL_RSS_URL, 'CFTC RSS'),
+        (SEC_PRESS_RSS_URL, 'SEC RSS'),
+        (EIA_ENERGY_RSS_URL, 'EIA Energy RSS'),
+    ):
         try:
-            rows.extend(_fetch_rss_feed(url, source, limit=6))
+            rows.extend(_fetch_rss_feed(url, source, limit=7))
+            succeeded += 1
         except Exception as exc:
-            logger.warning("Macro RSS %s no disponible: %s", source, exc)
+            logger.warning('Macro RSS %s unavailable: %s', source, exc)
+    if not succeeded:
+        raise RuntimeError('all official RSS feeds failed')
     return rows
 
 
@@ -466,7 +498,80 @@ def _spanish_bls_title(summary: str) -> Tuple[str, str, int]:
     return summary.strip()[:120], "US_DATA", 35
 
 
-def _fetch_bls_calendar(now: Optional[datetime] = None) -> List[Dict]:
+_BLS_MONTHS = {
+    'jan':1,'january':1,'feb':2,'february':2,'mar':3,'march':3,
+    'apr':4,'april':4,'may':5,'jun':6,'june':6,'jul':7,'july':7,
+    'aug':8,'august':8,'sep':9,'sept':9,'september':9,'oct':10,'october':10,
+    'nov':11,'november':11,'dec':12,'december':12,
+}
+
+
+def _parse_bls_release_page(html_text: str, release_type: str, now: datetime) -> List[Dict]:
+    """Only read actual publication times shown on official BLS release pages.
+
+    ICS remains primary. A date or hour not explicitly on the BLS page is
+    not guessed; no hardcoded CPI date and no calendar year relabeling.
+    """
+    parser = _TextExtractor()
+    parser.feed(html_text)
+    text = re.sub(r'\s+', ' ', parser.text())
+    title = ('Consumer Price Index' if release_type == 'CPI' else 'Employment Situation')
+    label, category, score = _spanish_bls_title(title)
+    matched = re.finditer(
+        r'\b(January|February|March|April|May|June|July|August|September|October|November|December|'
+        r'Jan\.?|Feb\.?|Mar\.?|Apr\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Sept\.?|Oct\.?|Nov\.?|Dec\.?)'
+        r'\s+(\d{1,2}),?\s+(20\d{2})\s+(\d{1,2}):(\d{2})\s*(AM|PM)\b',
+        text, flags=re.I)
+    events=[]
+    for match in matched:
+        month_name, day, year, hour, minute, am_pm = match.groups()
+        month = _BLS_MONTHS.get(month_name.lower().rstrip('.'))
+        hour = int(hour) % 12 + (12 if am_pm.upper()=='PM' else 0)
+        if not month:
+            continue
+        try:
+            dt = datetime(int(year), month, int(day), hour, int(minute),tzinfo=NY_TZ).astimezone(UTC)
+        except ValueError:
+            continue
+        if not now - timedelta(hours=2) <= dt <= now + timedelta(days=8):
+            continue
+        events.append({
+            'id':_stable_id('BLS',release_type,_iso_utc(dt)),
+            'kind':'SCHEDULED_EVENT','title_es':label,'source':'BLS',
+            'url':'https://www.bls.gov/schedule/news_release/'+('cpi.htm' if release_type=='CPI' else 'empsit.htm'),
+            'scheduled_at':_iso_utc(dt),'risk_score':score,
+            'risk_level':'HIGH' if score>=70 else 'MEDIUM',
+            'categories':[{'code':category,'label_es':label}],
+            'risk_bias':'NEUTRAL','threat_level':'HIGH','opportunity_level':'WATCH',
+            'opportunity_note_es':'Dato aún no publicado: esperar cifra y sorpresa antes de dirección.',
+            'futures_posture':'CAUTION','time_precision':'EXACT',
+            'method':'BLS_OFFICIAL_HTML_FALLBACK',
+        })
+    return events
+
+
+def _fetch_bls_calendar_html(now: Optional[datetime] = None) -> List[Dict]:
+    now = (now or _utc_now()).astimezone(UTC)
+    rows: List[Dict] = []
+    failed=0
+    for kind, url in (
+        ('CPI','https://www.bls.gov/schedule/news_release/cpi.htm'),
+        ('EMPLOYMENT','https://www.bls.gov/schedule/news_release/empsit.htm'),
+    ):
+        try:
+            resp=requests.get(url,timeout=MACRO_HTTP_TIMEOUT,
+                              headers={'User-Agent':'SmartTradingReview/1.0 MacroResearch'})
+            resp.raise_for_status()
+            rows.extend(_parse_bls_release_page(resp.text,kind,now))
+        except Exception as exc:
+            failed += 1
+            logger.info('BLS backup %s unavailable: %s',kind,exc)
+    if failed == 2:
+        raise RuntimeError('BLS ICS and both official HTML pages unavailable')
+    return rows
+
+
+def _fetch_bls_calendar_ics(now: Optional[datetime] = None) -> List[Dict]:
     now = (now or _utc_now()).astimezone(UTC)
     response = requests.get(
         BLS_ICS_URL,
@@ -517,6 +622,17 @@ def _fetch_bls_calendar(now: Optional[datetime] = None) -> List[Dict]:
                 current[key] = value.replace("\\,", ",").replace("\\n", " ")
 
     return events
+
+
+def _fetch_bls_calendar(now: Optional[datetime] = None) -> List[Dict]:
+    try:
+        events = _fetch_bls_calendar_ics(now=now)
+        if events:
+            return events
+    except Exception as exc:
+        logger.info('BLS ICS unavailable, attempting official HTML: %s', exc)
+    # Also covers an ICS that is reachable but has no relevant near-term events.
+    return _fetch_bls_calendar_html(now=now)
 
 
 def _fetch_fomc_calendar(now: Optional[datetime] = None) -> List[Dict]:
@@ -632,71 +748,144 @@ def _persist_macro_cache_best_effort() -> None:
 def _refresh_news_if_needed(force: bool = False) -> None:
     now_monotonic = time.monotonic()
     with _LOCK:
-        last = float(_CACHE.get("news_fetched_at") or 0.0)
-        if not force and now_monotonic - last < MACRO_NEWS_CACHE_SECONDS:
+        last = float(_CACHE.get('news_fetched_at') or 0)
+        if not force and last and now_monotonic - last < MACRO_NEWS_CACHE_SECONDS:
             return
-    errors = []
+    errors: List[str] = []
+    successful: List[str] = []
     rows: List[Dict] = []
-    try:
-        rows.extend(_fetch_gdelt_news())
-    except Exception as exc:
-        errors.append(f"GDELT: {type(exc).__name__}: {str(exc)[:120]}")
-        logger.warning("Macro GDELT no disponible: %s", exc)
-    try:
-        rows.extend(_fetch_official_policy_news())
-    except Exception as exc:
-        errors.append(f"RSS oficiales: {type(exc).__name__}: {str(exc)[:120]}")
-        logger.warning("Macro RSS oficiales no disponibles: %s", exc)
-
-    # Deduplicar y priorizar riesgo + frescura sin depender de una sola fuente.
-    unique = {}
+    for name, fetcher in (('GDELT',_fetch_gdelt_news), ('OFFICIAL_RSS', _fetch_official_policy_news)):
+        try:
+            result = fetcher()
+            if result is None or not isinstance(result, list):
+                raise ValueError('Invalid news source result')
+            successful.append(name)
+            rows.extend(result)
+        except Exception as exc:
+            errors.append(f'{name}: {type(exc).__name__}: {str(exc)[:100]}')
+            logger.warning('Macro news %s unavailable: %s', name, exc)
+    unique: Dict[str,Dict] = {}
+    now = _utc_now()
     for row in rows:
-        key = re.sub(r"\W+", "", str(row.get("title_es") or "").lower())[:180]
-        if not key:
+        title = str(row.get('title_es') or '')
+        published = _safe_dt(row.get('published_at'))
+        if not title or not published or not (0 <= (now-published).total_seconds() <= MACRO_HEADLINE_MAX_AGE_HOURS*3600):
             continue
-        previous = unique.get(key)
-        if previous is None or int(row.get("risk_score") or 0) > int(previous.get("risk_score") or 0):
+        key = re.sub(r'\W+', '', title.lower())[:180]
+        if key and (key not in unique or int(row.get('risk_score') or 0)>int(unique[key].get('risk_score') or 0)):
             unique[key] = row
-    rows = sorted(
-        unique.values(),
-        key=lambda item: (int(item.get("risk_score") or 0), item.get("published_at") or ""),
-        reverse=True,
-    )[:MACRO_NEWS_MAX_ARTICLES]
-
+    # Don't fill the compact window with tangential, old/low-priority stories.
+    recent_rows = sorted(unique.values(), key=lambda r:(int(r.get('risk_score') or 0),
+                         r.get('published_at') or ''), reverse=True)[:MACRO_NEWS_MAX_ARTICLES]
     with _LOCK:
-        if rows:
-            _CACHE["news"] = rows[:MACRO_NEWS_MAX_ARTICLES]
-            _CACHE["news_last_success_utc"] = _iso_utc(_utc_now())
-        _CACHE["news_fetched_at"] = now_monotonic
-        _CACHE["errors"] = (list(_CACHE.get("errors") or []) + errors)[-8:]
-    if rows:
+        if successful:
+            if not recent_rows and errors:
+                # Preserve last VERIFIED stories only while they are recent;
+                # a GDELT rate-limit alongside a quiet RSS is not "no news".
+                recent_rows = [r for r in (_CACHE.get('news') or []) if
+                               (_safe_dt(r.get('published_at')) is not None and
+                                0 <= (now - _safe_dt(r['published_at'])).total_seconds() <=
+                                MACRO_HEADLINE_MAX_AGE_HOURS * 3600)][:MACRO_NEWS_MAX_ARTICLES]
+            _CACHE['news'] = recent_rows  # fresh/verified only
+            _CACHE['news_last_success_utc'] = _iso_utc(now)
+        _CACHE['news_fetched_at'] = now_monotonic
+        _CACHE['news_last_attempt_utc'] = _iso_utc(now)
+        _CACHE['news_successful_sources'] = successful
+        _CACHE['news_errors'] = errors
+        _CACHE['errors'] = (errors + list(_CACHE.get('calendar_errors') or []))[:8]
+    if successful:
         _persist_macro_cache_best_effort()
 
 
 def _refresh_calendar_if_needed(force: bool = False) -> None:
     now_monotonic = time.monotonic()
     with _LOCK:
-        last = float(_CACHE.get("calendar_fetched_at") or 0.0)
-        if not force and now_monotonic - last < MACRO_CALENDAR_CACHE_SECONDS:
+        last = float(_CACHE.get('calendar_fetched_at') or 0)
+        if not force and last and now_monotonic - last < MACRO_CALENDAR_CACHE_SECONDS:
             return
-    errors = []
+    errors: List[str] = []
+    successes: List[str] = []
     events: List[Dict] = []
-    for name, fetcher in (("BLS", _fetch_bls_calendar), ("FOMC", _fetch_fomc_calendar)):
+    for name, fetcher in (('BLS',_fetch_bls_calendar), ('FOMC',_fetch_fomc_calendar)):
         try:
-            events.extend(fetcher())
+            result = fetcher()
+            if result is None or not isinstance(result,list):
+                raise ValueError('Invalid calendar result')
+            successes.append(name)
+            events.extend(result)
         except Exception as exc:
-            errors.append(f"{name}: {type(exc).__name__}: {str(exc)[:120]}")
-            logger.warning("Macro calendar %s no disponible: %s", name, exc)
-    # unique
-    unique = {row["id"]: row for row in events if row.get("id")}
-    events = sorted(unique.values(), key=lambda row: row.get("scheduled_at") or "")
+            errors.append(f'{name}: {type(exc).__name__}: {str(exc)[:100]}')
+            logger.warning('Macro calendar %s unavailable: %s',name,exc)
+    unique = {row['id']:row for row in events if row.get('id')}
+    fresh = sorted(unique.values(),key=lambda row:row.get('scheduled_at') or '')[:24]
+    now = _utc_now()
     with _LOCK:
-        if events:
-            _CACHE["calendar"] = events[:16]
-        _CACHE["calendar_fetched_at"] = now_monotonic
-        _CACHE["errors"] = (list(_CACHE.get("errors") or []) + errors)[-8:]
-    if events:
+        if successes:
+            # If BLS failed, do not erase the latest still-valid BLS event.
+            preserved = [r for r in (_CACHE.get('calendar') or []) if
+                         r.get('source') == 'BLS' and 'BLS' not in successes and
+                         (_event_hours_until(r,now) or -999) > -2]
+            combined = {x['id']:x for x in preserved + fresh if x.get('id')}
+            _CACHE['calendar'] = sorted(combined.values(), key=lambda row:row.get('scheduled_at') or '')[:24]
+            _CACHE['calendar_last_success_utc'] = _iso_utc(now)
+        _CACHE['calendar_fetched_at'] = now_monotonic
+        _CACHE['calendar_last_attempt_utc'] = _iso_utc(now)
+        _CACHE['calendar_successful_sources'] = successes
+        _CACHE['calendar_errors'] = errors
+        _CACHE['errors'] = (list(_CACHE.get('news_errors') or []) + errors)[:8]
+    if successes:
         _persist_macro_cache_best_effort()
+
+
+def schedule_macro_refresh_if_due(force: bool = False) -> bool:
+    """Schedule one bounded transient I/O job. HTTP/trading never waits on feeds.
+
+    Existing Futures lifecycle and GET /api/macro/context both call this.
+    A small thread exists only while collecting HTTP sources, not permanently.
+    """
+    global _REFRESH_IN_FLIGHT
+    if not MACRO_CONTEXT_ENABLED:
+        return False
+    now = time.monotonic()
+    with _LOCK:
+        news_due = (not _CACHE.get('news_fetched_at') or now - float(_CACHE['news_fetched_at']) >= MACRO_NEWS_CACHE_SECONDS)
+        cal_due = (not _CACHE.get('calendar_fetched_at') or now - float(_CACHE['calendar_fetched_at']) >= MACRO_CALENDAR_CACHE_SECONDS)
+    if not (force or news_due or cal_due):
+        return False
+    with _REFRESH_SCHEDULE_LOCK:
+        if _REFRESH_IN_FLIGHT:
+            return False
+        _REFRESH_IN_FLIGHT = True
+
+    def _worker():
+        global _REFRESH_IN_FLIGHT
+        try:
+            refresh_macro_context(force=force)
+            try:
+                # CEX previously blocked every first trading/UI snapshot for up
+                # to 10 seconds. I/O now runs ONLY in this transient async job.
+                from exchange_flow_context import get_exchange_flow_context
+                get_exchange_flow_context(force=False)
+            except Exception as cex_exc:
+                logger.info('Macro CEX unavailable: %s', cex_exc)
+        except Exception as exc:
+            logger.warning('Macro async refresh failed: %s', exc)
+        finally:
+            with _REFRESH_SCHEDULE_LOCK:
+                _REFRESH_IN_FLIGHT = False
+
+    try:
+        threading.Thread(target=_worker, name='macro-c41-io-transient', daemon=True).start()
+        return True
+    except Exception:
+        with _REFRESH_SCHEDULE_LOCK:
+            _REFRESH_IN_FLIGHT = False
+        return False
+
+
+def macro_refresh_in_progress() -> bool:
+    with _REFRESH_SCHEDULE_LOCK:
+        return bool(_REFRESH_IN_FLIGHT)
 
 
 def refresh_macro_context(force: bool = False) -> Dict:
@@ -774,8 +963,7 @@ def _build_alert_candidates(events: List[Dict], news: List[Dict], now: datetime)
 def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     _hydrate_cache_from_db_once()
     if fetch_if_stale and MACRO_CONTEXT_ENABLED:
-        _refresh_news_if_needed(force=False)
-        _refresh_calendar_if_needed(force=False)
+        schedule_macro_refresh_if_due(force=False)
 
     now = _utc_now()
     with _LOCK:
@@ -814,20 +1002,29 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     # Commit J: current CEX reserve/flow context. It is a volatility/supply
     # pressure input, never proof that an exchange itself bought or sold.
     try:
-        from exchange_flow_context import get_exchange_flow_context
-        exchange_flow = get_exchange_flow_context(force=False) or {}
+        from exchange_flow_context import peek_exchange_flow_context
+        exchange_flow = peek_exchange_flow_context() or {}
     except Exception as exchange_error:
         exchange_flow = {
             "available": False, "state": "UNAVAILABLE",
             "volatility_risk": "UNKNOWN", "error": str(exchange_error)[:160],
         }
 
+    # C41: impact logic uses only fresh/official evidence. LLM remains advisory.
+    try:
+        from macro_impact import evaluate_macro_impacts
+        material_news = [r for r in active_news if float(r.get('age_hours') or 999) <= 12][:8]
+        impact_events = [r for r in upcoming if -0.25 <= float(r.get('hours_until',9999)) <= 3.0][:3]
+        impact_analysis = evaluate_macro_impacts(material_news[:6] + impact_events, limit=9)
+    except Exception as impact_error:
+        impact_analysis = {'markets':{},'evidence':[],'error':str(impact_error)[:100]}
+
     # RC5: CURRENT risk is not the same as NEXT scheduled event risk.
     # A high-impact event tomorrow puts Futures in CAUTION, but it must not make
     # the UI claim that macro risk is CRITICAL *now*.
-    immediate_events=[row for row in upcoming if -0.25 <= float(row.get("hours_until") or 9999) <= 3.0]
+    immediate_events=[row for row in upcoming if -0.25 <= float(row.get("hours_until",9999)) <= 3.0]
     top_score = max(
-        [int(row.get("risk_score") or 0) for row in active_news[:10]]
+        [int(row.get("risk_score") or 0) for row in active_news[:10] if float(row.get('age_hours') or 999) <= 12]
         + [int(row.get("risk_score") or 0) for row in immediate_events]
         + [0]
     )
@@ -840,9 +1037,23 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     else:
         risk_level = "LOW"
 
+    # UNKNOWN means insufficient coverage, not safety. Scheduled BLS data does
+    # not become "CRITICAL now" 24h before its official release.
+    with _LOCK:
+        sources_news = list(_CACHE.get('news_successful_sources') or [])
+        sources_cal = list(_CACHE.get('calendar_successful_sources') or [])
+        last_cal_ok = _CACHE.get('calendar_last_success_utc')
+        last_news_attempt = _CACHE.get('news_last_attempt_utc')
+        last_cal_attempt = _CACHE.get('calendar_last_attempt_utc')
+    usable = bool(active_news or upcoming)
+    data_status = ('FRESH' if usable and sources_news and sources_cal else
+                   'PARTIAL' if usable else 'NO_VERIFIED_DATA')
+    if not usable:
+        risk_level = 'UNKNOWN'
+
     near_high_event = next((
         event for event in upcoming
-        if 0 <= float(event.get("hours_until") or 9999) <= 24
+        if 0 <= float(event.get("hours_until", 9999)) <= 24
         and event.get("risk_level") in {"HIGH", "CRITICAL"}
     ), None)
 
@@ -850,7 +1061,7 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     # This avoids UI contradictions such as "MACRO LOW" beside "FOMC HIGH".
     next_high_event = next((
         event for event in upcoming
-        if float(event.get("hours_until") or 9999) >= 0
+        if float(event.get("hours_until", 9999)) >= 0
         and event.get("risk_level") in {"HIGH", "CRITICAL"}
     ), None)
 
@@ -860,12 +1071,12 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
     if (
         near_high_event
         and str(near_high_event.get("time_precision") or "EXACT").upper() == "EXACT"
-        and 0 <= float(near_high_event.get("hours_until") or 9999) <= 0.75
+        and 0 <= float(near_high_event.get("hours_until", 9999)) <= 0.75
     ):
         futures_posture = "NO_NEW_TRADES"
 
-    risk_off_count=sum(1 for row in active_news[:10] if str(row.get("risk_bias") or "").upper()=="RISK_OFF")
-    risk_on_count=sum(1 for row in active_news[:10] if str(row.get("risk_bias") or "").upper()=="RISK_ON")
+    risk_off_count=sum(1 for row in active_news[:10] if float(row.get('age_hours') or 999) <= 12 and str(row.get("risk_bias") or "").upper()=="RISK_OFF")
+    risk_on_count=sum(1 for row in active_news[:10] if float(row.get('age_hours') or 999) <= 12 and str(row.get("risk_bias") or "").upper()=="RISK_ON")
     if risk_off_count > risk_on_count and risk_off_count > 0:
         directional_bias="RISK_OFF"
     elif risk_on_count > risk_off_count and risk_on_count > 0:
@@ -904,6 +1115,10 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
             "text": f"Flujo CEX 24h · {sign}${abs(d24)/1e6:.0f}M · {exchange_flow.get('label_es')}",
             "url":"https://defillama.com/cexs", "source":"DefiLlama CEX",
         })
+    if not ticker_items and not usable:
+        ticker_items.append({'id':'C41-UNKNOWN','type':'STATUS','level':'UNKNOWN',
+            'text':'TraderMacro sin datos fundamentales verificados; consultando fuentes (riesgo NO evaluado).',
+            'source':'Radar C41','url':''})
     ticker_items = ticker_items[:10]
 
     # C38: optional on-demand interpretation of already verified news.
@@ -912,6 +1127,7 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         from scientist_support_c38 import macro_overlay
         _c38_scientist = macro_overlay({
             'headlines': active_news[:12], 'upcoming_events': upcoming[:10],
+            'market_impacts':impact_analysis.get('markets', {}),
             'risk_level': risk_level, 'directional_bias': directional_bias,
             'futures_posture': futures_posture,
         })
@@ -924,6 +1140,15 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "authority": "NONE",
         "trader_macro_reads_context": True,
         "scientist_interpretation": _c38_scientist,
+        "market_impacts": impact_analysis.get('markets', {}),
+        "impact_evidence": impact_analysis.get('evidence', []),
+        "impact_authority": "RULES_EXPLAINABLE_AND_LLM_ADVISORY_ONLY",
+        "data_status": data_status,
+        "news_sources_responding": sources_news,
+        "calendar_sources_responding": sources_cal,
+        "news_last_attempt_utc": last_news_attempt,
+        "calendar_last_attempt_utc": last_cal_attempt,
+        "calendar_last_success_utc": last_cal_ok,
         "production_change": False,
         "risk_level": risk_level,
         "current_risk_level": risk_level,
@@ -949,7 +1174,7 @@ def get_macro_context_snapshot(fetch_if_stale: bool = True) -> Dict:
         "display_timezone": DISPLAY_TZ_NAME,
         "sources": [
             "GDELT", "BLS", "Federal Reserve Calendar", "Federal Reserve RSS",
-            "CFTC RSS", "SEC RSS", "DefiLlama CEX"
+            "CFTC RSS", "SEC RSS", "EIA Energy RSS", "DefiLlama CEX"
         ],
         "news_cache_age_seconds": round(max(0.0, time.monotonic() - news_fetched_at), 1) if news_fetched_at else None,
         "calendar_cache_age_seconds": round(max(0.0, time.monotonic() - calendar_fetched_at), 1) if calendar_fetched_at else None,

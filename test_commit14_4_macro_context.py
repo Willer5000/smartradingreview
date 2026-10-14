@@ -37,9 +37,9 @@ class MacroContextClassificationTests(unittest.TestCase):
         self.assertEqual(events[0]["time_precision"], "EXACT")
         self.assertEqual(events[0]["source"], "BLS")
         self.assertTrue(events[0]["scheduled_at"].endswith("Z"))
-        # 08:30 New York = 12:30 UTC = 09:30 Argentina in September.
+        # 08:30 New York (EDT) = 12:30 UTC = 08:30 Bolivia in September.
         dt = macro_context._safe_dt(events[0]["scheduled_at"])
-        self.assertEqual(dt.astimezone(macro_context.DISPLAY_TZ).strftime("%H:%M"), "09:30")
+        self.assertEqual(dt.astimezone(macro_context.DISPLAY_TZ).strftime("%H:%M"), "08:30")
 
     def test_fomc_date_only_does_not_invent_intraday_freeze(self):
         html = """

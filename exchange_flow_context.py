@@ -78,3 +78,17 @@ def get_exchange_flow_context(force: bool=False) -> Dict[str,Any]:
     with _LOCK:
         _CACHE.update(ts=now,data=dict(data))
     return data
+
+
+def peek_exchange_flow_context() -> Dict[str,Any]:
+    """C41: bounded read-only cache, no network call on HTTP/trading path."""
+    with _LOCK:
+        if _CACHE['data'] is None:
+            return {'available': False, 'state':'UNAVAILABLE', 'volatility_risk':'UNKNOWN',
+                    'error':'CEX_PENDING_ASYNC_REFRESH'}
+        data = dict(_CACHE['data'])
+        if time.monotonic() - float(_CACHE['ts']) > max(2 * _TTL, 3600):
+            data['available'] = False
+            data['volatility_risk'] = 'UNKNOWN'
+            data['error'] = 'CEX_STALE_DATA'
+        return data

@@ -27107,6 +27107,10 @@ class TraderMacro(TraderBase):
             exchange_flow = macro_context.get('exchange_flow', {}) or {}
             exchange_flow_state = str(exchange_flow.get('state', 'UNAVAILABLE')).upper()
             exchange_flow_vol = str(exchange_flow.get('volatility_risk', 'UNKNOWN')).upper()
+            # C41: independent causal sector view (not the advisory LLM). It
+            # cannot create signals or change safety/geometry; a modest context
+            # adjustment only for the particular Spot asset affected.
+            macro_market_impacts = macro_context.get('market_impacts') or {}
 
             # COMMIT J — Macro sólo puede confirmar o frenar; nunca crea LONG/SHORT.
             # Compatibilidad conceptual del contrato anterior: el retorno legacy
@@ -27409,22 +27413,40 @@ class TraderMacro(TraderBase):
                     f'Radar macro {macro_risk.lower()}: aumenta riesgo de volatilidad; '
                     'se usa como confirmación/veto, no como señal independiente'
                 )
-            if macro_bias == 'RISK_OFF':
-                if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
-                    confianza = max(0, confianza - 8)
-                    razones.append('Noticias/fundamentales favorecen risk-off: penaliza compra BTC')
-                elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
-                    confianza = min(100, confianza + 8)
-                    estrategias.append('MACRO_RISK_OFF_CONFIRMATION')
-                    razones.append('Noticias/fundamentales risk-off confirman refugio en oro/PAXG')
-            elif macro_bias == 'RISK_ON':
-                if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
-                    confianza = min(100, confianza + 6)
-                    estrategias.append('MACRO_RISK_ON_CONFIRMATION')
-                    razones.append('Noticias/fundamentales risk-on confirman apetito por BTC')
-                elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
-                    confianza = max(0, confianza - 6)
-                    razones.append('Contexto risk-on reduce convicción de refugio')
+            # C41: prefer evidence-linked effect for the actual traded asset.
+            # Never interpret a generic RISK_OFF as guaranteed BTC down / gold up.
+            key = ('SPOT_BTC' if symbol == 'BTC-USDT' else
+                   'SPOT_PAXG' if symbol in ('PAXG-USDT','PAXG-BTC') else
+                   'SPOT_USDT' if symbol == 'USDT' else None)
+            row = (macro_market_impacts.get(key) or {}) if key else {}
+            impact = str(row.get('impact') or 'INCIERTO').upper()
+            if (row.get('evidence_ids') and impact in ('BENEFICIA','PERJUDICA')
+                    and float(row.get('confidence') or 0) >= 55
+                    and accion in ('COMPRA_SPOT','VENTA_SPOT')):
+                aligned = ((impact == 'BENEFICIA' and accion == 'COMPRA_SPOT') or
+                           (impact == 'PERJUDICA' and accion == 'VENTA_SPOT'))
+                confianza = min(100, confianza+4) if aligned else max(0, confianza-6)
+                estrategias.append('MACRO_ASSET_IMPACT_C41')
+                razones.append(f'Contexto fundamental verificado {impact.lower()} para {key}: '
+                               'ajuste moderado; exigir confirmación técnica, no crea operación')
+            elif not macro_market_impacts:
+                # Historical contract for offline/legacy macro snapshots.
+                if macro_bias == 'RISK_OFF':
+                    if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
+                        confianza = max(0, confianza - 8)
+                        razones.append('Macro risk-off: penaliza compra BTC')
+                    elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
+                        confianza = min(100, confianza + 8)
+                        estrategias.append('MACRO_RISK_OFF_CONFIRMATION')
+                elif macro_bias == 'RISK_ON':
+                    if symbol == 'BTC-USDT' and accion == 'COMPRA_SPOT':
+                        confianza = min(100, confianza + 6)
+                        estrategias.append('MACRO_RISK_ON_CONFIRMATION')
+                    elif symbol in ('PAXG-USDT','PAXG-BTC') and accion == 'COMPRA_SPOT':
+                        confianza = max(0, confianza - 6)
+            elif impact == 'PRECAUCION' and accion in ('COMPRA_SPOT','VENTA_SPOT'):
+                confianza = max(0, confianza - 2)
+                razones.append(f'Riesgo macro relevante de {key}: precaución sin sesgo direccional')
             if exchange_flow_vol == 'HIGH':
                 confianza = max(0, confianza - 5)
                 estrategias.append('CEX_FLOW_VOLATILITY')
@@ -56657,6 +56679,13 @@ def futures_standard_alert_loop():
     time.sleep(120)
     while True:
         try:
+            # C41: reuse existing Futures lifecycle. Macro I/O is asynchronous,
+            # bounded and never delays Telegram, signals, candle processing or DB.
+            try:
+                from macro_context import schedule_macro_refresh_if_due
+                schedule_macro_refresh_if_due()
+            except Exception as macro_tick_error:
+                print(f'⚠️ [MACRO C41] async tick: {type(macro_tick_error).__name__}', flush=True)
             # 17.5.10: delivery retry is independent from analysis completion.
             _retry_confirmed_signal_outbox(limit=3)
             # Commit 37: refresh bounded per-ID official index on this ALREADY
@@ -60428,12 +60457,13 @@ def api_macro_context():
             get_macro_context_snapshot,
             refresh_macro_context,
         )
+        from macro_context import schedule_macro_refresh_if_due, macro_refresh_in_progress
         force = str(request.args.get('refresh', '')).lower() in ('1', 'true', 'yes')
-        data = (
-            refresh_macro_context(force=True)
-            if force
-            else get_macro_context_snapshot(fetch_if_stale=False)
-        )
+        scheduled = schedule_macro_refresh_if_due(force=force)
+        # Nonblocking: GET is never held hostage by GDELT/SEC/EIA timeouts.
+        data = get_macro_context_snapshot(fetch_if_stale=False)
+        data['refresh_scheduled'] = bool(scheduled)
+        data['refresh_in_progress'] = macro_refresh_in_progress()
         return jsonify({'success': True, 'data': data}), 200
     except Exception as error:
         # Fail-open: noticias no pueden bloquear trading.

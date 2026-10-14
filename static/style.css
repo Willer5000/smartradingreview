@@ -1262,3 +1262,12 @@ body.trading-app .dropdown-menu-dark {
     .macro-ticker-message { font-size: .66rem; }
     .macro-ticker-meta { display: none; }
 }
+
+/* C41: análisis fundamental sin expandir el cintillo ni saturar smartphones */
+.macro-impact-details { background:#101720; color:#d3dae5; padding:3px 16px 5px; border-bottom:1px solid #34404c; font-size:12px; }
+.macro-impact-details summary { cursor:pointer; color:#79c6e8; font-weight:600; }
+.macro-impact-list { max-width:100%; padding:8px 2px; display:grid; grid-template-columns:repeat(auto-fit,minmax(245px,1fr));gap:6px; }
+.macro-impact-card { background:#171f2a; border-left:3px solid #5d728a; border-radius:4px; padding:7px 9px; overflow-wrap:anywhere; }
+.macro-impact-card strong { display:block; color:#eef3ff; font-size:12px; }
+.macro-impact-card small { display:block; color:#bdc7d7; line-height:1.3; }
+.macro-impact-summary { grid-column:1/-1; padding:4px 0; }

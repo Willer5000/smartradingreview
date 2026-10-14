@@ -12471,6 +12471,8 @@ window.__macroContextState = window.__macroContextState || {
     index: 0,
     rotateTimer: null,
     pollTimer: null,
+    recheckCount: 0,
+    recheckTimer: null,
 };
 
 function _macroRiskLabel(level) {
@@ -12505,6 +12507,7 @@ function _macroRenderBadge(snapshot) {
     badge.title = nextEvent?.title_es
         ? `Riesgo actual: ${_macroRiskLabel(current)}. Próximo evento: ${nextEvent.title_es}${Number.isFinite(hours) ? ` en ${Math.max(0, hours).toFixed(hours < 24 ? 1 : 0)} h` : ''}.`
         : `Riesgo macro actual: ${_macroRiskLabel(current)}.`;
+    if (snapshot?.data_status !== 'FRESH') badge.title += ' Cobertura: ' + String(snapshot?.data_status || 'NO_VERIFIED_DATA');
 }
 
 function _macroMoney(value) {
@@ -12599,6 +12602,50 @@ function _macroNormalizeItems(snapshot) {
     }];
 }
 
+function _macroRenderImpacts(snapshot) {
+    const target = document.getElementById('macro-impact-list');
+    if (!target) return;
+    target.replaceChildren(); // textContent only: headlines/LLM text are untrusted
+    const status = String(snapshot?.data_status || 'NO_VERIFIED_DATA');
+    const top = document.createElement('div');
+    top.className = 'macro-impact-summary';
+    const headlineCount = Number(snapshot?.fresh_headlines || 0);
+    const last = snapshot?.news_last_success_utc || 'sin éxito verificado';
+    top.textContent = `Fuentes · ${status} · noticias recientes: ${headlineCount} · último refresco de noticias: ${last}. `
+        + 'Impactos condicionales: no constituyen señales ni órdenes.';
+    target.appendChild(top);
+    const rows = snapshot?.market_impacts || {};
+    const badge = { BENEFICIA:'↗ Beneficio potencial', PERJUDICA:'↘ Perjuicio potencial',
+                    PRECAUCION:'⚠ Precaución', INCIERTO:'? No concluyente', NEUTRAL:'≈ Neutral' };
+    for (const [key, item] of Object.entries(rows).slice(0, 16)) {
+        if (!item || typeof item !== 'object') continue;
+        const card = document.createElement('div');
+        card.className = 'macro-impact-card';
+        const title = document.createElement('strong');
+        title.textContent = `${item.label || key} · ${badge[item.impact] || 'No concluyente'}`;
+        const note = document.createElement('small');
+        note.textContent = `${item.why || ''} · fuentes #${(item.evidence_ids || []).length}`;
+        card.append(title, note);
+        target.appendChild(card);
+    }
+    const science = snapshot?.scientist_interpretation || {};
+    const ai = document.createElement('div');
+    ai.className = 'macro-impact-summary';
+    ai.textContent = `IA científica (${science.status || 'NO DISPONIBLE'}; ${science.authority || 'ADVISORY_ONLY'}): `
+        + (science.status === 'READY' ? String(science.summary || 'Interpretación disponible')
+           : 'interpretación no disponible o pendiente; los impactos verificables siguen operativos.');
+    target.appendChild(ai);
+    // The optional LLM is never used to alter the official trading decision.
+    if (science.status === 'READY' && science.asset_impacts) {
+        const aiDetail = document.createElement('div');
+        aiDetail.className = 'macro-impact-summary';
+        aiDetail.textContent = 'Perspectiva IA por activo (solo evidencia con ID): ' +
+            Object.entries(science.asset_impacts).filter(([,x])=>x?.evidence_ids?.length).slice(0,11)
+                .map(([key,x]) => `${key}: ${x.impact} (${x.why || ''})`).join(' · ');
+        target.appendChild(aiDetail);
+    }
+}
+
 function _macroApplySnapshot(snapshot) {
     const state = window.__macroContextState;
     state.snapshot = snapshot || {};
@@ -12606,6 +12653,7 @@ function _macroApplySnapshot(snapshot) {
     state.index = 0;
     _macroRenderBadge(snapshot || {});
     _macroRenderFlow(snapshot || {});
+    _macroRenderImpacts(snapshot || {});
     _macroRenderItem(state.items[0], true);
     if (typeof window.refreshActionNowPanel === 'function') {
         window.refreshActionNowPanel(false);
@@ -12633,6 +12681,18 @@ async function refreshMacroContext(force = false) {
             return;
         }
         _macroApplySnapshot(payload?.data || {});
+        // Initial GET returns immediately and schedules one background refresh.
+        // Read the completed snapshot shortly afterwards; no busy polling.
+        const state = window.__macroContextState;
+        const pending = Boolean(payload?.data?.refresh_in_progress || payload?.data?.refresh_scheduled);
+        if (!pending) state.recheckCount = 0;
+        if (pending && state.recheckCount < 3 && !state.recheckTimer) {
+            state.recheckCount++;
+            state.recheckTimer = window.setTimeout(() => {
+                state.recheckTimer = null;
+                if (!document.hidden) refreshMacroContext(false);
+            }, 20000);
+        }
     } catch (error) {
         // Fail-open visual: conservar el último snapshot si existía.
         if (!window.__macroContextState.snapshot) {
@@ -12667,7 +12727,7 @@ function _startMacroTicker() {
         // El endpoint está cacheado; 5 min es suficiente para UI y muy barato.
         window.__macroContextState.pollTimer = window.setInterval(
             () => { if (!document.hidden) refreshMacroContext(false); },
-            600000
+            300000
         );
     }
 }

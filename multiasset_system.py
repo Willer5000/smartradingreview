@@ -139,15 +139,20 @@ def _macro_context_for_asset(meta: Dict) -> Dict:
     precision=str(next_event.get('time_precision') or 'EXACT').upper()
     current_risk=str(snap.get('current_risk_level') or snap.get('risk_level') or 'LOW').upper()
     bias=str(snap.get('directional_bias') or 'NEUTRAL').upper()
-    title=' '.join(str(next_event.get(k) or '') for k in ('title','name','event','label')).upper()
+    title=' '.join(str(next_event.get(k) or '') for k in ('title_es','title','name','event','label')).upper()
+    codes={str(c.get('code') or '') for c in (next_event.get('categories') or []) if isinstance(c,dict)}
+    impact_keys={'US_INDEX':('EEUU_SP500' if meta.get('code')=='SPY' else 'EEUU_NASDAQ'),
+                 'CHINA_INDEX':'CHINA_STAR50', 'INDUSTRIAL_METAL':'METALES_COBRE',
+                 'PRECIOUS_METAL':'METALES_PLATA', 'ENERGY':('ENERGIA_GAS' if meta.get('code')=='NATGAS' else 'ENERGIA_PETROLEO')}
+    asset_impact=(snap.get('market_impacts') or {}).get(impact_keys.get(asset_class,''),{}) or {}
 
     relevant=False
     if asset_class == 'US_INDEX':
         relevant=True
     elif asset_class in {'INDUSTRIAL_METAL','PRECIOUS_METAL','CHINA_INDEX'}:
-        relevant=any(k in title for k in ('FED','FOMC','CPI','PCE','NFP','EMPLOY','RATE','PMI','CHINA','TRADE')) or not title
+        relevant=any(k in title for k in ('FED','FOMC','CPI','IPC','INFLACIÓN','EMPLEO','PCE','NFP','EMPLOY','RATE','PMI','CHINA','TRADE')) or bool(codes & {'MONETARY_POLICY','INFLATION','LABOR'}) or not title
     elif asset_class == 'ENERGY':
-        relevant=any(k in title for k in ('OIL','EIA','OPEC','ENERGY','CPI','FED','FOMC'))
+        relevant=any(k in title for k in ('OIL','EIA','OPEC','ENERGY','CPI','IPC','INFLACIÓN','FED','FOMC','GAS','PETRÓLEO')) or bool(codes & {'NATURAL_GAS','ENERGY_INFLATION'})
 
     gate='NORMAL'
     reason=None
@@ -162,9 +167,11 @@ def _macro_context_for_asset(meta: Dict) -> Dict:
 
     return {
         'available':True, 'gate':gate, 'reason':reason,
+        'asset_macro_impact':str(asset_impact.get('impact') or 'INCIERTO'),
+        'asset_macro_reason':str(asset_impact.get('why') or '')[:140],
         'risk_level':current_risk, 'directional_bias':bias,
         'next_event_hours': None if hours >= 9990 else round(hours,2),
-        'next_event': next_event.get('title') or next_event.get('name') or next_event.get('event'),
+        'next_event': next_event.get('title_es') or next_event.get('title') or next_event.get('name') or next_event.get('event'),
         'policy':'CONFIRM_OR_VETO_ONLY_NEVER_CREATE_DIRECTION',
         'affects_direction':False,
     }
