@@ -743,14 +743,14 @@ function futRenderAnalysisDiagnostics(json, context) {
         if (!raw || typeof raw !== 'object' || _isSignalSavedByCurrentUser(raw)) continue;
         const action = String(raw.diagnostic_action || raw.action || '').toUpperCase();
         if (!['LONG','SHORT'].includes(action) || raw.is_executable === true || String(raw.classification || 'ANALYSIS_ONLY').toUpperCase() === 'EXECUTABLE_SIGNAL') continue;
-        const key = `${raw.symbol || ''}|${raw.timeframe || ''}`;
+        const key = window.strSignalCellKey(raw) || `${raw.symbol || ''}|${raw.timeframe || ''}`;
         const score = Number(raw.diagnostic_quality ?? raw.thesis_quality ?? raw.confidence ?? 0);
         const prev = byCell.get(key);
         const prevScore = Number(prev?.diagnostic_quality ?? prev?.thesis_quality ?? prev?.confidence ?? -1);
         if (!prev || score > prevScore) byCell.set(key, {...raw, action});
     }
     candidates = (context === 'previous' || context === 'vigent')
-        ? window.strSortSignalPresentation([...byCell.values()])
+        ? window.strSortSignalPresentation([...byCell.values()], Date.now(), {risk:true})
         : [...byCell.values()].sort((a,b) => Number(b.diagnostic_quality ?? b.confidence ?? 0) - Number(a.diagnostic_quality ?? a.confidence ?? 0));
     // R.4: this panel is actionable follow-up, not a dump of incomplete
     // diagnostics. Backend guarantees geometry; a stale/malformed row is hidden
@@ -879,6 +879,7 @@ window.updateActiveSignals = async function() {
     if (window._futuresSignalsState.activeLoading) return;
 
     window._futuresSignalsState.activeLoading = true;
+    signalsList.dataset.strLoaded = '0';
 
     console.log(
         '🚀 ACTIVE: iniciando consulta...'
@@ -965,7 +966,8 @@ window.updateActiveSignals = async function() {
         // RC9.8.2: estado de guardado PERSONAL. No altera la señal global.
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
-            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig))
+            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
+            Date.now(), {risk:true, dedupe:true}
         );
 
         const progress = json.progress || {};
@@ -1101,6 +1103,8 @@ window.updateActiveSignals = async function() {
                 </div>
             `;
 
+            signalsList.dataset.strLoaded = '1';
+            window.strReconcileDerivativeLanes?.();
             return;
         }
 
@@ -1226,6 +1230,7 @@ window.updateActiveSignals = async function() {
             html += `
                 <div
                     class="list-group-item bg-dark text-white border-secondary"
+                    data-str-signal="${signalData}"
                     style="cursor:pointer;"
                     onclick="window.changeToSignal(
                         '${sig.symbol}',
@@ -1309,6 +1314,8 @@ window.updateActiveSignals = async function() {
         });
 
         signalsList.innerHTML = html;
+        signalsList.dataset.strLoaded = '1';
+        window.strReconcileDerivativeLanes?.();
 
     } catch (err) {
 
@@ -1504,6 +1511,7 @@ window.updatePreviousSignals = async function() {
 
     window._futuresSignalsState
         .previousLoading = true;
+    signalsList.dataset.strLoaded = '0';
 
     console.log(
         '🚀 PREVIOUS: iniciando consulta...'
@@ -1611,7 +1619,8 @@ window.updatePreviousSignals = async function() {
         // RC9.8.2: ocultar sólo para el usuario que ya la guardó.
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
-            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig))
+            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
+            Date.now(), {risk:true, dedupe:true}
         );
 
         const progress =
@@ -1761,6 +1770,8 @@ window.updatePreviousSignals = async function() {
                 ${diagnosticsHtml}
             `;
 
+            signalsList.dataset.strLoaded = '1';
+            window.strReconcileDerivativeLanes?.();
             return;
         }
 
@@ -1868,6 +1879,7 @@ window.updatePreviousSignals = async function() {
                     class="list-group-item bg-dark text-white border-secondary ${opacity}"
                     style="cursor:pointer;"
                     data-signal-id="${String(sig.signal_id || '').replace(/"/g, '&quot;')}"
+                    data-str-signal="${signalData}"
                     data-signal="${signalData}"
                     onclick="window.showFuturesPrevJustif(_decodeFuturesSignal(this.getAttribute('data-signal')))"
                 >
@@ -1952,6 +1964,8 @@ window.updatePreviousSignals = async function() {
         });
 
         signalsList.innerHTML = html + diagnosticsHtml;
+        signalsList.dataset.strLoaded = '1';
+        window.strReconcileDerivativeLanes?.();
         window.applyFuturesSignalDeepLink?.();
 
     } catch (err) {
@@ -3045,9 +3059,10 @@ window.loadFuturesOpportunities96 = async function() {
         }
         const data = await response.json();
         const rows = window.strSortSignalPresentation(
-            Array.isArray(data?.opportunities) ? data.opportunities : []
+            Array.isArray(data?.opportunities) ? data.opportunities : [],
+            Date.now(), {risk:true, dedupe:true}
         );
-        const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
+        const total = rows.length; // número visible tras elección por celda
 
         // RC9.7.13 — Activas y su diagnóstico salen de la MISMA vela abierta.
         // Nunca reutilizar el snapshot CLOSED_CANDLE de Confirmadas/Vigentes.
