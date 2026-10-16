@@ -10912,13 +10912,14 @@ window.updateActiveSignals = function updateActiveSignals() {
                 'SHORT': '📉'
             };
 
-            const activeSignals = (Array.isArray(data.signals) ? data.signals : [])
-                .filter(signal =>
-                    ['COMPRA_SPOT', 'LONG', 'VENTA_SPOT', 'SHORT']
-                        .includes(String(signal.action || '').toUpperCase())
-                    && Number(signal.confidence || 0) >= 60
-                )
-                .sort((a, b) => Number(b.confidence || 0) - Number(a.confidence || 0));
+            const activeSignals = window.strSortSignalPresentation(
+                (Array.isArray(data.signals) ? data.signals : [])
+                    .filter(signal =>
+                        ['COMPRA_SPOT', 'LONG', 'VENTA_SPOT', 'SHORT']
+                            .includes(String(signal.action || '').toUpperCase())
+                        && Number(signal.confidence || 0) >= 60
+                    )
+            );
 
             if (signalsCount) {
                 signalsCount.textContent = String(activeSignals.length);
@@ -11112,11 +11113,12 @@ window.updateSpotVigentSignals = function updateSpotVigentSignals() {
                 return;
             }
 
-            const rows = Object.values(data.data || {})
-                .filter(row => Number(row.activa || 0) === 1)
-                .filter(row => ['COMPRA_SPOT','VENTA_SPOT','LONG','SHORT']
-                    .includes(String(row.decision || row.action || '').toUpperCase()))
-                .sort((a, b) => Number(a.tiempo_restante || 0) - Number(b.tiempo_restante || 0));
+            const rows = window.strSortSignalPresentation(
+                Object.values(data.data || {})
+                    .filter(row => Number(row.activa || 0) === 1)
+                    .filter(row => ['COMPRA_SPOT','VENTA_SPOT','LONG','SHORT']
+                        .includes(String(row.decision || row.action || '').toUpperCase()))
+            );
 
             if (signalsCount) {
                 signalsCount.textContent = String(rows.length);
@@ -11293,15 +11295,11 @@ window.updatePreviousSignals = function updatePreviousSignals() {
                 signalsCount.className = `badge bg-${activas.length > 0 ? 'warning' : 'secondary'}`;
             }
             
-            // Ordenar: activas primero, luego por tiempo restante
-            señales.sort((a, b) => {
-                if (a.activa === 1 && b.activa !== 1) return -1;
-                if (a.activa !== 1 && b.activa === 1) return 1;
-                return (a.tiempo_restante || 0) - (b.tiempo_restante || 0);
-            });
+            // C43: sólo orden visual; todas las señales y reglas de vigencia siguen iguales.
+            const señalesOrdenadas = window.strSortSignalPresentation(señales);
             
             let html = '';
-            señales.forEach(senal => {
+            señalesOrdenadas.forEach(senal => {
                 const symbolName = senal.symbol.replace('-', '/');
                 const tfName = {
                     '4h': '4H', 

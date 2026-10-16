@@ -411,6 +411,15 @@ _ANALYSIS_CACHE: dict = {}   # {(symbol, tf): {'data': result, 'ts': float}}
 _ANALYSIS_CACHE_LOCK = _threading_analysis_cache.Lock()
 _ANALYSIS_CACHE_STATS = {'hits': 0, 'misses': 0}
 
+# C43: compactación reversible SOLO del caché recreable. Las señales oficiales,
+# el lifecycle y los registros Guardian permanecen con su formato habitual.
+from analysis_cache_compact_c43 import (
+    pack_cache_entry as _c43_pack_cache_entry,
+    read_cache_entry as _c43_read_cache_entry,
+    compact_cache_statistics as _c43_cache_stats,
+)
+_C43_PACK_ANALYSIS_CACHE = os.environ.get('C43_PACK_ANALYSIS_CACHE', '1').lower() not in ('0', 'false', 'no', 'off')
+
 
 def _analysis_ttl_for(timeframe):
     """Use the existing TTL table; the purge previously called a missing helper."""
@@ -553,12 +562,14 @@ def _analysis_cache_get(key):
 
         # Q6-G: callers can enrich responses without mutating another signal.
         from copy import deepcopy
-        data = entry['data']
+        data = _c43_read_cache_entry(entry, isolated=True)
+        if data is None:
+            return None
         if isinstance(data, dict) and data.get('system_type') == 'spot':
             valid_until = data.get('source_valid_until')
             if not valid_until or pd.Timestamp.now(tz='UTC') >= pd.Timestamp(valid_until):
                 return None
-        return deepcopy(data)
+        return data
 
 
 def _analysis_cache_put(key, data):
@@ -583,14 +594,9 @@ def _analysis_cache_put(key, data):
             now_ts
         )
 
-        _ANALYSIS_CACHE[
-            key
-        ] = {
-            'data':
-                __import__('copy').deepcopy(data),
-
-            'ts':
-                now_ts
+        _ANALYSIS_CACHE[key] = {
+            **_c43_pack_cache_entry(data, enabled=_C43_PACK_ANALYSIS_CACHE),
+            'ts': now_ts,
         }
         # Hotfix 14.7: the previous fixed limit of 20 retained full Spot
         # results (including chart/layer payloads).  On 512 MB this turns a
@@ -633,6 +639,7 @@ def get_analysis_cache_stats() -> dict:
                 hit_rate,
                 1
             ),
+            'c43_compact': _c43_cache_stats(_ANALYSIS_CACHE),
         }
 
 # ============================================================================
@@ -1319,9 +1326,7 @@ def _get_tgp_market_snapshots(
 
             compact = (
                 _compact_tgp_analysis(
-                    cache_entry.get(
-                        'data'
-                    )
+                    _c43_read_cache_entry(cache_entry)
                 )
             )
 
@@ -31331,6 +31336,56 @@ _HEAVY_ANALYSIS_WAIT_SECONDS = 20 * 60
 _HEAVY_ANALYSIS_STATE_LOCK = threading.Lock()
 _HEAVY_ANALYSIS_OWNER = None
 
+# C43: muestreo de trabajos pesados usando el watchdog YA existente. Memoria
+# acotada (12 entradas), sin hilos ni peticiones adicionales, sin tocar trading.
+_C43_MEMORY_TRACE = []
+_C43_MEMORY_ACTIVE = None
+
+
+def _c43_memory_begin(owner):
+    global _C43_MEMORY_ACTIVE
+    used, _ = _commit34_cgroup_mb()
+    rss = _process_rss_mb()
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        _C43_MEMORY_ACTIVE = {
+            'owner': str(owner or '')[:80], 'rss_start_mb': rss,
+            'rss_peak_mb': rss or 0, 'cgroup_peak_mb': used or 0,
+            'started': time.monotonic(),
+        }
+
+
+def _c43_memory_sample(rss, used):
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        record = _C43_MEMORY_ACTIVE
+        if record is not None:
+            if rss is not None:
+                record['rss_peak_mb'] = max(record['rss_peak_mb'], rss)
+            if used is not None:
+                record['cgroup_peak_mb'] = max(record['cgroup_peak_mb'], used)
+
+
+def _c43_memory_end(owner):
+    global _C43_MEMORY_ACTIVE
+    rss = _process_rss_mb()
+    used, _ = _commit34_cgroup_mb()
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        record = _C43_MEMORY_ACTIVE
+        if record is None:
+            return
+        _C43_MEMORY_ACTIVE = None
+        record['rss_end_mb'] = rss
+        record['rss_peak_mb'] = round(max(record['rss_peak_mb'], rss or 0), 1)
+        record['cgroup_peak_mb'] = round(max(record['cgroup_peak_mb'], used or 0), 1)
+        record['duration_s'] = round(max(0, time.monotonic() - record.pop('started')), 1)
+        _C43_MEMORY_TRACE.append(record)
+        del _C43_MEMORY_TRACE[:-12]
+
+
+def _c43_memory_snapshot():
+    with _HEAVY_ANALYSIS_STATE_LOCK:
+        return {'recent_jobs': [dict(row) for row in _C43_MEMORY_TRACE],
+                'running_job': dict(_C43_MEMORY_ACTIVE or {})}
+
 # C36 — observabilidad sin nuevos threads, disco ni requests de terceros.
 _C36_SCHED_METRICS_LOCK = threading.Lock()
 _C36_SCHED_METRICS = {'admitted': 0, 'deferred': 0, 'reasons': {}, 'last_deferred': None}
@@ -32036,6 +32091,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
         return False
 
     _c36_sched_event(owner, 'admitted')
+    _c43_memory_begin(owner)
     _log_memory_runtime(f'{owner}: inicio')
     return True
 
@@ -32043,6 +32099,7 @@ def _acquire_heavy_analysis(owner, timeout=None):
 def _release_heavy_analysis(owner):
     """Libera el slot pesado después de forzar liberación de basura cíclica."""
     global _HEAVY_ANALYSIS_OWNER
+    _c43_memory_end(owner)
 
     # Primero soltar objetos cíclicos y arenas C; si el RSS sigue alto,
     # purgar caches recreables antes de devolver el turno al siguiente job.
@@ -32102,6 +32159,7 @@ def resource_watchdog_loop():
         try:
             rss = _process_rss_mb()
             cgroup_used, cgroup_limit = _commit34_cgroup_mb()
+            _c43_memory_sample(rss, cgroup_used)
             # C36: RSS del worker puede ser bajo mientras memory.current crece.
             # Proteger el contenedor completo y no solamente el heap Python.
             cgroup_pressure = bool(
@@ -38019,7 +38077,7 @@ def api_commit35_recommendation_ready():
                 # previsualización intrabar a recomendación confirmada.
                 with _ANALYSIS_CACHE_LOCK:
                     row = _ANALYSIS_CACHE.get((sym, tf)) or {}
-                    data = dict(row.get('data') or {})
+                    data = dict(_c43_read_cache_entry(row) or {})
         if not isinstance(data, dict) or not data.get('success') or not isinstance(data.get('decision'), dict):
             return jsonify({'success': True, 'ready':False, 'market':market,
                             'symbol':sym, 'timeframe':tf, 'cache_only':True}),200
@@ -61063,14 +61121,7 @@ def api_analyze_with_portfolio():
                 continue
 
             cached_analysis = (
-                cache_entry.get(
-                    'data'
-                )
-                if isinstance(
-                    cache_entry,
-                    dict
-                )
-                else None
+                _c43_read_cache_entry(cache_entry)
             )
 
             compact = (
@@ -61279,14 +61330,7 @@ def api_analyze_with_portfolio():
                 continue
 
             cached_analysis = (
-                cache_entry.get(
-                    'data'
-                )
-                if isinstance(
-                    cache_entry,
-                    dict
-                )
-                else None
+                _c43_read_cache_entry(cache_entry)
             )
 
             compact = (
@@ -62538,6 +62582,8 @@ def api_commit35_resource_health():
             'heavy_job':state.get('heavy_job'),
             'threads':state.get('threads'),
             'commit36_scheduler':_c36_scheduler_snapshot(),
+            'c43_memory_jobs':_c43_memory_snapshot(),
+            'c43_analysis_cache':get_analysis_cache_stats(),
             'signal_caches':{
                 'futures':len((_futures_analysis_cache.get('data') or {}).get('analysis') or {}),
                 'multiasset':len(_MULTI_ASSET_CACHE.get('analysis') or {}),
@@ -62545,6 +62591,23 @@ def api_commit35_resource_health():
         }),200
     except Exception as exc:
         return jsonify({'success':False,'error':type(exc).__name__}),200
+
+
+# C43: diagnóstico de guardado. No lee datos del usuario, no reintenta writes,
+# no modifica el status HTTP ni ejecuta análisis de mercado. Ayuda a
+# distinguir 400/409 internos de un 429 externo o de un reinicio por OOM.
+@app.after_request
+def _c43_saved_signal_error_telemetry(response):
+    try:
+        if request.path == '/api/saved_signals' and request.method == 'POST' and response.status_code >= 400:
+            rss = _process_rss_mb()
+            used, limit = _commit34_cgroup_mb()
+            print(f"[C43 SAVE-HTTP] status={response.status_code} rss_mb={rss} "
+                  f"cgroup_mb={round(used, 1) if used is not None else '-'} "
+                  f"limit_mb={round(limit, 1) if limit is not None else '-'}", flush=True)
+    except Exception:
+        pass
+    return response
 
 
 # COMMIT 35: HTTP bandwidth budget. Compression after route execution does NOT

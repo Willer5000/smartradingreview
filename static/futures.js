@@ -749,7 +749,9 @@ function futRenderAnalysisDiagnostics(json, context) {
         const prevScore = Number(prev?.diagnostic_quality ?? prev?.thesis_quality ?? prev?.confidence ?? -1);
         if (!prev || score > prevScore) byCell.set(key, {...raw, action});
     }
-    candidates = [...byCell.values()].sort((a,b) => Number(b.diagnostic_quality ?? b.confidence ?? 0) - Number(a.diagnostic_quality ?? a.confidence ?? 0));
+    candidates = (context === 'previous' || context === 'vigent')
+        ? window.strSortSignalPresentation([...byCell.values()])
+        : [...byCell.values()].sort((a,b) => Number(b.diagnostic_quality ?? b.confidence ?? 0) - Number(a.diagnostic_quality ?? a.confidence ?? 0));
     // R.4: this panel is actionable follow-up, not a dump of incomplete
     // diagnostics. Backend guarantees geometry; a stale/malformed row is hidden
     // until the next refresh instead of adding noise with no possible action.
@@ -962,7 +964,9 @@ window.updateActiveSignals = async function() {
 
         // RC9.8.2: estado de guardado PERSONAL. No altera la señal global.
         await window.refreshUserSavedSignalRefs(false);
-        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
+        const signals = window.strSortSignalPresentation(
+            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig))
+        );
 
         const progress = json.progress || {};
         const filterStats =
@@ -1606,7 +1610,9 @@ window.updatePreviousSignals = async function() {
 
         // RC9.8.2: ocultar sólo para el usuario que ya la guardó.
         await window.refreshUserSavedSignalRefs(false);
-        const signals = allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig));
+        const signals = window.strSortSignalPresentation(
+            allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig))
+        );
 
         const progress =
             json.progress || {};
@@ -3038,7 +3044,9 @@ window.loadFuturesOpportunities96 = async function() {
             throw new Error(`HTTP ${response.status}: ${String(body || '').slice(0, 180)}`);
         }
         const data = await response.json();
-        const rows = Array.isArray(data?.opportunities) ? data.opportunities : [];
+        const rows = window.strSortSignalPresentation(
+            Array.isArray(data?.opportunities) ? data.opportunities : []
+        );
         const total = Number.isFinite(Number(data?.count)) ? Number(data.count) : rows.length;
 
         // RC9.7.13 — Activas y su diagnóstico salen de la MISMA vela abierta.
