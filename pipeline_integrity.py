@@ -922,6 +922,22 @@ def reconcile_operational_candidate(
             "safety_is_downstream": True, "primary_geometry_is_downstream": True,
         }
 
+    # C46: additive LIVE candidate routing, after the complete original router.
+    # Existing candidates, Safety, Entry/SL/TP, publication and leverage do not
+    # change; this import incurs no new network/threads/background work.
+    if not op.get("candidate_ready") and op.get("candidate_action") == "NO_OPERAR":
+        try:
+            from c46_incremental_live import augment_candidate
+            op = augment_candidate(
+                op, layers=layers, symbol=symbol, timeframe=timeframe,
+                system_type=market, evidence_builder=_live_evidence,
+                select_strategy=_select_default_strategy,
+                official_cell=_official_cell,
+            )
+        except Exception as _c46_error:
+            # Fail closed without disturbing the original empty candidate.
+            op["c46_live_error"] = type(_c46_error).__name__
+
     op["candidate_router_contract"] = {
         "version": VERSION,
         "single_router": True,
