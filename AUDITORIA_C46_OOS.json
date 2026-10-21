@@ -1,0 +1,29 @@
+[
+  {
+    "grupo": "resultados_C46_INICIAL",
+    "variantes_preseleccionadas": 35,
+    "variantes_oos_positivas": 15,
+    "oos_n_30": 0,
+    "oos_n30_rentables": 0,
+    "max_operaciones_oos": 16,
+    "minimo_operaciones_oos_requeridas": 30
+  },
+  {
+    "grupo": "resultados_C46_LAB",
+    "variantes_preseleccionadas": 148,
+    "variantes_oos_positivas": 49,
+    "oos_n_30": 2,
+    "oos_n30_rentables": 0,
+    "max_operaciones_oos": 38,
+    "minimo_operaciones_oos_requeridas": 30
+  },
+  {
+    "grupo": "resultados_C46_COMBINACIONES",
+    "variantes_preseleccionadas": 156,
+    "variantes_oos_positivas": 60,
+    "oos_n_30": 1,
+    "oos_n30_rentables": 0,
+    "max_operaciones_oos": 36,
+    "minimo_operaciones_oos_requeridas": 30
+  }
+]

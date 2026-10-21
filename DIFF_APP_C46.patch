@@ -1,0 +1,66 @@
+--- app.py (FUNCIONAL)
++++ app.py (C46 LIVE)
+@@ -37150,6 +37150,33 @@
+             # market/asset-class-specific quality lens. No crypto rule is copied
+             # into Multi and unsupported fast routes remain Shadow.
+             result=_core_publication_authority(result, symbol, timeframe)
++            # C46 additive LIVE: only when native did NOT publish and cached candles
++            # match the same closed bar. Never downloads another series or changes
++            # the old signal, its committees, leverage, Guardian or display.
++            if (isinstance(result, dict) and not result.get('publication_eligible')
++                    and str(result.get('analysis_mode')) == 'CLOSED_CANDLE'
++                    and str(os.getenv('C46_LIVE_ENABLED', '1')).strip().lower()
++                    not in ('0','false','no','off')):
++                try:
++                    from c46_market_cache import closed_candles_from_native_cache
++                    from c46_live_reversal import maybe_promote_reversal
++                    _c46_rows=closed_candles_from_native_cache(
++                        symbol, timeframe, result.get('source_candle_timestamp'))
++                    # Existing accepted Multi-Activo signals keep their
++                    # original expiry/identity; C46 cannot supersede them.
++                    with _MULTI_ASSET_CACHE['lock']:
++                        _c46_previous=dict((_MULTI_ASSET_CACHE.get('analysis') or {}).get((str(symbol),str(timeframe))) or {})
++                    _c46_previous_valid=(
++                        bool(_c46_previous.get('publication_eligible')) and
++                        not _futures_signal_validity(_c46_previous,timeframe).get('expired')
++                    )
++                    if _c46_rows and not _c46_previous_valid:
++                        result=maybe_promote_reversal(
++                            result, _c46_rows, symbol=symbol, timeframe=timeframe,
++                            market='multiasset', engine=engine,
++                            final_authority=_core_publication_authority)
++                except Exception as _c46_exc:
++                    print(f'[C46] multiasset additive skipped: {type(_c46_exc).__name__}')
+             _runtime_levels_175104 = result.get('levels') or {}
+             if (
+                 isinstance(_runtime_levels_175104, dict)
+@@ -42417,6 +42444,29 @@
+                 r = _core_publication_authority(
+                     r, symbol, timeframe
+                 )
++
++            # C46 LIVE: new countertrend hypotheses only if native result not
++            # publishable. No changes to existing confirmed signal pipeline.
++            if (not r.get('publication_eligible') and isinstance(prepared, dict)
++                    and str(os.getenv('C46_LIVE_ENABLED', '1')).strip().lower()
++                    not in ('0','false','no','off')):
++                try:
++                    from c46_live_reversal import maybe_promote_reversal
++                    _c46_prev=previous_analysis.get((symbol,timeframe)) or {}
++                    _c46_prev_valid=(
++                        bool(_c46_prev.get('publication_eligible')) and
++                        not _futures_signal_validity(
++                            _c46_prev,timeframe,
++                            record=lifecycle.get((symbol,timeframe)) or {}
++                        ).get('expired')
++                    )
++                    if not _c46_prev_valid:
++                        r=maybe_promote_reversal(
++                            r,prepared.get('closed_df'),symbol=symbol,
++                            timeframe=timeframe,market='futures',engine=futures,
++                            final_authority=_core_publication_authority)
++                except Exception as _c46_exc:
++                    print(f'[C46] futures additive skipped {combo_name}: {type(_c46_exc).__name__}')
+ 
+             # Commit 30: detect early 1h directional displacement after all
+             # real layers exist. This only prioritizes existing validated 30m
