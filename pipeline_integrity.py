@@ -931,6 +931,22 @@ def reconcile_operational_candidate(
         "safety_is_downstream": True,
         "entry_sl_tp_are_downstream": True,
     }
+    # C46 additive: never replace a canonical candidate or downgrade a gate.
+    # This only submits a corroborated hypothesis to the ORIGINAL nine
+    # specialists and subsequent execution/publication authority.
+    if market == "FUTURES" and not op.get("candidate_ready"):
+        try:
+            from c46_structural_live import try_add_candidate
+            op = try_add_candidate(
+                op, layers, symbol=symbol, timeframe=timeframe,
+                system_type=system_type, is_multiasset=_is_multiasset,
+                evidence_builder=_live_evidence,
+                select_strategy=_select_default_strategy,
+                official_cell=_official_cell,
+            )
+        except Exception as _c46_error:
+            # Strictly fail open to the unchanged original result.
+            op.setdefault("c46_diagnostic", type(_c46_error).__name__)
     return op
 
 

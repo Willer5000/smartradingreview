@@ -14,10 +14,15 @@
     const raw = String(row?.timeframe ?? row?.tf ?? row?.interval ?? '').trim().toLowerCase();
     return TIMEFRAME_MINUTES[raw] ?? Number.POSITIVE_INFINITY;
   }
-  function cellKey(row) {
+  function cellKey(row, includeDirection = false) {
     const symbol = String(row?.symbol || row?.ticker || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
     const tf = String(row?.timeframe || row?.tf || row?.interval || '').trim().toLowerCase();
-    return symbol && tf ? `${symbol}|${tf}` : null;
+    if (!symbol || !tf) return null;
+    if (!includeDirection) return `${symbol}|${tf}`;
+    const action = String(row?.diagnostic_action || row?.action || row?.decision?.action || row?.decision || '').trim().toUpperCase();
+    // Only distinguish genuine LONG/SHORT derivative directions. Do not
+    // fabricate a side for incomplete rows or change the Spot dedupe key.
+    return ['LONG','SHORT'].includes(action) ? `${symbol}|${tf}|${action}` : `${symbol}|${tf}`;
   }
   function epochMillis(raw) {
     if (raw === null || raw === undefined || raw === '') return null;
@@ -99,12 +104,12 @@
     if (qualityDiff !== 0) return qualityDiff > 0;
     return false; // Empate: primera recibida; no altera la fuente.
   }
-  function uniqueSignalPresentation(rows) {
+  function uniqueSignalPresentation(rows, options = {}) {
     if (!Array.isArray(rows)) return [];
     const selected = new Map();
     const unidentified = [];
     rows.forEach((row, index) => {
-      const key = cellKey(row);
+      const key = cellKey(row, !!options.direction);
       if (!key) { unidentified.push({row, index}); return; }
       const prev = selected.get(key);
       if (!prev || preferRepresentative(row, prev.row)) selected.set(key, {row, index});
@@ -113,7 +118,7 @@
   }
   function sortSignalPresentation(rows, now = Date.now(), options = {}) {
     if (!Array.isArray(rows)) return [];
-    const input = options.dedupe ? uniqueSignalPresentation(rows) : rows;
+    const input = options.dedupe ? uniqueSignalPresentation(rows, options) : rows;
     const scored = input.map((row, original) => ({
       row, original, tf: timeframeMinutes(row), remaining: remainingSeconds(row, now),
       risk: options.risk ? riskRank(row) : null
@@ -146,7 +151,7 @@
     }
     const byCell = new Map();
     for (const item of nodes) {
-      const key = cellKey(item.row);
+      const key = cellKey(item.row, true);
       if (!key) continue;
       const old = byCell.get(key);
       if (!old || preferRepresentative(item.row, old.row) ||
@@ -155,7 +160,7 @@
       }
     }
     for (const item of nodes) {
-      const key = cellKey(item.row);
+      const key = cellKey(item.row, true);
       if (key && byCell.get(key) !== item) item.el.style.display = 'none';
     }
     for (const [panel, lane, badgeID] of [

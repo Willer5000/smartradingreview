@@ -743,7 +743,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         if (!raw || typeof raw !== 'object' || _isSignalSavedByCurrentUser(raw)) continue;
         const action = String(raw.diagnostic_action || raw.action || '').toUpperCase();
         if (!['LONG','SHORT'].includes(action) || raw.is_executable === true || String(raw.classification || 'ANALYSIS_ONLY').toUpperCase() === 'EXECUTABLE_SIGNAL') continue;
-        const key = window.strSignalCellKey(raw) || `${raw.symbol || ''}|${raw.timeframe || ''}`;
+        const key = window.strSignalCellKey({...raw, action}, true) || `${raw.symbol || ''}|${raw.timeframe || ''}`;
         const score = Number(raw.diagnostic_quality ?? raw.thesis_quality ?? raw.confidence ?? 0);
         const prev = byCell.get(key);
         const prevScore = Number(prev?.diagnostic_quality ?? prev?.thesis_quality ?? prev?.confidence ?? -1);
@@ -967,7 +967,7 @@ window.updateActiveSignals = async function() {
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
             allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
-            Date.now(), {risk:true, dedupe:true}
+            Date.now(), {risk:true, dedupe:true, direction:true}
         );
 
         const progress = json.progress || {};
@@ -1620,7 +1620,7 @@ window.updatePreviousSignals = async function() {
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
             allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
-            Date.now(), {risk:true, dedupe:true}
+            Date.now(), {risk:true, dedupe:true, direction:true}
         );
 
         const progress =
@@ -3060,7 +3060,7 @@ window.loadFuturesOpportunities96 = async function() {
         const data = await response.json();
         const rows = window.strSortSignalPresentation(
             Array.isArray(data?.opportunities) ? data.opportunities : [],
-            Date.now(), {risk:true, dedupe:true}
+            Date.now(), {risk:true, dedupe:true, direction:true}
         );
         const total = rows.length; // número visible tras elección por celda
 

@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const view = require('../static/signal_presentation_order_c43.js');
+const a = {symbol:'BTC-USDT',timeframe:'30m',action:'LONG',confidence:82,source_candle_timestamp:'2026-10-21T10:00:00Z',tiempo_restante:7200};
+const b = {symbol:'BTC-USDT',timeframe:'30m',action:'SHORT',confidence:88,source_candle_timestamp:'2026-10-21T10:00:00Z',tiempo_restante:3600};
+const c = {...a,confidence:90,source_candle_timestamp:'2026-10-21T11:00:00Z'};
+assert.equal(view.cellKey(a),view.cellKey(b),'Old Spot same-cell key preserved');
+assert.notEqual(view.cellKey(a,true),view.cellKey(b,true),'Opposite Futures sides separate');
+assert.equal(view.uniqueSignalPresentation([a,b,c],{direction:true}).length,2,'Both sides survive; duplicate LONG removed');
+assert.deepEqual(view.uniqueSignalPresentation([a,b,c],{direction:true}).find(x=>x.action==='LONG'),c,'Latest LONG selected');
+assert.equal(view.uniqueSignalPresentation([a,b,c]).length,1,'Spot legacy cell-based dedupe intact');
+const filtered=view.sortSignalPresentation([b,a,c],Date.now(),{risk:true,dedupe:true,direction:true});
+assert.equal(filtered.length,2);
+console.log('PASS: same symbol/timeframe opposite directions coexist, same direction dedupes, Spot unchanged');
