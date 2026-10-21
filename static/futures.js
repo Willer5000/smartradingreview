@@ -743,7 +743,7 @@ function futRenderAnalysisDiagnostics(json, context) {
         if (!raw || typeof raw !== 'object' || _isSignalSavedByCurrentUser(raw)) continue;
         const action = String(raw.diagnostic_action || raw.action || '').toUpperCase();
         if (!['LONG','SHORT'].includes(action) || raw.is_executable === true || String(raw.classification || 'ANALYSIS_ONLY').toUpperCase() === 'EXECUTABLE_SIGNAL') continue;
-        const key = window.strSignalCellKey({...raw, action}, true) || `${raw.symbol || ''}|${raw.timeframe || ''}`;
+        const key = window.strSignalCellKey(raw) || `${raw.symbol || ''}|${raw.timeframe || ''}`;
         const score = Number(raw.diagnostic_quality ?? raw.thesis_quality ?? raw.confidence ?? 0);
         const prev = byCell.get(key);
         const prevScore = Number(prev?.diagnostic_quality ?? prev?.thesis_quality ?? prev?.confidence ?? -1);
@@ -810,7 +810,7 @@ function futRenderAnalysisDiagnostics(json, context) {
             ? `<div class="small mt-1"><span class="text-info">Entry ${e.toPrecision(7)}</span> · <span class="text-danger">SL ${sl.toPrecision(7)}</span> · <span class="text-success">TP ${tp.toPrecision(7)}</span>${Number(c.risk_reward) > 0 ? ` · R/R 1:${Number(c.risk_reward).toFixed(2)}` : ''}</div>`
             : `<div class="small text-warning mt-1">Hipótesis incompleta omitida para seguimiento: actualiza el análisis.</div>`;
 
-        return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}</div>${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
+        return `<div class="border-top border-secondary py-2" style="cursor:pointer;" onclick="window.changeToSignal?.('${String(c.symbol || '').replace(/'/g,"\\'")}', '${String(c.timeframe || '').replace(/'/g,"\\'")}')"><div><span class="badge bg-${cls}">${action}</span> <strong>${symbol}</strong> <span class="badge bg-dark">${tf}</span> ${metric ? `<span class="badge bg-secondary">${metric}</span>` : ''} ${riskClass ? `<span class="badge ${riskClass === 'MEDIUM' ? 'bg-warning text-dark' : 'bg-danger'}">${riskClass === 'MEDIUM' ? 'RIESGO MEDIO' : 'RIESGO ALTO'}</span>` : ''}</div><div class="small text-light mt-1">${reason}</div>${_futC461StrategyLine(c)}${levelsHtml}<div class="small text-muted">ANÁLISIS, NO SEÑAL${stage}</div>${context === 'vigent' && Number(c.tiempo_restante) > 0 ? `<div class="small text-warning mt-1">⏳ Vigencia restante: <strong>${_formatPreviousSignalValidity(Number(c.tiempo_restante || 0))}</strong></div>` : ''}${saveHtml}</div>`;
     }).join('');
 
     // R3 inherited contract phrase retained for QA traceability:
@@ -967,7 +967,7 @@ window.updateActiveSignals = async function() {
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
             allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
-            Date.now(), {risk:true, dedupe:true, direction:true}
+            Date.now(), {risk:true, dedupe:true}
         );
 
         const progress = json.progress || {};
@@ -1305,6 +1305,8 @@ window.updateActiveSignals = async function() {
 
                     ${validityHtml}
 
+                    ${_futC461StrategyLine(sig)}
+
                     ${saveButtons}
 
                     ${futRenderDecisionAudit(sig.decision_audit)}
@@ -1620,7 +1622,7 @@ window.updatePreviousSignals = async function() {
         await window.refreshUserSavedSignalRefs(false);
         const signals = window.strSortSignalPresentation(
             allSignals.filter(sig => !_isSignalSavedByCurrentUser(sig)),
-            Date.now(), {risk:true, dedupe:true, direction:true}
+            Date.now(), {risk:true, dedupe:true}
         );
 
         const progress =
@@ -1954,6 +1956,8 @@ window.updatePreviousSignals = async function() {
                         </div>
 
                     </div>
+
+                    ${_futC461StrategyLine(sig)}
 
                     ${saveButtons}
 
@@ -3060,7 +3064,7 @@ window.loadFuturesOpportunities96 = async function() {
         const data = await response.json();
         const rows = window.strSortSignalPresentation(
             Array.isArray(data?.opportunities) ? data.opportunities : [],
-            Date.now(), {risk:true, dedupe:true, direction:true}
+            Date.now(), {risk:true, dedupe:true}
         );
         const total = rows.length; // número visible tras elección por celda
 
@@ -3134,6 +3138,7 @@ window.loadFuturesOpportunities96 = async function() {
                     <div class="small text-muted mt-2">
                         Calidad ${quality.toFixed(0)}/100 · Seguridad ${safety.toFixed(0)} · R/R 1:${rr.toFixed(2)}
                     </div>
+                    ${_futC461StrategyLine(r)}
                     <div class="small text-info mt-1">
                         Abrir par/temporalidad → gráficos → indicadores → recomendación técnica
                     </div>
@@ -4065,6 +4070,7 @@ async function(detailsEl) {
                         </div>
 
                         ${summary}
+                        ${_futC461StrategyLine(s)}
                         ${withChart ? '<div class="small text-info mt-1">📈 Ver gráfico y ficha técnica</div>' : '<div class="small text-secondary mt-1">Resumen histórico · sin gráfico</div>'}
                         ${expiryMessage}
 
@@ -5083,6 +5089,7 @@ window.updateSavedSignalsList = async function() {
                             ${pnlDisplay}
                         </div>
                     </div>
+                    ${_futC461StrategyLine(s)}
                     ${guardianHtml}
                 </a>
             `;
@@ -5122,6 +5129,68 @@ function _formatPnl(s) {
     return `<div class="small ${cls}"><strong>${sign}${usdt.toFixed(2)} USDT</strong> (${sign}${pct.toFixed(2)}%)</div>`;
 }
 
+
+// ============================================================================
+// C46.1 — atribución de estrategia, SÓLO VISTA Futures / Multi-Activo.
+// Lee exclusivamente metadatos de la señal recibida. No infiere una estrategia
+// de votos, del contexto, del sentido LONG/SHORT ni del resultado de precio.
+// Si el servidor antiguo no ha guardado la familia, lo declara abiertamente.
+// Sin fetch, sin timers y sin transformaciones sobre objetos de señales.
+// ============================================================================
+function _futC461StrategyLine(signal) {
+    const row = signal && typeof signal === 'object' ? signal : {};
+    const lev = row.levels && typeof row.levels === 'object' ? row.levels : {};
+    const op = row.operational_intelligence && typeof row.operational_intelligence === 'object'
+        ? row.operational_intelligence : {};
+    const named = row.strategy && typeof row.strategy === 'object' ? row.strategy : {};
+    const defaults = op.default_strategy && typeof op.default_strategy === 'object'
+        ? op.default_strategy : {};
+    const strings = (values) => values.find((v) => typeof v === 'string'
+        && v.trim() && !['NONE','UNSPECIFIED','UNKNOWN','N/A','NULL','NO_PLAYBOOK','NO_STRATEGY'].includes(v.trim().toUpperCase())) || '';
+
+    const family = strings([
+        row.strategy_family, lev.strategy_family, named.family,
+        defaults.family,
+        row.execution_strategy_family,
+    ]);
+    const setup = strings([row.setup_family, lev.setup_family, op.core_setup_family]);
+    // Multi-Activo puede informar una familia sólo de CONTEXTO; nunca se
+    // presenta como estrategia de ejecución ni como evidencia Premium.
+    const contextual = strings([row.context_strategy_family]);
+    const labels = {
+        BREAKOUT_RETEST: 'Ruptura y retesteo',
+        STRUCTURE_RETEST: 'Retesteo de estructura',
+        TREND_PULLBACK: 'Retroceso de tendencia',
+        TREND_CONTINUATION: 'Continuación de tendencia',
+        SWEEP_REVERSAL: 'Reversión tras barrido de liquidez',
+        SWEEP_MSS_POI: 'Barrido + cambio de estructura',
+        MEAN_REVERSION: 'Reversión a la media',
+        MEAN_REVERSION_SELECTIVE: 'Reversión selectiva a zona de valor',
+        TREND_BREAK: 'Ruptura de tendencia',
+        ROTATION: 'Rotación',
+        VWAP_SESSION_PULLBACK: 'Retroceso hacia VWAP',
+        COMPRESSION_EXPANSION: 'Compresión y expansión',
+        FAILED_AUCTION: 'Subasta fallida',
+        OPENING_RANGE_VWAP: 'Rango de apertura + VWAP',
+        FVG_RECLAIM: 'Recuperación de FVG',
+        ORDER_BLOCK_RECLAIM: 'Recuperación de bloque de órdenes',
+        HIDDEN_DIVERGENCE_TREND: 'Divergencia oculta de tendencia',
+        MOMENTUM_BREAKOUT: 'Ruptura con impulso',
+        RSI_TREND: 'Tendencia RSI',
+        VWAP_RECLAIM: 'Recuperación de VWAP',
+        POC_RECLAIM: 'Recuperación del POC',
+    };
+    let prefix = 'Estrategia';
+    let raw = family;
+    if (!raw && setup) { prefix = 'Setup técnico'; raw = setup; }
+    if (!raw && contextual) { prefix = 'Familia de contexto'; raw = contextual; }
+    const key = String(raw || '').trim().toUpperCase();
+    const label = raw
+        ? (labels[key] || String(raw).replace(/[_-]+/g, ' ').replace(/\s+/g, ' ').trim())
+        : 'No informada en esta señal';
+    // Una línea discreta y acotada. Ningún HTML externo se inserta sin escape.
+    return `<div class="small text-secondary mt-1 text-truncate" title="${futEscapeHtml(prefix + ': ' + label.slice(0, 100))}"><span class="text-muted">${prefix}:</span> ${futEscapeHtml(label.slice(0, 100))}</div>`;
+}
 
 // ============================================================================
 // RC9.7.16 — FICHA DE SEÑAL ORIENTADA AL USUARIO

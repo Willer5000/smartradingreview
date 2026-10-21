@@ -36516,6 +36516,11 @@ def _multiasset_signal_row(result, source_context='PREVIOUS_CONFIRMED'):
         'multiasset_macro': result.get('multiasset_macro'),
         'multiasset_specialist': result.get('multiasset_specialist'),
         'multiasset_strategy_bank': result.get('multiasset_strategy_bank'),
+        # C46.1 display attribution: READ-ONLY metadata (not an execution gate).
+        'strategy_family': (levels.get('strategy_family') or result.get('strategy_family')
+                            or ((result.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family')),
+        'setup_family': levels.get('setup_family'),
+        'context_strategy_family': ((result.get('multiasset_strategy_route') or {}).get('selected_family')),
     }
 
 # ============================================================================
@@ -37864,7 +37869,10 @@ def _multiasset_directional_diagnostics_17511(analyses):
                 reason=(reason.rstrip('. ') + '. ' + _detail)[:720]
         state=_multiasset_signal_temporal_state(result)
         manual_profile = _futures_manual_risk_profile(result)
-        rows.append({'signal_id':str(result.get('signal_id') or ''),'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':bool(manual_profile.get('allowed')),'manual_risk_class':manual_profile.get('risk_class'),'manual_risk_reason':manual_profile.get('reason'),'manual_requires_ack':bool(manual_profile.get('requires_ack')),'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'leverage':levels.get('leverage'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'execution_safety_minimum':manual_profile.get('execution_safety_minimum'),'source_candle_timestamp':result.get('source_candle_timestamp'),'source_candle_close_timestamp':result.get('source_candle_close_timestamp'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh')})
+        rows.append({'signal_id':str(result.get('signal_id') or ''),'symbol':symbol,'timeframe':tf,'display_name':result.get('display_name'),'asset_class':result.get('asset_class'),'market':'multiasset','action':action,'diagnostic_action':action,'final_action':str(decision.get('action') or '').upper(),'classification':'ANALYSIS_ONLY','status_label':'ANÁLISIS DIRECCIONAL · NO EJECUTABLE','diagnostic_only':True,'is_executable':False,'manual_save_allowed':bool(manual_profile.get('allowed')),'manual_risk_class':manual_profile.get('risk_class'),'manual_risk_reason':manual_profile.get('reason'),'manual_requires_ack':bool(manual_profile.get('requires_ack')),'diagnostic_direction_source':source,'diagnostic_stage':str((funnel or {}).get('stage') or ''),'reason':reason,'confidence':float(decision.get('confidence') or 0),'diagnostic_quality':(thesis or {}).get('quality'),'entry':levels.get('entry'),'stop_loss':levels.get('stop_loss'),'take_profit':levels.get('take_profit'),'leverage':levels.get('leverage'),'risk_reward':levels.get('risk_reward'),'execution_safety':levels.get('execution_safety'),'execution_safety_minimum':manual_profile.get('execution_safety_minimum'),'source_candle_timestamp':result.get('source_candle_timestamp'),'source_candle_close_timestamp':result.get('source_candle_close_timestamp'),'valid_until':state.get('valid_until'),'tiempo_restante':state.get('remaining_seconds'),'temporal_valid':state.get('valid'),'temporal_fresh':state.get('fresh'),
+                     'strategy_family':(levels.get('strategy_family') or result.get('strategy_family') or (op.get('default_strategy') or {}).get('family')),
+                     'setup_family':levels.get('setup_family'),
+                     'context_strategy_family':((result.get('multiasset_strategy_route') or {}).get('selected_family'))})
     rows.sort(key=lambda r:(-float(r.get('diagnostic_quality') or r.get('confidence') or 0),r['symbol'],r['timeframe']))
     return rows[:24]
 
@@ -39631,6 +39639,10 @@ def _store_futures_intrabar_preview(symbol, timeframe, result, runtime_result=No
                 'action': action,
                 'confidence': confidence,
                 'quality_score': _futures_opportunity_quality(result),
+                # C46.1: two tiny existing strings, no reanalysis or new cache.
+                'strategy_family': (levels.get('strategy_family') or result.get('strategy_family')
+                                    or (((result.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family'))),
+                'setup_family': levels.get('setup_family'),
                 'execution_safety': levels.get('execution_safety'),
                 'entry_quality': levels.get('entry_score') or levels.get('entry_quality_score'),
                 'risk_reward': levels.get('risk_reward'),
@@ -44061,6 +44073,10 @@ def _classify_futures_analysis_result(
         'action': action,
         'diagnostic_action': action if classification == 'ANALYSIS_ONLY' else None,
         'final_action': final_action,
+        # C46.1: attribution to frontend only; classification/gates untouched.
+        'strategy_family': (levels.get('strategy_family') or result.get('strategy_family')
+                            or ((result.get('operational_intelligence') or {}).get('default_strategy') or {}).get('family')),
+        'setup_family': levels.get('setup_family'),
         'confidence': round(confidence, 2),
         'directional': directional,
         'is_executable': classification == 'EXECUTABLE_SIGNAL',
