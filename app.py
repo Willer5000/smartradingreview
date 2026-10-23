@@ -30533,20 +30533,20 @@ def api_analyze():
                     'error': 'Snapshot aún no disponible; el panel esperará el próximo análisis principal.'
                 }), 202
         else:
-            result, result_source = _run_spot_intrabar_preview(
-                symbol,
-                interval,
-                f'spot-ui:intrabar:{symbol}:{interval}',
-            )
+            # C46.2: public Spot consultation never performs a FULL nine-trader
+            # intrabar analysis synchronously inside a Gunicorn request. It can
+            # reuse the authentic preview or request ONE optional background
+            # refresh; official closed-candle processing remains unchanged.
+            result = _spot_intrabar_preview_cached(symbol, interval)
             if result is None:
+                job_state = _schedule_spot_intrabar_preview_async(symbol, interval)
                 return jsonify({
-                    'success': False,
-                    'busy': True,
-                    'deferred': True,
-                    'retry_after_ms': 1800,
-                    'error': 'La señal activa intrabar está esperando el turno de análisis.'
+                    'success': False, 'busy': True, 'deferred': True,
+                    'job_state': job_state,
+                    'retry_after_ms': 20000,
+                    'error': 'Preparando la vista Spot sin bloquear el servidor.'
                 }), 202
-            print(f"♻️ [RC9.7.12] Spot intrabar {symbol} {interval}: {result_source}", flush=True)
+            print(f"♻️ [C46.2] Spot intrabar {symbol} {interval}: INTRABAR_CACHE", flush=True)
         
         # Verificar resultado
         if result is None:
@@ -32240,7 +32240,7 @@ def _run_spot_analysis_singleflight(symbol, timeframe, owner, wait_seconds=18.0)
 # para confirmar una señal.
 _SPOT_INTRABAR_PREVIEW_CACHE = {}
 _SPOT_INTRABAR_PREVIEW_CACHE_LOCK = threading.Lock()
-_SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 4
+_SPOT_INTRABAR_PREVIEW_MAX_ITEMS = 2 if _LOW_MEMORY_MODE else 4
 # C37: panel exploratorio; no es authority de vela cerrada.
 _SPOT_INTRABAR_PREVIEW_TTLS = {
     '4h': 12 * 60,
@@ -32254,6 +32254,9 @@ _SPOT_INTRABAR_PREVIEW_TTLS = {
 # UN preview seleccionado y nunca ejecuta trabajo pesado dentro del request.
 _SPOT_INTRABAR_ASYNC_LOCK = threading.Lock()
 _SPOT_INTRABAR_ASYNC_RUNNING = set()
+# C46.2: on 512 MB keep at most one OPTIONAL Spot preview pending globally.
+# The official closed-candle scheduler uses its own authority and is unchanged.
+_SPOT_INTRABAR_ASYNC_MAX_PENDING = 1 if _LOW_MEMORY_MODE else 2
 
 
 def _spot_intrabar_preview_cached(symbol, timeframe):
@@ -32292,7 +32295,9 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
     if cached is not None:
         return cached, 'INTRABAR_CACHE'
 
-    acquired = _acquire_heavy_analysis(str(owner), timeout=8)
+    # Provisional preview must NEVER wait behind an official candle close:
+    # one thread per awaiting preview used to accumulate under switching.
+    acquired = _acquire_heavy_analysis(str(owner), timeout=0)
     if not acquired:
         return None, 'BUSY'
 
@@ -32336,7 +32341,7 @@ def _run_spot_intrabar_preview(symbol, timeframe, owner):
         return result, 'INTRABAR_COMPUTED'
     finally:
         _release_heavy_analysis(str(owner))
-        _mark_system_interactive_priority(seconds=8)
+        # Optional previews do not reserve priority over official analyses.
 
 
 
@@ -32359,10 +32364,23 @@ def _schedule_spot_intrabar_preview_async(symbol, timeframe):
     if _spot_intrabar_preview_cached(symbol, timeframe) is not None:
         return 'CACHE_READY'
 
+    # Only *optional* provisional previews defer at low headroom. Official
+    # Spot/Futures/Multi candle closes, their alerts and Guardian are untouched.
+    if _LOW_MEMORY_MODE:
+        rss = _process_rss_mb()
+        used, limit = _commit34_cgroup_mb()
+        if (rss is not None and rss >= 220.0) or (
+            used is not None and limit is not None
+            and limit - used < 180.0
+        ):
+            return 'DEFERRED_MEMORY'
+
     key = (symbol, timeframe)
     with _SPOT_INTRABAR_ASYNC_LOCK:
         if key in _SPOT_INTRABAR_ASYNC_RUNNING:
             return 'RUNNING'
+        if len(_SPOT_INTRABAR_ASYNC_RUNNING) >= _SPOT_INTRABAR_ASYNC_MAX_PENDING:
+            return 'DEFERRED_BUSY'
 
     # Active previews are third priority.  Never create a waiting queue while
     # another heavy job is already using the single free-tier slot.
@@ -32373,11 +32391,13 @@ def _schedule_spot_intrabar_preview_async(symbol, timeframe):
     with _SPOT_INTRABAR_ASYNC_LOCK:
         if key in _SPOT_INTRABAR_ASYNC_RUNNING:
             return 'RUNNING'
+        # Atomic recheck: several HTTP threads can reach this point together.
+        if len(_SPOT_INTRABAR_ASYNC_RUNNING) >= _SPOT_INTRABAR_ASYNC_MAX_PENDING:
+            return 'DEFERRED_BUSY'
         _SPOT_INTRABAR_ASYNC_RUNNING.add(key)
 
     def _worker():
         try:
-            _mark_system_interactive_priority(seconds=12)
             result, source = _run_spot_intrabar_preview(
                 symbol,
                 timeframe,
@@ -32397,11 +32417,18 @@ def _schedule_spot_intrabar_preview_async(symbol, timeframe):
             with _SPOT_INTRABAR_ASYNC_LOCK:
                 _SPOT_INTRABAR_ASYNC_RUNNING.discard(key)
 
-    threading.Thread(
-        target=_worker,
-        daemon=True,
-        name=f'spot-active-{symbol}-{timeframe}',
-    ).start()
+    try:
+        threading.Thread(
+            target=_worker,
+            daemon=True,
+            name=f'spot-active-{symbol}-{timeframe}',
+        ).start()
+    except Exception as exc:
+        # A failed thread spawn must never leave a cell marked RUNNING.
+        with _SPOT_INTRABAR_ASYNC_LOCK:
+            _SPOT_INTRABAR_ASYNC_RUNNING.discard(key)
+        print(f'⚠️ [C46.2 SPOT] no se pudo iniciar preview opcional: {exc}', flush=True)
+        return 'DEFERRED_BUSY'
     return 'SCHEDULED'
 
 
@@ -33899,7 +33926,7 @@ def api_spot_signals_active():
             requested_symbol
             and requested_tf
             and not preview_ready
-            and job_state in ('SCHEDULED', 'RUNNING', 'DEFERRED_BUSY')
+            and job_state in ('SCHEDULED', 'RUNNING', 'DEFERRED_BUSY', 'DEFERRED_MEMORY')
         )
         if requested_symbol and requested_tf and not preview_ready:
             preview_ready = (
@@ -61226,11 +61253,12 @@ def api_analyze_with_portfolio():
         # La recomendación visible y el carril Activas usan una copia aislada
         # que incorpora la vela en formación y puede cambiar antes del cierre.
         guardian_result = result
-        preview_result, preview_source = _run_spot_intrabar_preview(
-            symbol,
-            timeframe,
-            f'spot-ui:tgp-intrabar:{symbol}:{timeframe}',
-        )
+        # C46.2: never execute a SECOND heavy nine-specialist run in the same
+        # Spot+Portfolio HTTP request. That previously held BOTH rich analysis
+        # results in memory while TGP built a third response (peak OOM risk).
+        # Activas has its own bounded, optional asynchronous preview lane.
+        preview_result = _spot_intrabar_preview_cached(symbol, timeframe)
+        preview_source = 'INTRABAR_CACHE' if preview_result is not None else 'CLOSED_CANDLE_DISPLAY_ONLY'
         if preview_result is None:
             # Intrabar preview is OPTIONAL for the main Spot/Guardian UI. It
             # must not suppress an otherwise valid CLOSED-CANDLE analysis.
